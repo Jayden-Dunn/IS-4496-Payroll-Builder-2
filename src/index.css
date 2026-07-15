@@ -1,0 +1,43 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-brand: #1ba41b;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-neutral-100 text-neutral-900 antialiased;
+    font-size: 13px;
+  }
+}
+
+@layer components {
+  /* Excel-like grid cells: visible gridlines, compact rows. */
+  .xcell {
+    @apply border border-neutral-300 px-1.5 py-0.5 align-top;
+  }
+  .xhead {
+    @apply border border-green-800 bg-brand px-1.5 py-1 text-left font-semibold text-white;
+  }
+  .btn {
+    @apply rounded border border-neutral-300 bg-white px-3 py-1.5 text-sm font-medium shadow-sm transition-colors hover:bg-neutral-50 disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  .btn-primary {
+    @apply rounded bg-brand px-3 py-1.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  .cell-input {
+    @apply w-full rounded-xs border border-transparent bg-transparent px-0.5 outline-none hover:border-neutral-400 focus:border-blue-500 focus:bg-white;
+  }
+}
+
+/* Highlight used when jumping to a row from the Exceptions panel. */
+.flash-row {
+  outline: 3px solid #f59e0b;
+  outline-offset: -2px;
+  transition: outline-color 0.3s ease;
+}
