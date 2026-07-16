@@ -57,6 +57,18 @@ export function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
+/**
+ * Perceived-luminance check for a 6-digit hex fill (no '#'). Dark fills
+ * (e.g. ND's 4472C4) get white text; light fills get black — computed, so any
+ * palette edit in Settings keeps readable text automatically.
+ */
+export function isDarkColor(hex6: string): boolean {
+  const r = parseInt(hex6.slice(0, 2), 16);
+  const g = parseInt(hex6.slice(2, 4), 16);
+  const b = parseInt(hex6.slice(4, 6), 16);
+  return 0.299 * r + 0.587 * g + 0.114 * b < 140;
+}
+
 /** Strip the time-of-day portion (local). */
 export function dateOnly(d: Date): Date {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate());

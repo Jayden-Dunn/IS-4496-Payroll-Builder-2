@@ -1,19 +1,32 @@
-import { fmtHoursFixed } from '../lib/format';
+import type { CSSProperties } from 'react';
+import { fmtHoursFixed, isDarkColor } from '../lib/format';
 import type { PivotModel } from '../lib/types';
 
 interface PivotTableProps {
   pivot: PivotModel;
+  colorByEstimator: ReadonlyMap<string, string>;
 }
 
+const BLACK_BAND: CSSProperties = { backgroundColor: '#000', color: '#fff' };
+const HEADER_GRAY: CSSProperties = { backgroundColor: '#808080', color: '#000' };
+const GRAND_GRAY: CSSProperties = { backgroundColor: '#808080', color: '#fff' };
+const GT_BAND: CSSProperties = { backgroundColor: '#D9D9D9' };
 const OVERTIME_BG = '#FFFF99';
 
-export function PivotTable({ pivot }: PivotTableProps): JSX.Element {
+function bandStyle(hex: string | undefined): CSSProperties | undefined {
+  if (!hex) return undefined;
+  return { backgroundColor: `#${hex}`, color: isDarkColor(hex) ? '#fff' : '#000' };
+}
+
+export function PivotTable({ pivot, colorByEstimator }: PivotTableProps): JSX.Element {
   const estCols = pivot.estimators;
   const totalCols = 4 + estCols.length + 1;
+  // "Hours" sits over the middle of the estimator block (no merge).
+  const hoursIdx = Math.floor((estCols.length - 1) / 2);
 
-  const hoursCells = (byEstimator: Record<string, number>, bold: boolean): JSX.Element[] =>
+  const hoursCells = (byEstimator: Record<string, number>): JSX.Element[] =>
     estCols.map((e) => (
-      <td key={e} className={`xcell text-right ${bold ? 'font-semibold' : ''}`}>
+      <td key={e} className="xcell text-right" style={bandStyle(colorByEstimator.get(e))}>
         {byEstimator[e] !== undefined ? fmtHoursFixed(byEstimator[e]) : ''}
       </td>
     ));
@@ -21,53 +34,93 @@ export function PivotTable({ pivot }: PivotTableProps): JSX.Element {
   return (
     <table className="w-max min-w-full border-collapse bg-white text-xs">
       <thead>
-        {/* Four-row header block mirroring the exported sheet. */}
+        {/* Black title block (rows 1–3), mirroring the exported sheet. */}
         <tr>
-          <th className="phead text-left text-sm" colSpan={totalCols}>
+          <th className="xcell2 text-left text-base font-bold" style={BLACK_BAND} colSpan={totalCols}>
             {pivot.title}
           </th>
         </tr>
         <tr>
-          <th className="phead" />
-          <th className="phead" />
-          <th className="phead text-left">Name</th>
-          <th className="phead text-left">Job</th>
-          <th className="phead text-center" colSpan={estCols.length + 1}>
-            Hours
+          <th className="xcell2" style={BLACK_BAND} />
+          <th className="xcell2" style={BLACK_BAND} />
+          <th className="xcell2 text-left font-bold" style={BLACK_BAND}>
+            Name
           </th>
+          <th className="xcell2 text-left font-bold" style={BLACK_BAND}>
+            Job
+          </th>
+          {estCols.map((e, i) => (
+            <th key={e} className="xcell2 text-center font-bold" style={BLACK_BAND}>
+              {i === hoursIdx ? 'Hours' : ''}
+            </th>
+          ))}
+          <th className="xcell2" style={BLACK_BAND} />
         </tr>
         <tr>
-          <th className="phead text-left">Sum of hours</th>
-          <th className="phead" />
-          <th className="phead" />
-          <th className="phead" />
-          <th className="phead text-left" colSpan={estCols.length + 1}>
+          <th className="xcell2 text-left" style={BLACK_BAND}>
+            Sum of hours
+          </th>
+          <th className="xcell2" style={BLACK_BAND} />
+          <th className="xcell2" style={BLACK_BAND} />
+          <th className="xcell2" style={BLACK_BAND} />
+          <th className="xcell2 text-left" style={BLACK_BAND} colSpan={estCols.length + 1}>
             Column Labels
           </th>
         </tr>
+        {/* Row 4: gray labels + palette-colored estimator headers. */}
         <tr>
-          <th className="phead sticky top-0 z-10 min-w-[220px] text-left">Row Labels</th>
-          <th className="phead sticky top-0 z-10 min-w-[90px] text-left">fname</th>
-          <th className="phead sticky top-0 z-10 min-w-[160px] text-left">lname</th>
-          <th className="phead sticky top-0 z-10 min-w-[260px] text-left">jobcode_2</th>
+          <th className="xcell2 sticky top-0 z-10 min-w-[220px] text-left" style={HEADER_GRAY}>
+            Row Labels
+          </th>
+          <th className="xcell2 sticky top-0 z-10 min-w-[90px] text-left" style={HEADER_GRAY}>
+            fname
+          </th>
+          <th className="xcell2 sticky top-0 z-10 min-w-[160px] text-left" style={HEADER_GRAY}>
+            lname
+          </th>
+          <th className="xcell2 sticky top-0 z-10 min-w-[260px] text-left" style={HEADER_GRAY}>
+            jobcode_2
+          </th>
           {estCols.map((e) => (
-            <th key={e} className="phead sticky top-0 z-10 min-w-[64px] text-right">
+            <th
+              key={e}
+              className="xcell2 sticky top-0 z-10 min-w-[64px] text-right"
+              style={bandStyle(colorByEstimator.get(e)) ?? HEADER_GRAY}
+            >
               {e}
             </th>
           ))}
-          <th className="phead sticky top-0 z-10 min-w-[80px] text-right">Grand Total</th>
+          <th className="xcell2 sticky top-0 z-10 min-w-[80px] text-right" style={HEADER_GRAY}>
+            Grand Total
+          </th>
         </tr>
       </thead>
       <tbody>
         {pivot.crews.map((crew) => (
-          <CrewRows key={crew.crew} crew={crew} estCols={estCols} totalCols={totalCols} hoursCells={hoursCells} />
+          <CrewRows
+            key={crew.crew}
+            crew={crew}
+            estCols={estCols}
+            totalCols={totalCols}
+            colorByEstimator={colorByEstimator}
+            hoursCells={hoursCells}
+          />
         ))}
         <tr>
-          <td className="xcell font-bold" colSpan={4}>
+          <td className="xcell" style={GRAND_GRAY}>
             Grand Total
           </td>
-          {hoursCells(pivot.grandByEstimator, true)}
-          <td className="xcell text-right font-bold">{fmtHoursFixed(pivot.grandTotal)}</td>
+          <td className="xcell" />
+          <td className="xcell" />
+          <td className="xcell" />
+          {estCols.map((e) => (
+            <td key={e} className="xcell text-right" style={GRAND_GRAY}>
+              {pivot.grandByEstimator[e] !== undefined ? fmtHoursFixed(pivot.grandByEstimator[e]) : ''}
+            </td>
+          ))}
+          <td className="xcell text-right" style={GRAND_GRAY}>
+            {fmtHoursFixed(pivot.grandTotal)}
+          </td>
         </tr>
       </tbody>
     </table>
@@ -78,22 +131,31 @@ function CrewRows({
   crew,
   estCols,
   totalCols,
+  colorByEstimator,
   hoursCells,
 }: {
   crew: PivotModel['crews'][number];
   estCols: string[];
   totalCols: number;
-  hoursCells: (byEstimator: Record<string, number>, bold: boolean) => JSX.Element[];
+  colorByEstimator: ReadonlyMap<string, string>;
+  hoursCells: (byEstimator: Record<string, number>) => JSX.Element[];
 }): JSX.Element {
   return (
     <>
+      {/* Crew-lead row: full-width black band, overrides the column bands. */}
       <tr>
-        <td className="xcell font-bold" style={{ backgroundColor: '#DCE6F1' }} colSpan={totalCols}>
+        <td className="xcell" style={BLACK_BAND} colSpan={totalCols}>
           {crew.crew}
         </td>
       </tr>
       {crew.employees.map((emp) => (
-        <EmployeeRows key={`${crew.crew}-${emp.username}-${emp.lname}`} emp={emp} estCols={estCols} hoursCells={hoursCells} />
+        <EmployeeRows
+          key={`${crew.crew}-${emp.username}-${emp.lname}`}
+          emp={emp}
+          estCols={estCols}
+          colorByEstimator={colorByEstimator}
+          hoursCells={hoursCells}
+        />
       ))}
     </>
   );
@@ -102,12 +164,17 @@ function CrewRows({
 function EmployeeRows({
   emp,
   estCols,
+  colorByEstimator,
   hoursCells,
 }: {
   emp: PivotModel['crews'][number]['employees'][number];
   estCols: string[];
-  hoursCells: (byEstimator: Record<string, number>, bold: boolean) => JSX.Element[];
+  colorByEstimator: ReadonlyMap<string, string>;
+  hoursCells: (byEstimator: Record<string, number>) => JSX.Element[];
 }): JSX.Element {
+  const emptyBand = estCols.map((e) => (
+    <td key={e} className="xcell" style={bandStyle(colorByEstimator.get(e))} />
+  ));
   return (
     <>
       <tr>
@@ -115,10 +182,8 @@ function EmployeeRows({
         <td className="xcell">{emp.fname}</td>
         <td className="xcell">{emp.lname}</td>
         <td className="xcell" />
-        {estCols.map((e) => (
-          <td key={e} className="xcell" />
-        ))}
-        <td className="xcell" />
+        {emptyBand}
+        <td className="xcell" style={GT_BAND} />
       </tr>
       {emp.jobs.map((job) => (
         <tr key={`${job.customer}\u0000${job.job}`}>
@@ -126,20 +191,23 @@ function EmployeeRows({
           <td className="xcell" />
           <td className="xcell">{job.customer}</td>
           <td className="xcell">{job.job}</td>
-          {hoursCells(job.byEstimator, false)}
-          <td className="xcell text-right">{fmtHoursFixed(job.total)}</td>
+          {hoursCells(job.byEstimator)}
+          <td className="xcell text-right" style={GT_BAND}>
+            {fmtHoursFixed(job.total)}
+          </td>
         </tr>
       ))}
       <tr>
         <td className="xcell" />
-        <td className="xcell font-semibold">{emp.fname} Total</td>
+        <td className="xcell">{emp.fname} Total</td>
         <td className="xcell" />
         <td className="xcell" />
-        {hoursCells(emp.byEstimator, true)}
+        {hoursCells(emp.byEstimator)}
         <td
-          className="xcell text-right font-semibold"
-          style={emp.overtime ? { backgroundColor: OVERTIME_BG } : undefined}
-          title={emp.overtime ? 'Overtime: grand total exceeds 40 hours' : undefined}
+          className="xcell text-right"
+          // On-screen review aid only (not exported): flag >40h weeks.
+          style={emp.overtime ? { ...GT_BAND, backgroundColor: OVERTIME_BG } : GT_BAND}
+          title={emp.overtime ? 'Overtime: grand total exceeds 40 hours (on-screen flag only)' : undefined}
         >
           {fmtHoursFixed(emp.total)}
         </td>

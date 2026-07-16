@@ -1,20 +1,29 @@
 import type { AppSettings, LegendEntry } from './types';
 
-/** Exact default fills from the manual workbook. Order drives row sorting in TimeNavi Export. */
+/**
+ * Shared estimator palette — single source of truth for BOTH tabs (row fills
+ * on TimeNavi Export, header/column bands on Pivot by Crew). Colors sampled
+ * from the reference workbook; RF is a new pick from the same Excel accent
+ * family. Text color is derived from fill luminance (see isDarkColor), so
+ * dark fills like ND's 4472C4 automatically get white text.
+ * Order drives row sorting in TimeNavi Export.
+ */
 export const DEFAULT_LEGEND: LegendEntry[] = [
   { estimator: 'JS', color: 'FABF8F' },
   { estimator: 'MH', color: 'FFFF99' },
   { estimator: 'PG', color: 'B1A0C7' },
   { estimator: 'TE', color: 'C4D79B' },
   { estimator: 'XC', color: '95B3D7' },
-  { estimator: 'ND', color: 'D9D9D9' },
+  { estimator: 'ND', color: '4472C4' },
+  { estimator: 'RF', color: 'DA9694' },
 ];
 
 /** Default pivot estimator column order (separate from legend row-sort order). */
-export const DEFAULT_PIVOT_COLUMNS: string[] = ['MH', 'PG', 'XC', 'ND', 'TE', 'JS'];
+export const DEFAULT_PIVOT_COLUMNS: string[] = ['MH', 'PG', 'XC', 'ND', 'TE', 'RF'];
 
-const STORAGE_KEY = 'pct-completion-builder.settings.v2';
-const LEGACY_KEY = 'pct-completion-builder.settings.v1';
+// v3: palette changed (ND recolored, RF added) — older stored settings are
+// intentionally not migrated so the new defaults take effect.
+const STORAGE_KEY = 'pct-completion-builder.settings.v3';
 
 export function defaultSettings(): AppSettings {
   return {
@@ -53,14 +62,14 @@ function parsePivotOrder(raw: unknown): string[] | null {
 
 export function loadSettings(): AppSettings {
   try {
-    for (const key of [STORAGE_KEY, LEGACY_KEY]) {
-      const raw = localStorage.getItem(key);
-      if (!raw) continue;
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
       const parsed: unknown = JSON.parse(raw);
       const legend = parseLegend(parsed);
-      if (!legend) continue;
-      const pivotColumnOrder = parsePivotOrder(parsed) ?? [...DEFAULT_PIVOT_COLUMNS];
-      return { legend, pivotColumnOrder };
+      if (legend) {
+        const pivotColumnOrder = parsePivotOrder(parsed) ?? [...DEFAULT_PIVOT_COLUMNS];
+        return { legend, pivotColumnOrder };
+      }
     }
   } catch {
     // fall through

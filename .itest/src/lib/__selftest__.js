@@ -81,6 +81,18 @@ function runSelfTests() {
     // --- title initials ----------------------------------------------------------------
     check('initials: (XC)', (0, timenavi_1.extractTitleInitials)('♦Int 13k (XC) Regina Conrad, AP24180-A (Daniel)'), 'XC');
     check('initials: lowercase name ignored', (0, timenavi_1.extractTitleInitials)('Job for (Daniel)'), null);
+    // --- estimator fallback from the event title ----------------------------------------
+    const known = new Set(['JS', 'MH', 'PG', 'TE', 'XC', 'ND', 'RF']);
+    check('title est: first known parenthesized token', (0, timenavi_1.estimatorFromTitle)('♦Int 13k (XC) Regina Conrad Ph1, AP24180-A *PAID* (Daniel)', known), 'XC');
+    check('title est: crew names with / or >3 letters never match', (0, timenavi_1.estimatorFromTitle)('♦[Southpoint] 3.5k (MH) Framing/DW/FRP Install, AP24450 (Ted/Rafael)', known), 'MH');
+    check('title est: lowercase tag uppercased', (0, timenavi_1.estimatorFromTitle)('Job walk (js) tomorrow', known), 'JS');
+    check('title est: known-set guard rejects (Ted)', (0, timenavi_1.estimatorFromTitle)('Fence repair (Ted)', known), null);
+    check('title est: skips unknown token to find a later known one', (0, timenavi_1.estimatorFromTitle)('(Ted) plus (PG)', known), 'PG');
+    check('title est: no parenthesized tokens', (0, timenavi_1.estimatorFromTitle)('Paint shop maintenance', known), null);
+    // --- palette text contrast -----------------------------------------------------------
+    check('contrast: ND dark blue → white text', (0, format_1.isDarkColor)('4472C4'), true);
+    check('contrast: MH light yellow → black text', (0, format_1.isDarkColor)('FFFF99'), false);
+    check('contrast: RF dusty rose → black text', (0, format_1.isDarkColor)('DA9694'), false);
     const failed = results.filter((r) => !r.pass);
     const label = `[% of Completion Builder self-test] ${results.length - failed.length}/${results.length} passed`;
     if (failed.length === 0) {

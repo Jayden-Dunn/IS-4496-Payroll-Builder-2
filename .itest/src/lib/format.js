@@ -9,6 +9,7 @@ exports.fmtPercent = fmtPercent;
 exports.fmtHours = fmtHours;
 exports.fmtHoursFixed = fmtHoursFixed;
 exports.round2 = round2;
+exports.isDarkColor = isDarkColor;
 exports.dateOnly = dateOnly;
 exports.dateDiffDays = dateDiffDays;
 exports.addDays = addDays;
@@ -69,6 +70,17 @@ function fmtHoursFixed(h) {
 }
 function round2(n) {
     return Math.round(n * 100) / 100;
+}
+/**
+ * Perceived-luminance check for a 6-digit hex fill (no '#'). Dark fills
+ * (e.g. ND's 4472C4) get white text; light fills get black — computed, so any
+ * palette edit in Settings keeps readable text automatically.
+ */
+function isDarkColor(hex6) {
+    const r = parseInt(hex6.slice(0, 2), 16);
+    const g = parseInt(hex6.slice(2, 4), 16);
+    const b = parseInt(hex6.slice(4, 6), 16);
+    return 0.299 * r + 0.587 * g + 0.114 * b < 140;
 }
 /** Strip the time-of-day portion (local). */
 function dateOnly(d) {

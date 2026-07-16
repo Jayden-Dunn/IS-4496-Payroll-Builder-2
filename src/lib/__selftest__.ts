@@ -3,9 +3,9 @@
  * dev server starts (see main.tsx) and logs pass/fail to the console.
  */
 import { extractApKey, normalizeApInput, timesheetApKey } from './apkey';
-import { dateDiffDays, parsePercentInput } from './format';
+import { dateDiffDays, isDarkColor, parsePercentInput } from './format';
 import { parseDate, parseNumberLoose } from './parsers';
-import { extractTitleInitials, suggestPercent } from './timenavi';
+import { estimatorFromTitle, extractTitleInitials, suggestPercent } from './timenavi';
 
 interface TestResult {
   name: string;
@@ -112,6 +112,28 @@ export function runSelfTests(): boolean {
   // --- title initials ----------------------------------------------------------------
   check('initials: (XC)', extractTitleInitials('♦Int 13k (XC) Regina Conrad, AP24180-A (Daniel)'), 'XC');
   check('initials: lowercase name ignored', extractTitleInitials('Job for (Daniel)'), null);
+
+  // --- estimator fallback from the event title ----------------------------------------
+  const known = new Set(['JS', 'MH', 'PG', 'TE', 'XC', 'ND', 'RF']);
+  check(
+    'title est: first known parenthesized token',
+    estimatorFromTitle('♦Int 13k (XC) Regina Conrad Ph1, AP24180-A *PAID* (Daniel)', known),
+    'XC',
+  );
+  check(
+    'title est: crew names with / or >3 letters never match',
+    estimatorFromTitle('♦[Southpoint] 3.5k (MH) Framing/DW/FRP Install, AP24450 (Ted/Rafael)', known),
+    'MH',
+  );
+  check('title est: lowercase tag uppercased', estimatorFromTitle('Job walk (js) tomorrow', known), 'JS');
+  check('title est: known-set guard rejects (Ted)', estimatorFromTitle('Fence repair (Ted)', known), null);
+  check('title est: skips unknown token to find a later known one', estimatorFromTitle('(Ted) plus (PG)', known), 'PG');
+  check('title est: no parenthesized tokens', estimatorFromTitle('Paint shop maintenance', known), null);
+
+  // --- palette text contrast -----------------------------------------------------------
+  check('contrast: ND dark blue → white text', isDarkColor('4472C4'), true);
+  check('contrast: MH light yellow → black text', isDarkColor('FFFF99'), false);
+  check('contrast: RF dusty rose → black text', isDarkColor('DA9694'), false);
 
   const failed = results.filter((r) => !r.pass);
   const label = `[% of Completion Builder self-test] ${results.length - failed.length}/${results.length} passed`;

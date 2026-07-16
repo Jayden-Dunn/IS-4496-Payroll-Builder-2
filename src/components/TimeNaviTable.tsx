@@ -6,6 +6,7 @@ import {
   fmtDateShort,
   fmtJobTotal,
   fmtPercent,
+  isDarkColor,
   parseMoneyInput,
   parsePercentInput,
 } from '../lib/format';
@@ -94,7 +95,7 @@ export function TimeNaviTable({ rows, colorByEstimator, estimatorOptions, onEdit
               key={r.id}
               id={`tn-${r.id}`}
               className={r.included ? '' : 'bg-neutral-100 text-neutral-400'}
-              style={hex ? { backgroundColor: `#${hex}` } : undefined}
+              style={hex ? { backgroundColor: `#${hex}`, color: isDarkColor(hex) ? '#fff' : '#000' } : undefined}
             >
               <td className="xcell text-center">
                 <input

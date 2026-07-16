@@ -176,6 +176,11 @@ export default function App(): JSX.Element {
     () => new Map(settings.legend.map((l) => [l.estimator, l.color])),
     [settings.legend],
   );
+  /** Known initials (palette + pivot config) guarding the title fallback. */
+  const knownEstimators = useMemo(
+    () => new Set<string>([...settings.legend.map((l) => l.estimator), ...settings.pivotColumnOrder]),
+    [settings.legend, settings.pivotColumnOrder],
+  );
   const payDate = useMemo(() => (payDateIso ? isoToDate(payDateIso) : null), [payDateIso]);
 
   /** apKey → jobcode_2 of the first timesheet row with that key (column M). */
@@ -204,11 +209,12 @@ export default function App(): JSX.Element {
         utTotals: parsed.utTotals,
         lastWeekMap: parsed.lastWeek,
         timesheetJobcodeByApKey,
+        knownEstimators,
       },
       payDate,
     );
     return sortReportRows(rows, legendOrder);
-  }, [created, ready, parsed, edits, timesheetJobcodeByApKey, legendOrder, payDate]);
+  }, [created, ready, parsed, edits, timesheetJobcodeByApKey, knownEstimators, legendOrder, payDate]);
 
   const includedApKeys = useMemo(() => {
     const s = new Set<string>();
@@ -218,10 +224,19 @@ export default function App(): JSX.Element {
     return s;
   }, [reportRows]);
 
+  /** apKey → RESOLVED estimator from the grid (books + fallback + edits). */
+  const estimatorByApKey = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const r of reportRows) {
+      if (r.included && r.apKey && r.estimator && !m.has(r.apKey)) m.set(r.apKey, r.estimator);
+    }
+    return m;
+  }, [reportRows]);
+
   const enriched = useMemo(() => {
     if (!created || !parsed.timesheet || !parsed.nvSales || !parsed.utSales) return [];
-    return enrichTimesheet(parsed.timesheet.rows, parsed.nvSales, parsed.utSales, includedApKeys);
-  }, [created, parsed.timesheet, parsed.nvSales, parsed.utSales, includedApKeys]);
+    return enrichTimesheet(parsed.timesheet.rows, parsed.nvSales, parsed.utSales, includedApKeys, estimatorByApKey);
+  }, [created, parsed.timesheet, parsed.nvSales, parsed.utSales, includedApKeys, estimatorByApKey]);
 
   const pivot = useMemo(
     () => buildPivot(enriched, settings.pivotColumnOrder, payDate),
@@ -392,7 +407,7 @@ export default function App(): JSX.Element {
                 onEdit={onEdit}
               />
             ) : tab === 'pivot' ? (
-              <PivotTable pivot={pivot} />
+              <PivotTable pivot={pivot} colorByEstimator={colorByEstimator} />
             ) : (
               <ExceptionsPanel groups={exceptions} onNavigate={navigateToRow} />
             )}

@@ -80,6 +80,25 @@ export function extractTitleInitials(title: string): string | null {
   return m ? m[1] : null;
 }
 
+const TITLE_TOKEN_RE = /\(([A-Za-z]{2,3})\)/g;
+
+/**
+ * Estimator fallback from the event title: scan left→right for parenthesized
+ * 2–3 letter tokens (any case) and return the first one that is a known
+ * estimator, uppercased. The known-set guard keeps short crew nicknames like
+ * "(Ted)" from being mistaken for an estimator; tokens with "/" or >3 letters
+ * ("(Daniel)", "(Ted/Rafael)") never match the regex at all.
+ */
+export function estimatorFromTitle(title: string, known: ReadonlySet<string>): string | null {
+  let first: string | null = null;
+  for (const m of title.matchAll(TITLE_TOKEN_RE)) {
+    const token = m[1].toUpperCase();
+    if (first === null) first = token;
+    if (known.has(token)) return token;
+  }
+  return known.size === 0 ? first : null;
+}
+
 // ---------------------------------------------------------------------------
 // Building the TimeNavi Export rows (columns A–S)
 // ---------------------------------------------------------------------------
@@ -92,6 +111,8 @@ export interface ReportDeps {
   lastWeekMap: ReadonlyMap<string, PrevPercent> | null;
   /** apKey → jobcode_2 of the FIRST timesheet row with that key. */
   timesheetJobcodeByApKey: ReadonlyMap<string, string>;
+  /** Known estimator initials (palette + configured lists) for the title fallback. */
+  knownEstimators: ReadonlySet<string>;
 }
 
 export function reportRowId(ev: TimeNaviEvent): string {
@@ -120,10 +141,13 @@ export function buildReportRows(
     const nvMatch = apKey ? nv.byApKey.get(apKey) : undefined;
     const utMatch = apKey ? ut.byApKey.get(apKey) : undefined;
 
+    // J: books lookup first; when the books are blank, fall back to the first
+    // known-estimator "(XX)" token in the event title (see estimatorFromTitle).
+    const booksEstimator = utMatch?.salesRep.trim() || nvMatch?.salesRep.trim() || '';
     const estimator =
       edit.estimator !== undefined
         ? edit.estimator
-        : utMatch?.salesRep.trim() || nvMatch?.salesRep.trim() || '';
+        : booksEstimator || estimatorFromTitle(ev.event, deps.knownEstimators) || '';
 
     // K: only from last week's workbook — never from Description.
     const lastPaid =
