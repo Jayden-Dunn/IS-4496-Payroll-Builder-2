@@ -1,6 +1,5 @@
 import * as XLSX from 'xlsx';
 import { extractApKey, normalizeApInput } from './apkey';
-import { suggestPercent } from './timenavi';
 import type {
   CellValue,
   PrevPercent,
@@ -81,46 +80,39 @@ function toCellValue(v: unknown): CellValue {
 // ---------------------------------------------------------------------------
 
 /**
- * Parse a date from anything the source files throw at us: real Date cells,
- * Excel serial numbers, "6/29/2026", "01/01/2024", "2026-06-23", and the same
- * with trailing times ("6/29/2026 7:00", "2026-06-23T07:00").
+ * Parse a calendar date from anything the source files throw at us. Always
+ * returns a local date at midnight with no time component — never uses
+ * `new Date(isoString)` on a bare date (avoids UTC day-shift bugs).
  */
 export function parseDate(v: CellValue): Date | null {
   if (v == null || v === '' || typeof v === 'boolean') return null;
-  if (v instanceof Date) return Number.isNaN(v.getTime()) ? null : v;
+  if (v instanceof Date) {
+    if (Number.isNaN(v.getTime())) return null;
+    return new Date(v.getFullYear(), v.getMonth(), v.getDate());
+  }
   if (typeof v === 'number') {
-    // Excel 1900-system serial number (days since 1899-12-30).
     if (v < 1 || v > 200000) return null;
     const days = Math.floor(v);
-    const frac = v - days;
-    const seconds = Math.round(frac * 86400);
-    return new Date(1899, 11, 30 + days, 0, 0, seconds);
+    return new Date(1899, 11, 30 + days);
   }
   const s = v.trim();
   if (!s) return null;
 
-  // M/D/YYYY (or M/D/YY) with optional time.
   let m = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([AP]M)?)?$/i.exec(s);
   if (m) {
     let year = Number(m[3]);
     if (year < 100) year += 2000;
-    let hour = m[4] !== undefined ? Number(m[4]) : 0;
-    const ampm = m[7]?.toUpperCase();
-    if (ampm === 'PM' && hour < 12) hour += 12;
-    if (ampm === 'AM' && hour === 12) hour = 0;
-    const d = new Date(year, Number(m[1]) - 1, Number(m[2]), hour, m[5] !== undefined ? Number(m[5]) : 0, m[6] !== undefined ? Number(m[6]) : 0);
+    const d = new Date(year, Number(m[1]) - 1, Number(m[2]));
     return Number.isNaN(d.getTime()) ? null : d;
   }
 
-  // ISO: 2026-06-23 with optional time.
   m = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/.exec(s);
   if (m) {
-    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), m[4] !== undefined ? Number(m[4]) : 0, m[5] !== undefined ? Number(m[5]) : 0, m[6] !== undefined ? Number(m[6]) : 0);
+    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
     return Number.isNaN(d.getTime()) ? null : d;
   }
 
-  const d = new Date(s);
-  return Number.isNaN(d.getTime()) ? null : d;
+  return null;
 }
 
 /**
@@ -294,7 +286,6 @@ export function parseTimeNavi(wbd: WorkbookData): TimeNaviEvent[] {
     if (!title) continue;
     const descriptionRaw = get('description');
     const description = descriptionRaw == null ? '' : String(descriptionRaw).trim();
-    const suggestion = suggestPercent(description);
     events.push({
       index: events.length,
       event: title,
@@ -305,8 +296,6 @@ export function parseTimeNavi(wbd: WorkbookData): TimeNaviEvent[] {
       location: asString(get('location')),
       description,
       apKey: extractApKey(title),
-      suggestedPercent: suggestion.value,
-      suggestedSourceLine: suggestion.line,
     });
   }
   if (events.length === 0) throw new Error(`No events found on sheet "${sheet.name}".`);
@@ -445,16 +434,20 @@ export function parseLastWeek(wbd: WorkbookData): Map<string, PrevPercent> {
     const v = cellAt(r, pctCol);
     let val: PrevPercent | null = null;
     if (typeof v === 'number') {
-      val = v > 1 ? v / 100 : v;
+      val = v;
     } else if (typeof v === 'string') {
       const t = v.trim();
       if (/hourly/i.test(t)) {
         val = 'HOURLY';
+      } else if (t === '-' || !t) {
+        val = null;
       } else {
         const m = /^(\d+(?:\.\d+)?)\s*%?$/.exec(t);
         if (m) {
           const n = Number(m[1]);
           val = n > 1 ? n / 100 : n;
+        } else {
+          val = t as PrevPercent;
         }
       }
     }

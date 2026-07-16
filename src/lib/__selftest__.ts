@@ -40,19 +40,32 @@ export function runSelfTests(): boolean {
   check('apKey: normalize empty', normalizeApInput('  '), null);
   check('apKey: string compare survives suffix', extractApKey('AP21848-A5') === '21848-A5', true);
 
-  // --- % suggestion parser --------------------------------------------------
+  // --- % suggestion parser (pay-date driven) ----------------------------------
+  const day = (m: number, d: number, y: number): Date => new Date(y, m - 1, d);
+  const multiWeek = '7/17/26 100% Complete\n7/10/26 30% COMPLETE -SH\n7/03/26 HOURLY';
+  check('%: pay date selects its own line (7/10 → 30%)', suggestPercent(multiWeek, day(7, 10, 2026)).value, 0.3);
+  check('%: same file, pay 7/17 → 100%', suggestPercent(multiWeek, day(7, 17, 2026)).value, 1);
+  check('%: no exact match → latest ≤ pay date', suggestPercent(multiWeek, day(7, 8, 2026)).value, 'HOURLY');
+  check('%: all lines after pay date → blank', suggestPercent(multiWeek, day(6, 1, 2026)).value, null);
   check(
-    '%: newest-first wins',
-    suggestPercent('7/10/26 95% COMPLETE -SH\n7/03/26 90% Complete\nother notes').value,
+    '%: exact-match line beats a newer line above it',
+    suggestPercent('7/10/26 95% COMPLETE -SH\n7/03/26 90% Complete', day(7, 10, 2026)).value,
     0.95,
   );
-  check('%: hourly', suggestPercent('7/17/26 HOURLY -SH\n7/03/26 90% Complete').value, 'HOURLY');
-  check('%: none', suggestPercent('Gate code 1234\ncall before arriving').value, null);
-  check('%: 100 complete', suggestPercent('7/8/26 100% Complete -SH').value, 1);
-  check('%: blank description', suggestPercent('').value, null);
+  check('%: hourly on the selected line', suggestPercent('7/10/26 HOURLY -SH', day(7, 10, 2026)).value, 'HOURLY');
+  check('%: ♦/whitespace prefix tolerated', suggestPercent('  ♦7/10/26 97.5% complete', day(7, 10, 2026)).value, 0.975);
+  check('%: 4-digit year status line', suggestPercent('7/10/2026 40% Complete', day(7, 10, 2026)).value, 0.4);
+  check(
+    '%: selected line with no %/HOURLY (e.g. "??") → blank, line kept for tooltip',
+    suggestPercent('7/10/26 ??', day(7, 10, 2026)),
+    { value: null, line: '7/10/26 ??' },
+  );
+  check('%: no status lines at all', suggestPercent('Gate code 1234\ncall before arriving', day(7, 10, 2026)).value, null);
+  check('%: blank description', suggestPercent('', day(7, 10, 2026)).value, null);
+  check('%: no pay date → no suggestion', suggestPercent(multiWeek, null).value, null);
   check(
     '%: source line kept for tooltip',
-    suggestPercent('7/10/26 95% COMPLETE -SH').line,
+    suggestPercent('7/10/26 95% COMPLETE -SH', day(7, 10, 2026)).line,
     '7/10/26 95% COMPLETE -SH',
   );
 
@@ -72,9 +85,15 @@ export function runSelfTests(): boolean {
   const d3 = parseDate('2026-06-23');
   check('date: ISO', d3 ? [d3.getFullYear(), d3.getMonth() + 1, d3.getDate()] : null, [2026, 6, 23]);
   const d4 = parseDate('6/29/2026 7:00');
-  check('date: with time', d4 ? [d4.getMonth() + 1, d4.getDate(), d4.getHours()] : null, [6, 29, 7]);
+  check(
+    'date: time component stripped (timezone-safe)',
+    d4 ? [d4.getMonth() + 1, d4.getDate(), d4.getHours(), d4.getMinutes()] : null,
+    [6, 29, 0, 0],
+  );
   const d5 = parseDate(46213); // Excel serial for 2026-07-10 (1900 system)
   check('date: excel serial', d5 ? [d5.getFullYear(), d5.getMonth() + 1, d5.getDate()] : null, [2026, 7, 10]);
+  const d6 = parseDate(new Date(2026, 5, 23, 7, 0, 0));
+  check('date: Date cell stripped to local midnight', d6 ? [d6.getMonth() + 1, d6.getDate(), d6.getHours()] : null, [6, 23, 0]);
   check('date: garbage', parseDate('not a date'), null);
 
   // --- date difference ----------------------------------------------------------

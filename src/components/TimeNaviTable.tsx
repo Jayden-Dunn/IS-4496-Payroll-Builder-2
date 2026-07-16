@@ -1,6 +1,14 @@
 import { useState } from 'react';
 import { normalizeApInput } from '../lib/apkey';
-import { fmtDate, fmtMoney, fmtPercent, parseMoneyInput, parsePercentInput } from '../lib/format';
+import {
+  fmtAccounting,
+  fmtDate,
+  fmtDateShort,
+  fmtJobTotal,
+  fmtPercent,
+  parseMoneyInput,
+  parsePercentInput,
+} from '../lib/format';
 import type { ReportRow, RowEdit } from '../lib/types';
 
 interface TimeNaviTableProps {
@@ -97,8 +105,8 @@ export function TimeNaviTable({ rows, colorByEstimator, estimatorOptions, onEdit
                 />
               </td>
               <td className="xcell min-w-[260px] max-w-[340px]">{r.event}</td>
-              <td className="xcell whitespace-nowrap">{fmtDate(r.startDate)}</td>
-              <td className="xcell whitespace-nowrap">{fmtDate(r.endDate)}</td>
+              <td className="xcell whitespace-nowrap">{fmtDateShort(r.startDate)}</td>
+              <td className="xcell whitespace-nowrap">{fmtDateShort(r.endDate)}</td>
               <td className="xcell whitespace-nowrap">{r.calendar}</td>
               <td className="xcell max-w-[140px] truncate">{r.attendees}</td>
               <td className="xcell max-w-[160px] truncate" title={r.location}>
@@ -155,10 +163,10 @@ export function TimeNaviTable({ rows, colorByEstimator, estimatorOptions, onEdit
               >
                 {r.inQboTime}
               </td>
-              <td className="xcell whitespace-nowrap text-right">{fmtMoney(r.jobTotal)}</td>
+              <td className="xcell whitespace-nowrap text-right">{fmtJobTotal(r.jobTotal)}</td>
               <td className="xcell w-24 text-right">
                 <EditableCell
-                  display={fmtMoney(r.apptivo)}
+                  display={r.apptivo === null ? '' : fmtAccounting(r.apptivo)}
                   onCommit={(text) => {
                     const n = parseMoneyInput(text);
                     onEdit(r.id, { apptivo: n === null ? undefined : n });
@@ -167,8 +175,12 @@ export function TimeNaviTable({ rows, colorByEstimator, estimatorOptions, onEdit
                   title="Apptivo $ — defaults to Job Total; adjust when Apptivo disagrees (clear to reset)"
                 />
               </td>
-              <td className={`xcell whitespace-nowrap text-right ${r.dollarDiff !== 0 ? 'font-semibold' : ''}`}>
-                {fmtMoney(r.dollarDiff)}
+              <td
+                className={`xcell whitespace-nowrap text-right ${
+                  r.dollarDiff !== null && r.dollarDiff !== 0 ? 'font-semibold' : ''
+                }`}
+              >
+                {r.dollarDiff === null ? '' : fmtAccounting(r.dollarDiff)}
               </td>
               <td className="xcell w-14 text-right">{fmtPercent(r.percent)}</td>
               <td className="xcell whitespace-nowrap">{fmtDate(r.invoiceDate)}</td>

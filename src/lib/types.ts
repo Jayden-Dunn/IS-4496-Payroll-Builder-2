@@ -56,6 +56,9 @@ export type PercentValue = number | 'HOURLY' | null;
 /** Last-week "% Completion" values we can carry forward. */
 export type PrevPercent = number | 'HOURLY';
 
+/** Job Total $ when no customer-summary match. */
+export type JobTotalValue = number | '#N/A';
+
 /** One TimeNavi calendar event (Slot 2). */
 export interface TimeNaviEvent {
   index: number; // stable position in the file
@@ -67,8 +70,6 @@ export interface TimeNaviEvent {
   location: string;
   description: string;
   apKey: string | null;
-  suggestedPercent: PercentValue;
-  suggestedSourceLine: string | null;
 }
 
 /** One row of a sales/transaction detail report (Slots 3 and 5), in file order. */
@@ -122,11 +123,11 @@ export interface ReportRow {
   lastPaid: PrevPercent | null; // K
   qboJobName: string; // L
   inQboTime: string; // M
-  jobTotal: number; // N
+  jobTotal: JobTotalValue; // N
   jobTotalFound: boolean;
-  apptivo: number; // O (editable)
+  apptivo: number | null; // O (editable; blank when N is #N/A)
   apptivoEdited: boolean;
-  dollarDiff: number; // P = N − O
+  dollarDiff: number | null; // P = N − O (blank when N is #N/A)
   invoiceDate: Date | null; // R
   dateDiff: number | null; // S = whole days R − B
   titleInitials: string | null; // (XX) from the event title, for mismatch check
@@ -143,6 +144,8 @@ export interface LegendEntry {
 
 export interface AppSettings {
   legend: LegendEntry[];
+  /** Pivot estimator column order (separate from legend row-sort order). */
+  pivotColumnOrder: string[];
 }
 
 // ---------------------------------------------------------------------------

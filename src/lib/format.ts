@@ -1,4 +1,4 @@
-import type { PercentValue } from './types';
+import type { JobTotalValue, PercentValue } from './types';
 
 /** M/D/YYYY */
 export function fmtDate(d: Date | null | undefined): string {
@@ -6,7 +6,30 @@ export function fmtDate(d: Date | null | undefined): string {
   return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
 }
 
-/** $14,411 (rounded to whole dollars for on-screen display) */
+/** mm-dd-yy (reference Start/End Date display) */
+export function fmtDateShort(d: Date | null | undefined): string {
+  if (!d) return '';
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const yy = String(d.getFullYear()).slice(-2);
+  return `${mm}-${dd}-${yy}`;
+}
+
+/** Accounting-style number without $ (reference Job Total / Apptivo columns). */
+export function fmtAccounting(v: number | null | undefined): string {
+  if (v === null || v === undefined) return '';
+  const abs = Math.abs(v);
+  const s = abs.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return v < 0 ? `(${s})` : s;
+}
+
+/** Job Total $ — `#N/A` when unmatched, else accounting style. */
+export function fmtJobTotal(v: JobTotalValue): string {
+  if (v === '#N/A') return '#N/A';
+  return fmtAccounting(v);
+}
+
+/** $14,411 (legacy whole-dollar display) */
 export function fmtMoney(v: number): string {
   const r = Math.round(v);
   const s = Math.abs(r).toLocaleString('en-US');
@@ -23,6 +46,11 @@ export function fmtPercent(v: PercentValue): string {
 /** Hours with at most 2 decimals: 4.26, 20.08, 8 */
 export function fmtHours(h: number): string {
   return String(Math.round(h * 100) / 100);
+}
+
+/** Pivot hours always show two decimals: 4.26 → "4.26", 8 → "8.00" */
+export function fmtHoursFixed(h: number): string {
+  return h.toFixed(2);
 }
 
 export function round2(n: number): number {
@@ -69,7 +97,7 @@ export function parsePercentInput(text: string): PercentValue {
   return n > 1 ? n / 100 : n;
 }
 
-/** Parse user input for a money cell: "$2,095.00", "2095". Null when invalid. */
+/** Parse user input for a money cell: "$2,095.00", "2095". Null when invalid/blank. */
 export function parseMoneyInput(text: string): number | null {
   const t = text.trim().replace(/[$,\s]/g, '');
   if (!t) return null;

@@ -4,22 +4,26 @@ import type { LegendEntry, PivotModel, ReportRow } from './types';
 
 const GREEN = 'FF1BA41B';
 const OVERTIME_YELLOW = 'FFFFFF99';
+const PIVOT_HEADER_FILL = 'FFDCE6F1'; // light steel blue, approximates Excel pivot banding
 
-const MONEY_FMT = '$#,##0.00';
-const DATE_FMT = 'm/d/yyyy';
+// Reference formats: accounting style WITHOUT a $ symbol.
+const ACCOUNTING_FMT = '_(* #,##0.00_);_(* \\(#,##0.00\\);_(* "-"??_);_(@_)';
+const START_END_DATE_FMT = 'mm-dd-yy';
+const INVOICE_DATE_FMT = 'mm/dd/yyyy';
 const PCT_FMT = '0%';
-const HOURS_FMT = '0.##';
+const HOURS_FMT = '0.00';
 
 function solidFill(argb: string): ExcelJS.Fill {
   return { type: 'pattern', pattern: 'solid', fgColor: { argb } };
 }
 
-function styleHeaderRow(row: ExcelJS.Row): void {
-  row.eachCell({ includeEmpty: false }, (cell) => {
-    cell.fill = solidFill(GREEN);
-    cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-    cell.alignment = { vertical: 'middle', wrapText: false };
-  });
+/**
+ * ExcelJS serializes JS Dates to serials using their UTC components. Local
+ * calendar dates therefore must be re-based to UTC midnight or the sheet
+ * shows a stray time (e.g. 07:00) and can flip a day in some timezones.
+ */
+function excelDate(d: Date): Date {
+  return new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
 }
 
 export interface ExportInput {
@@ -63,14 +67,23 @@ const TN_HEADERS = [
   'Job Total $', 'Apptivo $', '$ Difference', '%compl', 'Invoice Date', 'Date Difference',
 ];
 
-const TN_WIDTHS = [60, 12, 12, 22, 20, 24, 80, 10, 13, 11, 12, 42, 30, 14, 14, 14, 10, 12, 13];
+// Reference column widths (A–S) so screenshots line up. G (Description) stays
+// collapsed at 13 — the full text lives in the cell, wrap off.
+const TN_WIDTHS = [60, 11, 13, 13, 9, 13, 13, 6.5, 11.6, 9, 10, 39, 20, 12, 14, 10.6, 9, 12.4, 13];
 
 function buildTimeNaviSheet(wb: ExcelJS.Workbook, input: ExportInput): void {
   const ws = wb.addWorksheet('TimeNavi Export', {
-    views: [{ state: 'frozen', ySplit: 1 }],
+    views: [{ state: 'frozen', ySplit: 1 }], // freeze at A2
   });
   ws.columns = TN_WIDTHS.map((width) => ({ width }));
-  styleHeaderRow(ws.addRow(TN_HEADERS));
+
+  const header = ws.addRow(TN_HEADERS);
+  header.eachCell({ includeEmpty: false }, (cell) => {
+    cell.fill = solidFill(GREEN);
+    // Reference header: white text, NOT bold.
+    cell.font = { color: { argb: 'FFFFFFFF' } };
+    cell.alignment = { vertical: 'middle', wrapText: false };
+  });
 
   const colorByEstimator = new Map(input.legend.map((l) => [l.estimator, 'FF' + l.color.toUpperCase()]));
 
@@ -78,8 +91,8 @@ function buildTimeNaviSheet(wb: ExcelJS.Workbook, input: ExportInput): void {
     const percentCell = r.percent === null ? '' : r.percent;
     const row = ws.addRow([
       r.event,
-      r.startDate,
-      r.endDate,
+      r.startDate ? excelDate(r.startDate) : '',
+      r.endDate ? excelDate(r.endDate) : '',
       r.calendar,
       r.attendees,
       r.location,
@@ -90,25 +103,27 @@ function buildTimeNaviSheet(wb: ExcelJS.Workbook, input: ExportInput): void {
       r.lastPaid ?? '-',
       r.qboJobName,
       r.inQboTime,
-      r.jobTotal,
-      r.apptivo,
-      r.dollarDiff,
+      r.jobTotal, // number, or the literal text '#N/A'
+      r.apptivo ?? '', // blank when N is #N/A and not user-edited
+      r.dollarDiff ?? '', // blank when N is #N/A
       percentCell, // Q mirrors I — the office PDF reads this column
-      r.invoiceDate,
+      r.invoiceDate ? excelDate(r.invoiceDate) : '',
       r.dateDiff ?? '',
     ]);
 
-    for (const [col, fmt] of [[2, DATE_FMT], [3, DATE_FMT], [18, DATE_FMT]] as const) {
-      row.getCell(col).numFmt = fmt;
-    }
+    row.getCell(2).numFmt = START_END_DATE_FMT;
+    row.getCell(3).numFmt = START_END_DATE_FMT;
+    row.getCell(18).numFmt = INVOICE_DATE_FMT;
     for (const col of [9, 11, 17]) {
       const cell = row.getCell(col);
       if (typeof cell.value === 'number') cell.numFmt = PCT_FMT;
     }
-    for (const col of [14, 15, 16]) row.getCell(col).numFmt = MONEY_FMT;
+    for (const col of [14, 15, 16]) {
+      const cell = row.getCell(col);
+      if (typeof cell.value === 'number') cell.numFmt = ACCOUNTING_FMT;
+    }
     row.getCell(19).numFmt = '0';
 
-    row.getCell(7).alignment = { wrapText: true, vertical: 'top' };
     row.getCell(1).alignment = { vertical: 'top' };
 
     const argb = colorByEstimator.get(r.estimator);
@@ -126,21 +141,46 @@ function buildTimeNaviSheet(wb: ExcelJS.Workbook, input: ExportInput): void {
 
 function buildPivotSheet(wb: ExcelJS.Workbook, pivot: PivotModel): void {
   const ws = wb.addWorksheet('Pivot by Crew', {
-    views: [{ state: 'frozen', ySplit: 2 }],
+    views: [{ state: 'frozen', ySplit: 4 }], // freeze at A5, below the header block
   });
   const estCols = pivot.estimators;
+  // Grand Total column index is derived from however many estimator columns
+  // rendered — never assumed.
   const totalColCount = 4 + estCols.length + 1;
 
   ws.columns = [
-    { width: 34 }, { width: 14 }, { width: 26 }, { width: 44 },
-    ...estCols.map(() => ({ width: 10 })),
-    { width: 12 },
+    { width: 35 }, { width: 14 }, { width: 24 }, { width: 39 },
+    ...estCols.map(() => ({ width: 8 })),
+    { width: 8 },
   ];
 
-  const title = ws.addRow([pivot.title]);
-  title.getCell(1).font = { bold: true, size: 12 };
+  const styleHeaderBlockRow = (row: ExcelJS.Row): void => {
+    for (let c = 1; c <= totalColCount; c++) {
+      const cell = row.getCell(c);
+      cell.fill = solidFill(PIVOT_HEADER_FILL);
+      cell.font = { ...(cell.font ?? {}), bold: true };
+    }
+  };
 
-  styleHeaderRow(ws.addRow(['Row Labels', 'fname', 'lname', 'Job', ...estCols, 'Grand Total']));
+  // Row 1: title.
+  const r1 = ws.addRow([pivot.title]);
+  styleHeaderBlockRow(r1);
+  r1.getCell(1).font = { bold: true, size: 12 };
+
+  // Row 2: Name / Job labels + "Hours" centered across the value columns.
+  const r2 = ws.addRow(['', '', 'Name', 'Job']);
+  ws.mergeCells(2, 5, 2, totalColCount);
+  r2.getCell(5).value = 'Hours';
+  r2.getCell(5).alignment = { horizontal: 'center' };
+  styleHeaderBlockRow(r2);
+
+  // Row 3: pivot chrome labels.
+  const r3 = ws.addRow(['Sum of hours', '', '', '', 'Column Labels']);
+  styleHeaderBlockRow(r3);
+
+  // Row 4: field header (the reference literally labels column D "jobcode_2").
+  const r4 = ws.addRow(['Row Labels', 'fname', 'lname', 'jobcode_2', ...estCols, 'Grand Total']);
+  styleHeaderBlockRow(r4);
 
   const hoursCells = (byEstimator: Record<string, number>, total: number): (number | '')[] => [
     ...estCols.map((e) => (byEstimator[e] !== undefined ? byEstimator[e] : '' as const)),
@@ -156,7 +196,7 @@ function buildPivotSheet(wb: ExcelJS.Workbook, pivot: PivotModel): void {
 
   for (const crew of pivot.crews) {
     const crewRow = ws.addRow([crew.crew]);
-    crewRow.getCell(1).font = { bold: true };
+    styleHeaderBlockRow(crewRow);
 
     for (const emp of crew.employees) {
       ws.addRow([emp.username, emp.fname, emp.lname]);
@@ -167,7 +207,6 @@ function buildPivotSheet(wb: ExcelJS.Workbook, pivot: PivotModel): void {
       }
 
       const totalRow = ws.addRow(['', `${emp.fname} Total`, '', '', ...hoursCells(emp.byEstimator, emp.total)]);
-      totalRow.getCell(2).font = { bold: true };
       setHoursFmt(totalRow);
       totalRow.eachCell({ includeEmpty: false }, (cell) => {
         cell.font = { ...(cell.font ?? {}), bold: true };

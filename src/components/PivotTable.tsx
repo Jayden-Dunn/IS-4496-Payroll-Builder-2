@@ -1,4 +1,4 @@
-import { fmtHours } from '../lib/format';
+import { fmtHoursFixed } from '../lib/format';
 import type { PivotModel } from '../lib/types';
 
 interface PivotTableProps {
@@ -9,46 +9,65 @@ const OVERTIME_BG = '#FFFF99';
 
 export function PivotTable({ pivot }: PivotTableProps): JSX.Element {
   const estCols = pivot.estimators;
+  const totalCols = 4 + estCols.length + 1;
 
-  const hoursCells = (byEstimator: Record<string, number>, bold: boolean): JSX.Element[] => [
-    ...estCols.map((e) => (
+  const hoursCells = (byEstimator: Record<string, number>, bold: boolean): JSX.Element[] =>
+    estCols.map((e) => (
       <td key={e} className={`xcell text-right ${bold ? 'font-semibold' : ''}`}>
-        {byEstimator[e] !== undefined ? fmtHours(byEstimator[e]) : ''}
+        {byEstimator[e] !== undefined ? fmtHoursFixed(byEstimator[e]) : ''}
       </td>
-    )),
-  ];
+    ));
 
   return (
     <table className="w-max min-w-full border-collapse bg-white text-xs">
       <thead>
+        {/* Four-row header block mirroring the exported sheet. */}
         <tr>
-          <th className="xhead sticky top-0 z-10 min-w-[220px]" colSpan={4 + estCols.length + 1}>
+          <th className="phead text-left text-sm" colSpan={totalCols}>
             {pivot.title}
           </th>
         </tr>
         <tr>
-          <th className="xhead sticky top-[26px] z-10 min-w-[220px]">Row Labels</th>
-          <th className="xhead sticky top-[26px] z-10 min-w-[90px]">fname</th>
-          <th className="xhead sticky top-[26px] z-10 min-w-[160px]">lname</th>
-          <th className="xhead sticky top-[26px] z-10 min-w-[260px]">Job</th>
+          <th className="phead" />
+          <th className="phead" />
+          <th className="phead text-left">Name</th>
+          <th className="phead text-left">Job</th>
+          <th className="phead text-center" colSpan={estCols.length + 1}>
+            Hours
+          </th>
+        </tr>
+        <tr>
+          <th className="phead text-left">Sum of hours</th>
+          <th className="phead" />
+          <th className="phead" />
+          <th className="phead" />
+          <th className="phead text-left" colSpan={estCols.length + 1}>
+            Column Labels
+          </th>
+        </tr>
+        <tr>
+          <th className="phead sticky top-0 z-10 min-w-[220px] text-left">Row Labels</th>
+          <th className="phead sticky top-0 z-10 min-w-[90px] text-left">fname</th>
+          <th className="phead sticky top-0 z-10 min-w-[160px] text-left">lname</th>
+          <th className="phead sticky top-0 z-10 min-w-[260px] text-left">jobcode_2</th>
           {estCols.map((e) => (
-            <th key={e} className="xhead sticky top-[26px] z-10 min-w-[64px] text-right">
+            <th key={e} className="phead sticky top-0 z-10 min-w-[64px] text-right">
               {e}
             </th>
           ))}
-          <th className="xhead sticky top-[26px] z-10 min-w-[80px] text-right">Grand Total</th>
+          <th className="phead sticky top-0 z-10 min-w-[80px] text-right">Grand Total</th>
         </tr>
       </thead>
       <tbody>
         {pivot.crews.map((crew) => (
-          <CrewRows key={crew.crew} crew={crew} estCols={estCols} hoursCells={hoursCells} />
+          <CrewRows key={crew.crew} crew={crew} estCols={estCols} totalCols={totalCols} hoursCells={hoursCells} />
         ))}
         <tr>
           <td className="xcell font-bold" colSpan={4}>
             Grand Total
           </td>
           {hoursCells(pivot.grandByEstimator, true)}
-          <td className="xcell text-right font-bold">{fmtHours(pivot.grandTotal)}</td>
+          <td className="xcell text-right font-bold">{fmtHoursFixed(pivot.grandTotal)}</td>
         </tr>
       </tbody>
     </table>
@@ -58,16 +77,18 @@ export function PivotTable({ pivot }: PivotTableProps): JSX.Element {
 function CrewRows({
   crew,
   estCols,
+  totalCols,
   hoursCells,
 }: {
   crew: PivotModel['crews'][number];
   estCols: string[];
+  totalCols: number;
   hoursCells: (byEstimator: Record<string, number>, bold: boolean) => JSX.Element[];
 }): JSX.Element {
   return (
     <>
-      <tr className="bg-neutral-200">
-        <td className="xcell font-bold" colSpan={4 + estCols.length + 1}>
+      <tr>
+        <td className="xcell font-bold" style={{ backgroundColor: '#DCE6F1' }} colSpan={totalCols}>
           {crew.crew}
         </td>
       </tr>
@@ -106,7 +127,7 @@ function EmployeeRows({
           <td className="xcell">{job.customer}</td>
           <td className="xcell">{job.job}</td>
           {hoursCells(job.byEstimator, false)}
-          <td className="xcell text-right">{fmtHours(job.total)}</td>
+          <td className="xcell text-right">{fmtHoursFixed(job.total)}</td>
         </tr>
       ))}
       <tr>
@@ -120,7 +141,7 @@ function EmployeeRows({
           style={emp.overtime ? { backgroundColor: OVERTIME_BG } : undefined}
           title={emp.overtime ? 'Overtime: grand total exceeds 40 hours' : undefined}
         >
-          {fmtHours(emp.total)}
+          {fmtHoursFixed(emp.total)}
         </td>
       </tr>
     </>

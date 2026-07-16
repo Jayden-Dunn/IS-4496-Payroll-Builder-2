@@ -160,7 +160,7 @@ export function buildExceptions(input: ExceptionsInput): ExceptionGroup[] {
   groups.push({
     key: 'noJobTotal',
     title: 'Job total not found',
-    note: 'No match in either Sales by Customer Summary — Job Total $ shows 0.',
+    note: 'No match in either Sales by Customer Summary — Job Total $ shows #N/A.',
     items: included
       .filter((r) => r.apKey && !r.jobTotalFound)
       .map((r) => ({ message: `AP ${r.apKey} — "${r.event}"`, rowId: r.id })),

@@ -1,8 +1,9 @@
 import { normalizeApInput } from './apkey';
-import { dateDiffDays } from './format';
+import { dateDiffDays, dateOnly } from './format';
 import { buildSalesIndex } from './joins';
 import type {
   EditsMap,
+  JobTotalValue,
   PercentValue,
   PrevPercent,
   ReportRow,
@@ -11,29 +12,66 @@ import type {
 } from './types';
 
 // ---------------------------------------------------------------------------
-// Description → % pre-fill parser
+// Description → % pre-fill parser (pay-date driven)
 // ---------------------------------------------------------------------------
 
-const PCT_RE = /(\d{1,3})\s*%/;
+const STATUS_DATE_RE = /^\s*[♦*]?\s*(\d{1,2})\/(\d{1,2})\/(\d{2,4})\b/;
+const PCT_RE = /(\d{1,3}(?:\.\d+)?)\s*%/;
 
-/**
- * Scan Description lines top-down (newest status first). The first line with
- * a percent AND the word "complete" nearby wins; if the first status-looking
- * line says HOURLY instead, return 'HOURLY'. Otherwise leave blank — percent
- * completion is a human judgment, the app only suggests.
- */
-export function suggestPercent(description: string): { value: PercentValue; line: string | null } {
+interface StatusLine {
+  date: Date;
+  line: string;
+}
+
+function statusLineDate(month: string, day: string, year: string): Date {
+  let y = Number(year);
+  if (y < 100) y += 2000;
+  return new Date(y, Number(month) - 1, Number(day));
+}
+
+function extractStatusLines(description: string): StatusLine[] {
+  const out: StatusLine[] = [];
   for (const raw of description.split(/\r?\n/)) {
     const line = raw.trim();
     if (!line) continue;
-    const m = PCT_RE.exec(line);
-    if (m && /complete/i.test(line)) {
-      const n = Number(m[1]);
-      if (n >= 0 && n <= 100) return { value: n / 100, line };
-    }
-    if (/hourly/i.test(line)) return { value: 'HOURLY', line };
+    const m = STATUS_DATE_RE.exec(line);
+    if (!m) continue;
+    out.push({ date: statusLineDate(m[1], m[2], m[3]), line });
   }
-  return { value: null, line: null };
+  return out;
+}
+
+/**
+ * Select the status line for the pay date: exact match first, else the latest
+ * line dated on or before the pay date. Parse % or HOURLY from that line only.
+ */
+export function suggestPercent(
+  description: string,
+  payDate: Date | null,
+): { value: PercentValue; line: string | null } {
+  const statusLines = extractStatusLines(description);
+  if (statusLines.length === 0 || !payDate) return { value: null, line: null };
+
+  const payMs = dateOnly(payDate).getTime();
+  let selected =
+    statusLines.find((s) => dateOnly(s.date).getTime() === payMs) ?? null;
+
+  if (!selected) {
+    const eligible = statusLines.filter((s) => dateOnly(s.date).getTime() <= payMs);
+    if (eligible.length === 0) return { value: null, line: null };
+    selected = eligible.reduce((best, cur) =>
+      dateOnly(cur.date).getTime() > dateOnly(best.date).getTime() ? cur : best,
+    );
+  }
+
+  const text = selected.line;
+  const pct = PCT_RE.exec(text);
+  if (pct) {
+    const n = Number(pct[1]);
+    if (n >= 0 && n <= 100) return { value: n / 100, line: selected.line };
+  }
+  if (/hourly/i.test(text)) return { value: 'HOURLY', line: selected.line };
+  return { value: null, line: selected.line };
 }
 
 /** First "(XX)" group of 2–3 uppercase letters in an event title. */
@@ -57,11 +95,15 @@ export interface ReportDeps {
 }
 
 export function reportRowId(ev: TimeNaviEvent): string {
-  // Keyed by apKey + row position so re-parsing the same file keeps edits.
   return `ev${ev.index}:${ev.apKey ?? ''}`;
 }
 
-export function buildReportRows(events: TimeNaviEvent[], edits: EditsMap, deps: ReportDeps): ReportRow[] {
+export function buildReportRows(
+  events: TimeNaviEvent[],
+  edits: EditsMap,
+  deps: ReportDeps,
+  payDate: Date | null,
+): ReportRow[] {
   const nv = buildSalesIndex(deps.nvSales);
   const ut = buildSalesIndex(deps.utSales);
 
@@ -71,21 +113,22 @@ export function buildReportRows(events: TimeNaviEvent[], edits: EditsMap, deps: 
 
     const apKey = edit.apKey !== undefined ? edit.apKey : ev.apKey;
     const included = edit.included !== undefined ? edit.included : apKey !== null;
-    const percent = edit.percent !== undefined ? edit.percent : ev.suggestedPercent;
+
+    const suggestion = suggestPercent(ev.description, payDate);
+    const percent = edit.percent !== undefined ? edit.percent : suggestion.value;
 
     const nvMatch = apKey ? nv.byApKey.get(apKey) : undefined;
     const utMatch = apKey ? ut.byApKey.get(apKey) : undefined;
 
-    // Column J: estimator lookup is UT first, then NV (intentionally the
-    // reverse of columns L/R). Blank sales reps fall through.
     const estimator =
       edit.estimator !== undefined
         ? edit.estimator
         : utMatch?.salesRep.trim() || nvMatch?.salesRep.trim() || '';
 
-    const lastPaid = apKey && deps.lastWeekMap ? deps.lastWeekMap.get(apKey) ?? null : null;
+    // K: only from last week's workbook — never from Description.
+    const lastPaid =
+      apKey && deps.lastWeekMap ? (deps.lastWeekMap.get(apKey) ?? null) : null;
 
-    // Columns L and R: NV first, then UT.
     const qboJobName = nvMatch?.name2 ?? utMatch?.name2 ?? '';
     const invoiceDate = nvMatch ? nvMatch.date : utMatch ? utMatch.date : null;
 
@@ -94,10 +137,18 @@ export function buildReportRows(events: TimeNaviEvent[], edits: EditsMap, deps: 
     const nvTotal = apKey ? deps.nvTotals.get(apKey) : undefined;
     const utTotal = apKey ? deps.utTotals.get(apKey) : undefined;
     const jobTotalFound = nvTotal !== undefined || utTotal !== undefined;
-    const jobTotal = nvTotal ?? utTotal ?? 0;
+    const matchedTotal = nvTotal ?? utTotal ?? 0;
+    const jobTotal: JobTotalValue = jobTotalFound ? matchedTotal : '#N/A';
 
     const apptivoEdited = edit.apptivo !== undefined;
-    const apptivo = apptivoEdited ? (edit.apptivo as number) : jobTotal;
+    const apptivo: number | null = apptivoEdited
+      ? (edit.apptivo ?? null)
+      : jobTotalFound
+        ? matchedTotal
+        : null;
+
+    const dollarDiff =
+      jobTotalFound && apptivo !== null ? matchedTotal - apptivo : null;
 
     const dateDiff = invoiceDate && ev.startDate ? dateDiffDays(invoiceDate, ev.startDate) : null;
 
@@ -114,7 +165,7 @@ export function buildReportRows(events: TimeNaviEvent[], edits: EditsMap, deps: 
       description: ev.description,
       apKey,
       percent,
-      suggestedSourceLine: ev.suggestedSourceLine,
+      suggestedSourceLine: suggestion.line,
       estimator,
       lastPaid,
       qboJobName,
@@ -123,7 +174,7 @@ export function buildReportRows(events: TimeNaviEvent[], edits: EditsMap, deps: 
       jobTotalFound,
       apptivo,
       apptivoEdited,
-      dollarDiff: jobTotal - apptivo,
+      dollarDiff,
       invoiceDate,
       dateDiff,
       titleInitials: extractTitleInitials(ev.event),
@@ -148,5 +199,4 @@ export function sortReportRows(rows: ReportRow[], estimatorOrder: string[]): Rep
     .map((x) => x.r);
 }
 
-/** Re-export so callers editing AP# share the exact same normalization. */
 export { normalizeApInput };

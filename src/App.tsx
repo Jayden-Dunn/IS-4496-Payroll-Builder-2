@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ExceptionsPanel } from './components/ExceptionsPanel';
 import { PivotTable } from './components/PivotTable';
 import { SettingsModal } from './components/SettingsModal';
@@ -19,7 +19,7 @@ import {
   readWorkbook,
 } from './lib/parsers';
 import { buildPivot } from './lib/pivot';
-import { loadSettings, saveSettings } from './lib/settings';
+import { loadSettings, mergePivotColumnOrder, saveSettings } from './lib/settings';
 import { buildReportRows, sortReportRows } from './lib/timenavi';
 import type {
   AppSettings,
@@ -194,16 +194,21 @@ export default function App(): JSX.Element {
     if (!created || !ready || !parsed.events || !parsed.nvSales || !parsed.utSales || !parsed.nvTotals || !parsed.utTotals) {
       return [];
     }
-    const rows = buildReportRows(parsed.events, edits, {
-      nvSales: parsed.nvSales,
-      utSales: parsed.utSales,
-      nvTotals: parsed.nvTotals,
-      utTotals: parsed.utTotals,
-      lastWeekMap: parsed.lastWeek,
-      timesheetJobcodeByApKey,
-    });
+    const rows = buildReportRows(
+      parsed.events,
+      edits,
+      {
+        nvSales: parsed.nvSales,
+        utSales: parsed.utSales,
+        nvTotals: parsed.nvTotals,
+        utTotals: parsed.utTotals,
+        lastWeekMap: parsed.lastWeek,
+        timesheetJobcodeByApKey,
+      },
+      payDate,
+    );
     return sortReportRows(rows, legendOrder);
-  }, [created, ready, parsed, edits, timesheetJobcodeByApKey, legendOrder]);
+  }, [created, ready, parsed, edits, timesheetJobcodeByApKey, legendOrder, payDate]);
 
   const includedApKeys = useMemo(() => {
     const s = new Set<string>();
@@ -218,7 +223,28 @@ export default function App(): JSX.Element {
     return enrichTimesheet(parsed.timesheet.rows, parsed.nvSales, parsed.utSales, includedApKeys);
   }, [created, parsed.timesheet, parsed.nvSales, parsed.utSales, includedApKeys]);
 
-  const pivot = useMemo(() => buildPivot(enriched, legendOrder, payDate), [enriched, legendOrder, payDate]);
+  const pivot = useMemo(
+    () => buildPivot(enriched, settings.pivotColumnOrder, payDate),
+    [enriched, settings.pivotColumnOrder, payDate],
+  );
+
+  // Estimators seen in the data but missing from the stored pivot column
+  // order are appended to the setting automatically (never '#N/A').
+  useEffect(() => {
+    const merged = mergePivotColumnOrder(settings.pivotColumnOrder, pivot.estimators);
+    const hasNew = merged.some((e) => !settings.pivotColumnOrder.includes(e));
+    if (hasNew) {
+      const next: AppSettings = {
+        ...settings,
+        pivotColumnOrder: [
+          ...settings.pivotColumnOrder,
+          ...merged.filter((e) => !settings.pivotColumnOrder.includes(e)),
+        ],
+      };
+      setSettings(next);
+      saveSettings(next);
+    }
+  }, [pivot.estimators, settings]);
 
   const exceptions = useMemo(
     () =>
@@ -269,8 +295,8 @@ export default function App(): JSX.Element {
     void exportWorkbook({ rows: reportRows, pivot, legend: settings.legend, payDate });
   }, [reportRows, pivot, settings.legend, payDate]);
 
-  const onSaveSettings = useCallback((legend: LegendEntry[]): void => {
-    const next: AppSettings = { legend };
+  const onSaveSettings = useCallback((legend: LegendEntry[], pivotColumnOrder: string[]): void => {
+    const next: AppSettings = { legend, pivotColumnOrder };
     setSettings(next);
     saveSettings(next);
     setSettingsOpen(false);
@@ -375,7 +401,12 @@ export default function App(): JSX.Element {
       </div>
 
       {settingsOpen && (
-        <SettingsModal legend={settings.legend} onSave={onSaveSettings} onClose={() => setSettingsOpen(false)} />
+        <SettingsModal
+          legend={settings.legend}
+          pivotColumnOrder={settings.pivotColumnOrder}
+          onSave={onSaveSettings}
+          onClose={() => setSettingsOpen(false)}
+        />
       )}
     </div>
   );

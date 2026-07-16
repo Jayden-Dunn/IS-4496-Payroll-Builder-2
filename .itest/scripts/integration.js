@@ -1,0 +1,400 @@
+"use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+/**
+ * End-to-end pipeline test run in Node (no browser): builds synthetic versions
+ * of all 7 input files in memory with SheetJS, pushes them through the exact
+ * same parse → join → report → pivot → exceptions pipeline the app uses, and
+ * asserts the behaviors from the spec (iteration 2).
+ *
+ * Run:  node node_modules/typescript/bin/tsc scripts/integration.ts --outDir .itest \
+ *         --module commonjs --moduleResolution node --target es2020 --esModuleInterop --skipLibCheck
+ *       node .itest/scripts/integration.js   (with .itest/package.json = {"type":"commonjs"})
+ */
+const exceljs_1 = __importDefault(require("exceljs"));
+const XLSX = __importStar(require("xlsx"));
+const apkey_1 = require("../src/lib/apkey");
+const exportXlsx_1 = require("../src/lib/exportXlsx");
+const settings_1 = require("../src/lib/settings");
+const exceptions_1 = require("../src/lib/exceptions");
+const joins_1 = require("../src/lib/joins");
+const parsers_1 = require("../src/lib/parsers");
+const pivot_1 = require("../src/lib/pivot");
+const timenavi_1 = require("../src/lib/timenavi");
+let failures = 0;
+function check(name, actual, expected) {
+    const a = JSON.stringify(actual);
+    const e = JSON.stringify(expected);
+    if (a === e) {
+        console.log(`  ok    ${name}`);
+    }
+    else {
+        failures++;
+        console.error(`  FAIL  ${name}: expected ${e}, got ${a}`);
+    }
+}
+const isBlank = (v) => v === null || v === undefined || v === '';
+function wb(sheets) {
+    const book = XLSX.utils.book_new();
+    for (const [name, rows] of sheets) {
+        XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet(rows), name);
+    }
+    const buf = XLSX.write(book, { type: 'array', bookType: 'xlsx' });
+    return (0, parsers_1.readWorkbook)(buf);
+}
+// ---------------------------------------------------------------------------
+// Synthetic input files
+// ---------------------------------------------------------------------------
+const TS_HEADERS = [
+    'username', 'payroll_id', 'fname', 'lname', 'number', 'group', 'local_date', 'local_day',
+    'local_start_time', 'local_end_time', 'tz', 'hours', 'jobcode_1', 'jobcode_2', 'billable',
+    'class', 'department', 'payroll item', 'service item', 'location', 'notes', 'approved_status',
+    'has_flags', 'flag_types',
+];
+function tsRow(username, fname, lname, group, date, hours, job1, job2) {
+    return [username, '', fname, lname, '0', group, date, 'Mon', `${date} 7:00`, `${date} 10:00`, '-7', hours, job1, job2, 'No', '', '', 'Regular Pay', '', '', '', 'Approved', 'FALSE', ''];
+}
+const timesheetWb = wb([
+    ['Sheet1', [
+            TS_HEADERS,
+            tsRow('leo@x.com', 'Leonardo', 'Martinez-Rincon', "Rene Salazar's Crew", '6/29/2026', 3, 'Aaron Ward', 'AP24314 Ext'),
+            tsRow('leo@x.com', 'Leonardo', 'Martinez-Rincon', "Rene Salazar's Crew", '6/30/2026', 39, 'Aaron Ward', 'AP24314 Ext'),
+            tsRow('juan@x.com', 'Juan', 'Perez', "Rene Salazar's Crew", '7/1/2026', 5, 'CCSD', 'AP24403 5321 Lambrook Dr Int/Ext'),
+            tsRow('leo@x.com', 'Leonardo', 'Martinez-Rincon', "Rene Salazar's Crew", '7/1/2026', 0.5, 'Aaron Ward', 'Lunch'),
+            tsRow('nancy@x.com', 'Nancy', 'Duarte', 'Office (NV)', '7/2/2026', 6, 'ALLPRO OFFICE', 'OFFICE [Please put AP# in notes]'),
+            tsRow('juan@x.com', 'Juan', 'Perez', "Rene Salazar's Crew", '7/3/2026', 2, 'Mystery Co', 'AP99999 Mystery Job'),
+        ]],
+]);
+const TN_HEADERS = ['Event', 'Start Date', 'End Date', 'Calendar', 'Attendees', 'Location', 'Description'];
+const timenaviWb = wb([
+    // Decoy sheet of manually removed events — must be ignored.
+    ['Sheet1', [TN_HEADERS, ['REMOVED EVENT AP11111', '6/1/2026', '6/1/2026', 'Commercial', '', '', '']]],
+    ['Events', [
+            TN_HEADERS,
+            // Description carries NEXT week's note on top (calendar updated after the
+            // pay week) — the pay-date line must win, not the topmost line.
+            ['♦Int 13k (XC) Regina Conrad Ph1, AP24314 *PAID* (Daniel)', '6/29/2026 7:00', '7/1/2026 16:00', 'Residential (NV)', '', '123 Main St', '7/17/26 100% Complete\n7/10/26 30% COMPLETE -SH\n7/03/26 90% Complete'],
+            ['AP24222 SNRHA *SS* [PO48670] (JS)', '6/30/2026 7:00', '7/2/2026 16:00', 'Utah Jobs', '', '', '7/8/26 90% Complete'],
+            ['AP24388 Chavez Ext', '7/1/2026 7:00', '7/1/2026 16:00', 'Commercial', '', '', '7/17/26 HOURLY -SH'],
+            ['Paint shop maintenance', '7/1/2026 7:00', '7/1/2026 16:00', 'Commercial', '', '', 'no status here'],
+            ['AP24403 Lambrook (PG)', '8/1/2026 7:00', '8/2/2026 16:00', 'Residential (NV)', '', '', 'gate code 4321'],
+        ]],
+    ['Summary', [['Generated by TimeNavi'], ['Range', '6/27/2026 - 7/3/2026']]],
+]);
+// NV Sales by Rep Detail: Column A blank, combined Customer string, NO Name 1/2
+// columns (parser must derive them), oldest → newest, plus a Total junk row.
+const nvSalesWb = wb([
+    ['Sales by Customer Detail', [
+            ['', 'Date', 'Customer', 'Transaction Type', 'Num', 'Product/Service', 'Memo/Description', 'Sales Price', 'Amount', 'Balance', 'Sales Rep', ''],
+            ['', '6/10/2026', 'Chavez:AP24388 Chavez Ext', 'Invoice', '1001', 'Painting', '', '', '=1000', '', 'XC', ''],
+            ['', '6/20/2026', 'CCSD:AP24403 5321 Lambrook Dr Int/Ext', 'Invoice', '1002', 'Painting', '', '', 2498, '', 'PG', ''],
+            ['', '6/25/2026', 'Aaron Ward:AP24314 Ext', 'Invoice', '1003', 'Painting', '', '', 650, '', 'MH', ''],
+            ['', '7/2/2026', 'Aaron Ward:AP24314 Ext', 'Invoice', '1004', 'Painting', '', '', 100, '', 'MH', ''],
+            ['', '', 'Total', '', '', '', '', '', '=(I2)+(I3)', '', '', ''],
+        ]],
+]);
+// NV Sales by Customer Summary: hierarchical; job totals include "=650" strings.
+const nvSummaryWb = wb([
+    ['Sales by Customer Summary', [
+            ['', 'Total'],
+            ['Aaron Ward', ''],
+            ['   AP24314 Ext', '=650'],
+            ['Total Aaron Ward', '=(B3)'],
+            ['CCSD', ''],
+            ['   AP24403 5321 Lambrook Dr Int/Ext', 2498],
+            ['Total CCSD', '=(B6)'],
+            // AP24388 deliberately missing → "Job total not found" exception + #N/A.
+        ]],
+]);
+// UT Transaction List by Date: Name combined + Name 1 / Name 2 present.
+const utSalesWb = wb([
+    ['Transaction List by Date', [
+            ['', 'Date', 'Name', 'Name 1', 'Name 2', 'Transaction Type', 'Num', 'Split', 'Memo/Description', 'Account', 'Amount', 'Open Balance', 'Sales Rep', ''],
+            ['', '6/23/2026', 'SNRHA:AP24222 Ext', 'SNRHA', 'AP24222 Ext', 'Invoice', '2001', '', '', '', 14410.63, '', 'JS', ''],
+        ]],
+]);
+// UT Sales by Customer Summary: 3 title rows before the header (scan handles it).
+const utSummaryWb = wb([
+    ['Sales by Customer Summary', [
+            ['AllPro Painters LLC'],
+            ['Sales by Customer Summary'],
+            ['June 27 - July 3, 2026'],
+            ['', 'Total'],
+            ['SNRHA', ''],
+            ['   AP24222 Ext', 14410.63],
+            ['Total SNRHA', '=(B6)'],
+        ]],
+]);
+// Last week's finished workbook (optional slot 7). Includes a suffixed AP key
+// that must round-trip intact (never collapse to the base number).
+const lastWeekWb = wb([
+    ['TimeNavi Export', [
+            ['Event', 'Start Date', 'End Date', 'Calendar', 'Attendees', 'Location', 'Description', 'AP#', '% Completion'],
+            ['old event', '6/22/2026', '6/23/2026', 'Commercial', '', '', '', '24314', 0.9],
+            ['old event 2', '6/22/2026', '6/23/2026', 'Utah Jobs', '', '', '', '24222', 'HOURLY'],
+            ['old event 3', '6/22/2026', '6/23/2026', 'Commercial', '', '', '', '21848-A5', 0.75],
+        ]],
+    ['Pivot by Crew', [['NV PAYROLL: 7/3/2026']]],
+]);
+// ---------------------------------------------------------------------------
+// Run the pipeline exactly like the app does
+// ---------------------------------------------------------------------------
+console.log('parsing…');
+const timesheet = (0, parsers_1.parseTimesheet)(timesheetWb);
+const events = (0, parsers_1.parseTimeNavi)(timenaviWb);
+const nvSales = (0, parsers_1.parseSalesDetail)(nvSalesWb, 'customer');
+const nvTotals = (0, parsers_1.parseCustomerSummary)(nvSummaryWb);
+const utSales = (0, parsers_1.parseSalesDetail)(utSalesWb, 'name');
+const utTotals = (0, parsers_1.parseCustomerSummary)(utSummaryWb);
+const lastWeek = (0, parsers_1.parseLastWeek)(lastWeekWb);
+check('timesheet rows kept', timesheet.rows.length, 5);
+check('lunch rows removed', timesheet.lunchRemoved, 1);
+check('events parsed from Events sheet only', events.length, 5);
+check('decoy Sheet1 ignored', events.some((e) => e.event.includes('REMOVED')), false);
+check('nv sales rows (Total row skipped)', nvSales.length, 4);
+check('nv sales Name2 derived from Customer', nvSales[2].name2, 'AP24314 Ext');
+check('nv formula-remnant amount row still parsed (apKey)', nvSales[0].apKey, '24388');
+check('nv totals: "=650" parsed', nvTotals.get('24314'), 650);
+check('nv totals: subtotal formula rows skipped', nvTotals.size, 2);
+check('ut totals found after title rows', utTotals.get('24222'), 14410.63);
+check('last week map values as-is', [lastWeek.get('24314'), lastWeek.get('24222')], [0.9, 'HOURLY']);
+check('last week suffixed key intact (…-A5)', lastWeek.get('21848-A5'), 0.75);
+check('last week suffixed key does NOT collapse to base', lastWeek.get('21848'), undefined);
+// Timezone-safe dates: no time component anywhere.
+check('event start date has no time component', events[0].startDate ? [events[0].startDate.getHours(), events[0].startDate.getMinutes()] : null, [0, 0]);
+check('sales date has no time component', nvSales[0].date ? [nvSales[0].date.getHours(), nvSales[0].date.getMinutes()] : null, [0, 0]);
+// Default pay date = max local_date (7/3/2026) + 7 days = 7/10/2026.
+let maxDate = null;
+for (const r of timesheet.rows) {
+    if (r.localDate && (!maxDate || r.localDate.getTime() > maxDate.getTime()))
+        maxDate = r.localDate;
+}
+const payDate = new Date(maxDate.getFullYear(), maxDate.getMonth(), maxDate.getDate() + 7);
+check('default pay date', [payDate.getMonth() + 1, payDate.getDate(), payDate.getFullYear()], [7, 10, 2026]);
+const timesheetJobcodeByApKey = new Map();
+for (const r of timesheet.rows) {
+    const key = (0, apkey_1.timesheetApKey)(r.jobcode2);
+    if (key && !timesheetJobcodeByApKey.has(key))
+        timesheetJobcodeByApKey.set(key, r.jobcode2);
+}
+const deps = { nvSales, utSales, nvTotals, utTotals, lastWeekMap: lastWeek, timesheetJobcodeByApKey };
+const legendOrder = ['JS', 'MH', 'PG', 'TE', 'XC', 'ND'];
+const rows = (0, timenavi_1.sortReportRows)((0, timenavi_1.buildReportRows)(events, {}, deps, payDate), legendOrder);
+const byAp = (k) => rows.find((r) => r.apKey === k);
+console.log('report rows…');
+check('row count', rows.length, 5);
+check('no-AP event excluded by default', rows.find((r) => r.apKey === null).included, false);
+check('AP events included by default', rows.filter((r) => r.included).length, 4);
+const r24314 = byAp('24314');
+check('24314 estimator (UT first, then NV)', r24314.estimator, 'MH');
+// B-1: pay-date line (7/10 → 30%) wins over the newer 7/17 100% line on top.
+check('24314 suggested % is the PAY DATE line (30%, not 100%)', r24314.percent, 0.3);
+check('24314 % source line', r24314.suggestedSourceLine, '7/10/26 30% COMPLETE -SH');
+check('24314 last % paid (from workbook only)', r24314.lastPaid, 0.9);
+check('24314 QBO job name (NV first)', r24314.qboJobName, 'AP24314 Ext');
+check('24314 In QBO Time', r24314.inQboTime, 'AP24314 Ext');
+check('24314 job total', r24314.jobTotal, 650);
+check('24314 apptivo defaults to job total', r24314.apptivo, 650);
+check('24314 invoice date = FIRST (earliest) match', [r24314.invoiceDate.getMonth() + 1, r24314.invoiceDate.getDate()], [6, 25]);
+check('24314 date difference (R − B, whole days)', r24314.dateDiff, -4);
+check('24314 title initials for mismatch check', r24314.titleInitials, 'XC');
+const r24222 = byAp('24222');
+check('24222 estimator resolves via UT (JS)', r24222.estimator, 'JS');
+check('24222 job total from UT summary', r24222.jobTotal, 14410.63);
+check('24222 NotClockedIn (no Utah crew in timesheet)', r24222.inQboTime, 'NotClockedIn');
+check('24222 last % paid HOURLY (text as-is)', r24222.lastPaid, 'HOURLY');
+check('24222 % from latest line ≤ pay date (7/8 → 90%)', r24222.percent, 0.9);
+const r24388 = byAp('24388');
+// B-1: the only status line (7/17) is AFTER pay date 7/10 → no suggestion.
+check('24388 no suggestion (only line is after pay date)', r24388.percent, null);
+check('24388 estimator', r24388.estimator, 'XC');
+// B-3: unmatched job total renders like Excel.
+check('24388 job total = #N/A (not 0)', r24388.jobTotal, '#N/A');
+check('24388 jobTotalFound false', r24388.jobTotalFound, false);
+check('24388 apptivo blank (not 0)', r24388.apptivo, null);
+check('24388 $ difference blank (not 0)', r24388.dollarDiff, null);
+check('sorted by legend order (JS first)', rows[0].apKey, '24222');
+// E-3: same TimeNavi file, pay date 7/17 → different suggestions.
+const rows717 = (0, timenavi_1.buildReportRows)(events, {}, deps, new Date(2026, 6, 17));
+check('pay 7/17: 24314 suggests 100%', rows717.find((r) => r.apKey === '24314').percent, 1);
+check('pay 7/17: 24388 suggests HOURLY', rows717.find((r) => r.apKey === '24388').percent, 'HOURLY');
+// E-4: with no prior-week workbook, every K cell is '-' (null).
+const rowsNoPrev = (0, timenavi_1.buildReportRows)(events, {}, { ...deps, lastWeekMap: null }, payDate);
+check('no prior workbook → all Last % Paid empty', rowsNoPrev.every((r) => r.lastPaid === null), true);
+console.log('enrichment + pivot…');
+const includedApKeys = new Set();
+for (const r of rows)
+    if (r.included && r.apKey)
+        includedApKeys.add(r.apKey);
+const enriched = (0, joins_1.enrichTimesheet)(timesheet.rows, nvSales, utSales, includedApKeys);
+check('OFFICE → ND', enriched.find((r) => r.apKey === 'OFFICE').estimator, 'ND');
+check('exact jobcode_2 match → MH', enriched.find((r) => r.jobcode2 === 'AP24314 Ext').estimator, 'MH');
+check('unmatched job → #N/A', enriched.find((r) => r.apKey === '99999').estimator, '#N/A');
+check('99999 not on calendar', enriched.find((r) => r.apKey === '99999').notOnCalendar, true);
+check('OFFICE never "not on calendar"', enriched.find((r) => r.apKey === 'OFFICE').notOnCalendar, false);
+// D-2: pivot columns come from the persisted setting (MH, PG, XC, ND, TE, JS
+// seed), only estimators present render, #N/A always last.
+const pivot = (0, pivot_1.buildPivot)(enriched, settings_1.DEFAULT_PIVOT_COLUMNS, payDate);
+check('pivot title', pivot.title, 'NV PAYROLL: 7/10/2026');
+check('pivot estimator columns (setting order, #N/A last)', pivot.estimators, ['MH', 'PG', 'ND', '#N/A']);
+check('pivot grand total', pivot.grandTotal, 55);
+check('pivot MH hours', pivot.grandByEstimator['MH'], 42);
+// D-3: crews A→Z (not file order).
+check('pivot crews A→Z', pivot.crews.map((c) => c.crew), ['Office (NV)', "Rene Salazar's Crew"]);
+const rene = pivot.crews[1];
+// D-3: employees A→Z by username (juan before leo despite leo appearing first in the file).
+check('employees A→Z by username', rene.employees.map((e) => e.username), ['juan@x.com', 'leo@x.com']);
+const juan = rene.employees[0];
+const leo = rene.employees[1];
+check('leo total', leo.total, 42);
+check('leo overtime flag (>40)', leo.overtime, true);
+check('juan not overtime', juan.overtime, false);
+// D-3: job rows A→Z by (customer, jobcode_2).
+check('juan jobs sorted', juan.jobs.map((j) => [j.customer, j.job]), [
+    ['CCSD', 'AP24403 5321 Lambrook Dr Int/Ext'],
+    ['Mystery Co', 'AP99999 Mystery Job'],
+]);
+// A custom pivot order must reorder columns (proves it is setting-driven).
+const pivotCustom = (0, pivot_1.buildPivot)(enriched, ['ND', 'PG', 'MH'], payDate);
+check('custom pivot order respected', pivotCustom.estimators, ['ND', 'PG', 'MH', '#N/A']);
+console.log('exceptions…');
+const groups = (0, exceptions_1.buildExceptions)({ reportRows: rows, enriched, lunchRemoved: timesheet.lunchRemoved, payDate });
+const g = (key) => groups.find((x) => x.key === key);
+check('excluded events', g('excluded').items.length, 1);
+check('not clocked in', g('notClockedIn')
+    .items.map((i) => i.message.match(/AP (\d+)/)[1])
+    .sort(), ['24222', '24388']);
+check('not on calendar (AP99999)', g('notOnCalendar').items.length, 1);
+check('estimator #N/A with hours', g('estimatorNA').items.length, 1);
+check('mismatch: calendar (XC) vs books MH', g('mismatch').items.length, 1);
+check('no duplicates this week', g('duplicates').items.length, 0);
+check('date-range warning for 8/1 event', g('dateRange').items.length, 1);
+check('job total not found (24388)', g('noJobTotal').items.length, 1);
+check('lunch count', g('lunch').items.length, 1);
+// E-6: fixing an AP# re-runs every lookup for that row live.
+console.log('edit simulation…');
+const noApRow = rows.find((r) => r.apKey === null);
+const rows2 = (0, timenavi_1.buildReportRows)(events, { [noApRow.id]: { apKey: '24314' } }, deps, payDate);
+const fixed = rows2.find((r) => r.id === noApRow.id);
+check('edited AP# re-includes the row', fixed.included, true);
+check('edited AP# re-runs estimator/jobname/inqbotime/total/invoice', [fixed.estimator, fixed.qboJobName, fixed.inQboTime, fixed.jobTotal, fixed.invoiceDate.getDate()], ['MH', 'AP24314 Ext', 'AP24314 Ext', 650, 25]);
+check('duplicate AP# now detected', (0, exceptions_1.buildExceptions)({ reportRows: rows2, enriched, lunchRemoved: 0, payDate }).find((x) => x.key === 'duplicates').items.length, 1);
+// ---------------------------------------------------------------------------
+// Export: build the styled workbook and read it back with ExcelJS
+// ---------------------------------------------------------------------------
+async function testExport() {
+    console.log('xlsx export…');
+    const buf = await (0, exportXlsx_1.buildWorkbookBuffer)({ rows, pivot, legend: settings_1.DEFAULT_LEGEND, payDate });
+    const readBack = new exceljs_1.default.Workbook();
+    await readBack.xlsx.load(buf);
+    check('sheet names', readBack.worksheets.map((w) => w.name), ['TimeNavi Export', 'Pivot by Crew']);
+    const tn = readBack.getWorksheet('TimeNavi Export');
+    check('TimeNavi frozen at A2', [tn.views[0].state, tn.views[0].ySplit], ['frozen', 1]);
+    check('TimeNavi header text', [tn.getCell('A1').value, tn.getCell('H1').value, tn.getCell('S1').value], ['Event', 'AP#', 'Date Difference']);
+    const headerFill = tn.getCell('A1').fill;
+    check('TimeNavi header green fill', headerFill.fgColor?.argb, 'FF1BA41B');
+    // C-2: white NON-bold header text.
+    check('TimeNavi header white and not bold', [tn.getCell('A1').font?.bold === true, tn.getCell('A1').font?.color?.argb], [false, 'FFFFFFFF']);
+    // C-3: reference column widths.
+    check('column widths (A, B, G, H, L)', [1, 2, 7, 8, 12].map((c) => tn.getColumn(c).width), [60, 11, 13, 6.5, 39]);
+    check('Description wrap off', tn.getCell('G2').alignment?.wrapText === true, false);
+    // Only the 4 included rows are exported; row 2 = JS (24222) after sorting.
+    check('only included rows exported', tn.actualRowCount, 5);
+    check('row 2 is the JS job', tn.getCell('H2').value, '24222');
+    const rowFill = tn.getCell('A2').fill;
+    check('JS row peach fill', rowFill.fgColor?.argb, 'FFFABF8F');
+    // B-4 / C-1: date cells are UTC-midnight (no time), formatted mm-dd-yy.
+    const b2 = tn.getCell('B2').value;
+    check('Start Date UTC-midnight, no time', [b2.getUTCFullYear(), b2.getUTCMonth() + 1, b2.getUTCDate(), b2.getUTCHours(), b2.getUTCMinutes()], [2026, 6, 30, 0, 0]);
+    check('Start/End Date format mm-dd-yy', [tn.getCell('B2').numFmt, tn.getCell('C2').numFmt], ['mm-dd-yy', 'mm-dd-yy']);
+    check('Invoice Date format mm/dd/yyyy', tn.getCell('R2').numFmt, 'mm/dd/yyyy');
+    check('Date Difference integer format', [tn.getCell('S2').value, tn.getCell('S2').numFmt], [-7, '0']);
+    check('percent stored as fraction + 0% format', [tn.getCell('I2').value, tn.getCell('I2').numFmt], [0.9, '0%']);
+    check('Last % Paid HOURLY text survives', tn.getCell('K2').value, 'HOURLY');
+    // C-1: accounting format WITHOUT $. ExcelJS normalizes away the backslash
+    // escapes on read-back ('\(' → '('), which renders identically in Excel, so
+    // compare with escapes stripped.
+    check('money accounting format, no $', [tn.getCell('N2').value, String(tn.getCell('N2').numFmt).replace(/\\/g, '')], [14410.63, '_(* #,##0.00_);_(* (#,##0.00);_(* "-"??_);_(@_)']);
+    check('%compl mirrors % Completion', tn.getCell('Q2').value, 0.9);
+    // Row 5 = XC (24388): #N/A / blank / blank, '-' for last paid.
+    check('unmatched Job Total exports literal #N/A', tn.getCell('N5').value, '#N/A');
+    check('unmatched Apptivo blank', isBlank(tn.getCell('O5').value), true);
+    check('unmatched $ Difference blank', isBlank(tn.getCell('P5').value), true);
+    check('dash for missing last % paid (24388 row)', tn.getCell('K5').value, '-');
+    // D-1: four-row pivot header block, frozen at A5.
+    const pv = readBack.getWorksheet('Pivot by Crew');
+    check('pivot frozen at A5', [pv.views[0].state, pv.views[0].ySplit], ['frozen', 4]);
+    check('pivot row 1 title', pv.getCell('A1').value, 'NV PAYROLL: 7/10/2026');
+    check('pivot row 2 Name/Job/Hours', [pv.getCell('C2').value, pv.getCell('D2').value, pv.getCell('E2').value], ['Name', 'Job', 'Hours']);
+    check('pivot row 3 chrome', [pv.getCell('A3').value, pv.getCell('E3').value], ['Sum of hours', 'Column Labels']);
+    check('pivot row 4 field header (jobcode_2 label kept)', [pv.getCell('A4').value, pv.getCell('B4').value, pv.getCell('C4').value, pv.getCell('D4').value, pv.getCell('E4').value, pv.getCell('I4').value], ['Row Labels', 'fname', 'lname', 'jobcode_2', 'MH', 'Grand Total']);
+    const pvHeaderFill = pv.getCell('A4').fill;
+    check('pivot header steel-blue fill', pvHeaderFill.fgColor?.argb, 'FFDCE6F1');
+    check('pivot header bold', pv.getCell('A4').font?.bold, true);
+    // Crews A→Z in the sheet; crew rows banded.
+    check('first crew row (A→Z)', pv.getCell('A5').value, 'Office (NV)');
+    const crewFill = pv.getCell('A5').fill;
+    check('crew row steel-blue fill', crewFill.fgColor?.argb, 'FFDCE6F1');
+    // D-4: hours formatted 0.00 everywhere.
+    let grandRowNum = 0;
+    pv.eachRow((row, n) => {
+        if (row.getCell(1).value === 'Grand Total')
+            grandRowNum = n;
+    });
+    const grandCell = pv.getRow(grandRowNum).getCell(4 + pivot.estimators.length + 1);
+    check('grand total value + 0.00 format', [grandCell.value, grandCell.numFmt], [55, '0.00']);
+    // D-5: overtime fill on the computed Grand Total column.
+    let overtimeCell = null;
+    pv.eachRow((row) => {
+        row.eachCell((cell) => {
+            const fill = cell.fill;
+            if (fill && fill.type === 'pattern' && fill.fgColor?.argb === 'FFFFFF99')
+                overtimeCell = cell;
+        });
+    });
+    check('overtime grand-total cell filled FFFFFF99 (42 h)', overtimeCell === null ? null : overtimeCell.value, 42);
+}
+testExport()
+    .catch((err) => {
+    failures++;
+    console.error('  FAIL  export threw:', err);
+})
+    .then(() => {
+    console.log(failures === 0 ? '\nINTEGRATION: ALL PASSED' : `\nINTEGRATION: ${failures} FAILURES`);
+    globalThis.process.exitCode = failures === 0 ? 0 : 1;
+});
