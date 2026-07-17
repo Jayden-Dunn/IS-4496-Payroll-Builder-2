@@ -9,7 +9,6 @@ exports.exportWorkbook = exportWorkbook;
 const exceljs_1 = __importDefault(require("exceljs"));
 const file_saver_1 = require("file-saver");
 const format_1 = require("./format");
-const GREEN = 'FF1BA41B';
 const BLACK = 'FF000000';
 const WHITE = 'FFFFFFFF';
 const HEADER_GRAY = 'FF808080';
@@ -79,14 +78,17 @@ function buildTimeNaviSheet(wb, input, palette) {
         views: [{ state: 'frozen', ySplit: 1 }], // freeze at A2
     });
     ws.columns = TN_WIDTHS.map((width) => ({ width }));
-    // Header: raw TimeNavi columns keep the green; appended analysis columns are
-    // black. Both white, NOT bold.
+    // Header: the ENTIRE row (A1 → last populated header) is black with white
+    // non-bold text — no green remains. Paint by column index so every header
+    // cell is covered (ExcelJS eachCell can skip cells in some edge cases).
     const header = ws.addRow(TN_HEADERS);
-    header.eachCell({ includeEmpty: false }, (cell, col) => {
-        cell.fill = solidFill(col <= TN_RAW_HEADERS.length ? GREEN : BLACK);
-        cell.font = { name: FONT, color: { argb: WHITE } };
+    for (let c = 1; c <= TN_HEADERS.length; c++) {
+        const cell = header.getCell(c);
+        cell.value = TN_HEADERS[c - 1];
+        cell.fill = solidFill(BLACK);
+        cell.font = { name: FONT, color: { argb: WHITE }, bold: false };
         cell.alignment = { vertical: 'middle', wrapText: false };
-    });
+    }
     // Hide (never delete) the reference's hidden columns, located by header text.
     for (const h of TN_HIDDEN_HEADERS) {
         const idx = TN_HEADERS.indexOf(h);
@@ -203,41 +205,52 @@ function buildPivotSheet(wb, pivot, palette) {
         ...estCols.map((e) => (byEstimator[e] !== undefined ? byEstimator[e] : '')),
         total,
     ];
-    /** Body row: full-height estimator column bands + gray Grand Total band. */
-    const styleBodyRow = (row) => {
+    /**
+     * Body row: full-height estimator column bands + gray Grand Total band.
+     * Bold (Round 2): employee rows bold A:C; job rows bold the customer label
+     * in C only; "X Total" rows bold across, with a thin bottom border closing
+     * the employee block.
+     */
+    const styleBodyRow = (row, kind) => {
+        const boldAt = (c) => kind === 'total' ? true : kind === 'employee' ? c <= 3 : c === 3;
         for (let c = 1; c <= 4; c++)
-            paint(row.getCell(c), {});
+            paint(row.getCell(c), { bold: boldAt(c) });
         estCols.forEach((e, i) => {
             const hex = palette.get(e);
             const cell = row.getCell(5 + i);
-            paint(cell, hex ? { fill: 'FF' + hex, color: textOn(hex) } : {});
+            paint(cell, { ...(hex ? { fill: 'FF' + hex, color: textOn(hex) } : {}), bold: boldAt(5 + i) });
             if (typeof cell.value === 'number')
                 cell.numFmt = HOURS_FMT;
         });
         const gt = row.getCell(gtCol);
-        paint(gt, { fill: GRAND_TOTAL_GRAY });
+        paint(gt, { fill: GRAND_TOTAL_GRAY, bold: boldAt(gtCol) });
         if (typeof gt.value === 'number')
             gt.numFmt = HOURS_FMT;
+        if (kind === 'total') {
+            for (let c = 1; c <= gtCol; c++) {
+                row.getCell(c).border = { bottom: { style: 'thin' } };
+            }
+        }
     };
     for (const crew of pivot.crews) {
         // Crew-lead rows: full-width black band, overrides the column bands.
         blackBand(ws.addRow([crew.crew]));
         for (const emp of crew.employees) {
-            styleBodyRow(ws.addRow([emp.username, emp.fname, emp.lname]));
+            styleBodyRow(ws.addRow([emp.username, emp.fname, emp.lname]), 'employee');
             for (const job of emp.jobs) {
-                styleBodyRow(ws.addRow(['', '', job.customer, job.job, ...hoursCells(job.byEstimator, job.total)]));
+                styleBodyRow(ws.addRow(['', '', job.customer, job.job, ...hoursCells(job.byEstimator, job.total)]), 'job');
             }
-            styleBodyRow(ws.addRow(['', `${emp.fname} Total`, '', '', ...hoursCells(emp.byEstimator, emp.total)]));
+            styleBodyRow(ws.addRow(['', `${emp.fname} Total`, '', '', ...hoursCells(emp.byEstimator, emp.total)]), 'total');
         }
     }
-    // Grand Total row: gray/white on column A and every value column; B:D plain.
+    // Grand Total row: bold, gray/white on column A and every value column; B:D plain.
     const grandRow = ws.addRow(['Grand Total', '', '', '', ...hoursCells(pivot.grandByEstimator, pivot.grandTotal)]);
-    paint(grandRow.getCell(1), { fill: HEADER_GRAY, color: WHITE });
+    paint(grandRow.getCell(1), { fill: HEADER_GRAY, color: WHITE, bold: true });
     for (let c = 2; c <= 4; c++)
         paint(grandRow.getCell(c), {});
     for (let c = 5; c <= gtCol; c++) {
         const cell = grandRow.getCell(c);
-        paint(cell, { fill: HEADER_GRAY, color: WHITE });
+        paint(cell, { fill: HEADER_GRAY, color: WHITE, bold: true });
         if (typeof cell.value === 'number')
             cell.numFmt = HOURS_FMT;
     }

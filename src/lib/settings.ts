@@ -25,6 +25,36 @@ export const DEFAULT_PIVOT_COLUMNS: string[] = ['MH', 'PG', 'XC', 'ND', 'TE', 'R
 // intentionally not migrated so the new defaults take effect.
 const STORAGE_KEY = 'pct-completion-builder.settings.v3';
 
+/**
+ * Heal a stored pivot column order so every DEFAULT_PIVOT_COLUMNS entry is
+ * present, and RF sits immediately after TE (even if a prior auto-append left
+ * RF after extras like JS). Other estimators keep their relative order.
+ */
+export function ensureDefaultPivotColumns(order: string[]): string[] {
+  const out = order.filter((e) => e !== '#N/A');
+  for (let i = 0; i < DEFAULT_PIVOT_COLUMNS.length; i++) {
+    const def = DEFAULT_PIVOT_COLUMNS[i];
+    if (out.includes(def)) continue;
+    let insertAt = out.length;
+    for (let j = i - 1; j >= 0; j--) {
+      const prevAt = out.indexOf(DEFAULT_PIVOT_COLUMNS[j]);
+      if (prevAt >= 0) {
+        insertAt = prevAt + 1;
+        break;
+      }
+    }
+    out.splice(insertAt, 0, def);
+  }
+  // RF must sit immediately after TE (Round 2 §4).
+  const teAt = out.indexOf('TE');
+  const rfAt = out.indexOf('RF');
+  if (teAt >= 0 && rfAt >= 0 && rfAt !== teAt + 1) {
+    out.splice(rfAt, 1);
+    out.splice(out.indexOf('TE') + 1, 0, 'RF');
+  }
+  return out;
+}
+
 export function defaultSettings(): AppSettings {
   return {
     legend: DEFAULT_LEGEND.map((l) => ({ ...l })),
@@ -67,7 +97,9 @@ export function loadSettings(): AppSettings {
       const parsed: unknown = JSON.parse(raw);
       const legend = parseLegend(parsed);
       if (legend) {
-        const pivotColumnOrder = parsePivotOrder(parsed) ?? [...DEFAULT_PIVOT_COLUMNS];
+        const pivotColumnOrder = ensureDefaultPivotColumns(
+          parsePivotOrder(parsed) ?? [...DEFAULT_PIVOT_COLUMNS],
+        );
         return { legend, pivotColumnOrder };
       }
     }

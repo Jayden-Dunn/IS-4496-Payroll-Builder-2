@@ -22,7 +22,7 @@
     @apply border border-neutral-300 px-1.5 py-0.5 align-top;
   }
   .xhead {
-    @apply border border-green-800 bg-brand px-1.5 py-1 text-left font-semibold text-white;
+    @apply border border-neutral-700 bg-black px-1.5 py-1 text-left font-normal text-white;
   }
   /* Pivot header cells — colors come from inline styles (palette/black/gray). */
   .xcell2 {

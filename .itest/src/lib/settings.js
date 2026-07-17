@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.DEFAULT_PIVOT_COLUMNS = exports.DEFAULT_LEGEND = void 0;
+exports.ensureDefaultPivotColumns = ensureDefaultPivotColumns;
 exports.defaultSettings = defaultSettings;
 exports.loadSettings = loadSettings;
 exports.saveSettings = saveSettings;
@@ -27,6 +28,36 @@ exports.DEFAULT_PIVOT_COLUMNS = ['MH', 'PG', 'XC', 'ND', 'TE', 'RF'];
 // v3: palette changed (ND recolored, RF added) — older stored settings are
 // intentionally not migrated so the new defaults take effect.
 const STORAGE_KEY = 'pct-completion-builder.settings.v3';
+/**
+ * Heal a stored pivot column order so every DEFAULT_PIVOT_COLUMNS entry is
+ * present, and RF sits immediately after TE (even if a prior auto-append left
+ * RF after extras like JS). Other estimators keep their relative order.
+ */
+function ensureDefaultPivotColumns(order) {
+    const out = order.filter((e) => e !== '#N/A');
+    for (let i = 0; i < exports.DEFAULT_PIVOT_COLUMNS.length; i++) {
+        const def = exports.DEFAULT_PIVOT_COLUMNS[i];
+        if (out.includes(def))
+            continue;
+        let insertAt = out.length;
+        for (let j = i - 1; j >= 0; j--) {
+            const prevAt = out.indexOf(exports.DEFAULT_PIVOT_COLUMNS[j]);
+            if (prevAt >= 0) {
+                insertAt = prevAt + 1;
+                break;
+            }
+        }
+        out.splice(insertAt, 0, def);
+    }
+    // RF must sit immediately after TE (Round 2 §4).
+    const teAt = out.indexOf('TE');
+    const rfAt = out.indexOf('RF');
+    if (teAt >= 0 && rfAt >= 0 && rfAt !== teAt + 1) {
+        out.splice(rfAt, 1);
+        out.splice(out.indexOf('TE') + 1, 0, 'RF');
+    }
+    return out;
+}
 function defaultSettings() {
     return {
         legend: exports.DEFAULT_LEGEND.map((l) => ({ ...l })),
@@ -73,7 +104,7 @@ function loadSettings() {
             const parsed = JSON.parse(raw);
             const legend = parseLegend(parsed);
             if (legend) {
-                const pivotColumnOrder = parsePivotOrder(parsed) ?? [...exports.DEFAULT_PIVOT_COLUMNS];
+                const pivotColumnOrder = ensureDefaultPivotColumns(parsePivotOrder(parsed) ?? [...exports.DEFAULT_PIVOT_COLUMNS]);
                 return { legend, pivotColumnOrder };
             }
         }

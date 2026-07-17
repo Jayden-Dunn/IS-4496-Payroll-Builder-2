@@ -19,7 +19,7 @@ import {
   readWorkbook,
 } from './lib/parsers';
 import { buildPivot } from './lib/pivot';
-import { loadSettings, mergePivotColumnOrder, saveSettings } from './lib/settings';
+import { ensureDefaultPivotColumns, loadSettings, saveSettings } from './lib/settings';
 import { buildReportRows, sortReportRows } from './lib/timenavi';
 import type {
   AppSettings,
@@ -243,22 +243,19 @@ export default function App(): JSX.Element {
     [enriched, settings.pivotColumnOrder, payDate],
   );
 
-  // Estimators seen in the data but missing from the stored pivot column
-  // order are appended to the setting automatically (never '#N/A').
+  // Keep the fixed MH…RF block intact (heals stale localStorage missing RF)
+  // and append any other estimators seen in the data (never '#N/A').
   useEffect(() => {
-    const merged = mergePivotColumnOrder(settings.pivotColumnOrder, pivot.estimators);
-    const hasNew = merged.some((e) => !settings.pivotColumnOrder.includes(e));
-    if (hasNew) {
-      const next: AppSettings = {
-        ...settings,
-        pivotColumnOrder: [
-          ...settings.pivotColumnOrder,
-          ...merged.filter((e) => !settings.pivotColumnOrder.includes(e)),
-        ],
-      };
-      setSettings(next);
-      saveSettings(next);
-    }
+    const base = ensureDefaultPivotColumns(settings.pivotColumnOrder);
+    const extras = pivot.estimators.filter((e) => e !== '#N/A' && !base.includes(e));
+    const nextOrder = [...base, ...extras];
+    const unchanged =
+      nextOrder.length === settings.pivotColumnOrder.length &&
+      nextOrder.every((e, i) => e === settings.pivotColumnOrder[i]);
+    if (unchanged) return;
+    const next: AppSettings = { ...settings, pivotColumnOrder: nextOrder };
+    setSettings(next);
+    saveSettings(next);
   }, [pivot.estimators, settings]);
 
   const exceptions = useMemo(

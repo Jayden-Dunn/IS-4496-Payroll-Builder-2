@@ -24,9 +24,9 @@ export function PivotTable({ pivot, colorByEstimator }: PivotTableProps): JSX.El
   // "Hours" sits over the middle of the estimator block (no merge).
   const hoursIdx = Math.floor((estCols.length - 1) / 2);
 
-  const hoursCells = (byEstimator: Record<string, number>): JSX.Element[] =>
+  const hoursCells = (byEstimator: Record<string, number>, cls = 'xcell'): JSX.Element[] =>
     estCols.map((e) => (
-      <td key={e} className="xcell text-right" style={bandStyle(colorByEstimator.get(e))}>
+      <td key={e} className={`${cls} text-right`} style={bandStyle(colorByEstimator.get(e))}>
         {byEstimator[e] !== undefined ? fmtHoursFixed(byEstimator[e]) : ''}
       </td>
     ));
@@ -107,18 +107,18 @@ export function PivotTable({ pivot, colorByEstimator }: PivotTableProps): JSX.El
           />
         ))}
         <tr>
-          <td className="xcell" style={GRAND_GRAY}>
+          <td className="xcell font-bold" style={GRAND_GRAY}>
             Grand Total
           </td>
           <td className="xcell" />
           <td className="xcell" />
           <td className="xcell" />
           {estCols.map((e) => (
-            <td key={e} className="xcell text-right" style={GRAND_GRAY}>
+            <td key={e} className="xcell text-right font-bold" style={GRAND_GRAY}>
               {pivot.grandByEstimator[e] !== undefined ? fmtHoursFixed(pivot.grandByEstimator[e]) : ''}
             </td>
           ))}
-          <td className="xcell text-right" style={GRAND_GRAY}>
+          <td className="xcell text-right font-bold" style={GRAND_GRAY}>
             {fmtHoursFixed(pivot.grandTotal)}
           </td>
         </tr>
@@ -138,7 +138,7 @@ function CrewRows({
   estCols: string[];
   totalCols: number;
   colorByEstimator: ReadonlyMap<string, string>;
-  hoursCells: (byEstimator: Record<string, number>) => JSX.Element[];
+  hoursCells: (byEstimator: Record<string, number>, cls?: string) => JSX.Element[];
 }): JSX.Element {
   return (
     <>
@@ -170,17 +170,19 @@ function EmployeeRows({
   emp: PivotModel['crews'][number]['employees'][number];
   estCols: string[];
   colorByEstimator: ReadonlyMap<string, string>;
-  hoursCells: (byEstimator: Record<string, number>) => JSX.Element[];
+  hoursCells: (byEstimator: Record<string, number>, cls?: string) => JSX.Element[];
 }): JSX.Element {
   const emptyBand = estCols.map((e) => (
     <td key={e} className="xcell" style={bandStyle(colorByEstimator.get(e))} />
   ));
+  // "X Total" rows close the employee block with a thin bottom border.
+  const totalCls = 'xcell border-b-2 border-b-neutral-400 font-bold';
   return (
     <>
       <tr>
-        <td className="xcell">{emp.username}</td>
-        <td className="xcell">{emp.fname}</td>
-        <td className="xcell">{emp.lname}</td>
+        <td className="xcell font-bold">{emp.username}</td>
+        <td className="xcell font-bold">{emp.fname}</td>
+        <td className="xcell font-bold">{emp.lname}</td>
         <td className="xcell" />
         {emptyBand}
         <td className="xcell" style={GT_BAND} />
@@ -189,7 +191,7 @@ function EmployeeRows({
         <tr key={`${job.customer}\u0000${job.job}`}>
           <td className="xcell" />
           <td className="xcell" />
-          <td className="xcell">{job.customer}</td>
+          <td className="xcell font-bold">{job.customer}</td>
           <td className="xcell">{job.job}</td>
           {hoursCells(job.byEstimator)}
           <td className="xcell text-right" style={GT_BAND}>
@@ -198,13 +200,13 @@ function EmployeeRows({
         </tr>
       ))}
       <tr>
-        <td className="xcell" />
-        <td className="xcell">{emp.fname} Total</td>
-        <td className="xcell" />
-        <td className="xcell" />
-        {hoursCells(emp.byEstimator)}
+        <td className={totalCls} />
+        <td className={totalCls}>{emp.fname} Total</td>
+        <td className={totalCls} />
+        <td className={totalCls} />
+        {hoursCells(emp.byEstimator, totalCls)}
         <td
-          className="xcell text-right"
+          className={`${totalCls} text-right`}
           // On-screen review aid only (not exported): flag >40h weeks.
           style={emp.overtime ? { ...GT_BAND, backgroundColor: OVERTIME_BG } : GT_BAND}
           title={emp.overtime ? 'Overtime: grand total exceeds 40 hours (on-screen flag only)' : undefined}

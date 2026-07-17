@@ -1,17 +1,63 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.orderLeadFirst = orderLeadFirst;
 exports.buildPivot = buildPivot;
 const format_1 = require("./format");
 const settings_1 = require("./settings");
+// ---------------------------------------------------------------------------
+// Crew-lead detection (dynamic — derived from the group label, never names)
+// ---------------------------------------------------------------------------
+/** Case-insensitive name tokens; hyphens split ("Martinez-Rincon" → 2 tokens). */
+function nameTokens(s) {
+    return s.toLowerCase().split(/[\s-]+/).filter(Boolean);
+}
+/**
+ * Order employees so the crew lead comes first, then the rest in their
+ * existing (alphabetical) order. The lead's name is derived by stripping the
+ * trailing "'s Crew" / "’s Crew" from the group label; an employee is the
+ * lead when every label token appears in their fname+lname token set (this
+ * tolerates middle/extra surnames, e.g. "Daniel Bonilla" → Daniel Gonzales
+ * Bonilla). Ties prefer the exact fname+lname match, then the fewest extra
+ * name tokens, then the existing order. Groups without a "'s Crew" suffix or
+ * with no matching employee are left untouched.
+ */
+function orderLeadFirst(crewLabel, employees) {
+    const m = /^(.*?)['\u2019]s\s+crew\s*$/i.exec(crewLabel.trim());
+    if (!m)
+        return employees;
+    const labelTokens = nameTokens(m[1]);
+    if (labelTokens.length === 0)
+        return employees;
+    const empTokens = (e) => nameTokens(`${e.fname} ${e.lname}`);
+    const candidates = employees.filter((e) => {
+        const set = new Set(empTokens(e));
+        return labelTokens.every((t) => set.has(t));
+    });
+    if (candidates.length === 0)
+        return employees;
+    const label = labelTokens.join(' ');
+    const lead = [...candidates].sort((a, b) => {
+        const exactA = empTokens(a).join(' ') === label ? 0 : 1;
+        const exactB = empTokens(b).join(' ') === label ? 0 : 1;
+        if (exactA !== exactB)
+            return exactA - exactB;
+        const extraA = empTokens(a).length - labelTokens.length;
+        const extraB = empTokens(b).length - labelTokens.length;
+        if (extraA !== extraB)
+            return extraA - extraB;
+        return 0; // stable sort keeps the existing (alphabetical) order
+    })[0];
+    return [lead, ...employees.filter((e) => e !== lead)];
+}
 /**
  * Static replica of the manual Excel PivotTable: crews → employees → jobs,
  * hours bucketed into one column per estimator.
  *
- * Ordering is deterministic at every level: crews A→Z, employees within a
- * crew A→Z by username, job rows A→Z by (customer, then jobcode_2).
- * Estimator columns follow the persisted pivot-column-order setting; any
- * estimator not in the stored list is appended, and `#N/A` (when unresolved
- * hours exist) always renders last before Grand Total.
+ * Ordering is deterministic at every level: crews A→Z; employees within a
+ * crew crew-lead first, then A→Z by username; job rows A→Z by (customer,
+ * then jobcode_2). The configured estimator columns always render (in the
+ * persisted setting order); extras found in the data append after, and
+ * `#N/A` (only when unresolved hours exist) renders last before Grand Total.
  */
 function buildPivot(rows, pivotColumnOrder, payDate) {
     const crews = new Map();
@@ -46,14 +92,15 @@ function buildPivot(rows, pivotColumnOrder, payDate) {
         grand.set(est, (grand.get(est) ?? 0) + r.hours);
         grandTotal += r.hours;
     }
-    // Columns: only estimators with hours, in the stored setting order (extras
-    // appended); #N/A always last when present.
+    // Columns: the fixed configured set (MH…RF) ALWAYS renders — including RF
+    // with zero hours — even when stale settings omit it; estimators discovered
+    // in the data outside the set append after it; #N/A only when unresolved
+    // hours exist, last.
     const present = [...grand.keys()].filter((e) => (0, format_1.round2)(grand.get(e) ?? 0) !== 0);
     const hasNA = present.includes('#N/A');
-    const estimators = [
-        ...(0, settings_1.mergePivotColumnOrder)(pivotColumnOrder, present),
-        ...(hasNA ? ['#N/A'] : []),
-    ];
+    const configured = (0, settings_1.ensureDefaultPivotColumns)(pivotColumnOrder);
+    const extras = present.filter((e) => e !== '#N/A' && !configured.includes(e));
+    const estimators = [...configured, ...extras, ...(hasNA ? ['#N/A'] : [])];
     const toRecord = (m) => {
         const rec = {};
         for (const e of estimators) {
@@ -67,8 +114,8 @@ function buildPivot(rows, pivotColumnOrder, payDate) {
     const crewModels = [...crews.values()]
         .sort((a, b) => byText(a.crew, b.crew))
         .map((crew) => {
-        const employees = [...crew.employees.values()]
-            .sort((a, b) => byText(a.username || `${a.fname} ${a.lname}`, b.username || `${b.fname} ${b.lname}`))
+        const sortedEmps = [...crew.employees.values()].sort((a, b) => byText(a.username || `${a.fname} ${a.lname}`, b.username || `${b.fname} ${b.lname}`));
+        const employees = orderLeadFirst(crew.crew, sortedEmps)
             .map((emp) => {
             const jobs = [...emp.jobs.values()]
                 .sort((a, b) => byText(a.customer, b.customer) || byText(a.job, b.job))

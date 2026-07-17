@@ -302,26 +302,63 @@ check('unmatched job → #N/A', enriched.find((r) => r.apKey === '99999').estima
 check('timesheet hours follow the resolved TE fallback', enriched.find((r) => r.apKey === '24450').estimator, 'TE');
 check('99999 not on calendar', enriched.find((r) => r.apKey === '99999').notOnCalendar, true);
 check('OFFICE never "not on calendar"', enriched.find((r) => r.apKey === 'OFFICE').notOnCalendar, false);
-// D-2/§2.6: pivot columns come from the persisted setting, #N/A last.
+// Round 2 §4: the FULL configured set always renders (XC has zero hours this
+// period yet still gets a column); RF sits immediately after TE; #N/A last.
 const pivot = (0, pivot_1.buildPivot)(enriched, settings_1.DEFAULT_PIVOT_COLUMNS, payDate);
 check('pivot title', pivot.title, 'NV PAYROLL: 7/10/2026');
-check('pivot estimator columns (setting order, #N/A last)', pivot.estimators, ['MH', 'PG', 'ND', 'TE', 'RF', '#N/A']);
+check('pivot estimator columns (full configured set, #N/A last)', pivot.estimators, ['MH', 'PG', 'XC', 'ND', 'TE', 'RF', '#N/A']);
+check('zero-hour XC still renders', pivot.grandByEstimator['XC'], undefined);
+check('RF immediately after TE', pivot.estimators.indexOf('RF'), pivot.estimators.indexOf('TE') + 1);
 check('pivot grand total', pivot.grandTotal, 62);
 check('pivot MH hours', pivot.grandByEstimator['MH'], 42);
 check('TE hours moved out of #N/A by the fallback', pivot.grandByEstimator['TE'], 4);
 check('#N/A only holds truly unresolved hours', pivot.grandByEstimator['#N/A'], 2);
 check('pivot crews A→Z', pivot.crews.map((c) => c.crew), ['Office (NV)', "Rene Salazar's Crew"]);
 const rene = pivot.crews[1];
-check('employees A→Z by username', rene.employees.map((e) => e.username), ['juan@x.com', 'leo@x.com']);
+// "Rene Salazar" matches no employee → the crew stays fully alphabetical.
+check('no lead match → employees stay A→Z by username', rene.employees.map((e) => e.username), ['juan@x.com', 'leo@x.com']);
 const juan = rene.employees[0];
 const leo = rene.employees[1];
 check('leo total', leo.total, 42);
 check('leo overtime flag (>40)', leo.overtime, true);
 check('juan not overtime', juan.overtime, false);
 check('juan jobs sorted by (customer, jobcode_2)', juan.jobs.map((j) => j.customer), ['CCSD', 'Mystery Co', 'Roof Co', 'Southpoint']);
-// A custom pivot order must reorder columns (proves it is setting-driven).
+// A custom pivot order is respected, but missing defaults (XC/TE/RF) are
+// healed in — RF always lands immediately after TE.
 const pivotCustom = (0, pivot_1.buildPivot)(enriched, ['ND', 'PG', 'MH'], payDate);
-check('custom pivot order respected, extras appended', pivotCustom.estimators, ['ND', 'PG', 'MH', 'TE', 'RF', '#N/A']);
+check('custom pivot order healed with RF after TE', pivotCustom.estimators, ['ND', 'TE', 'RF', 'PG', 'XC', 'MH', '#N/A']);
+// §5: A1 title always follows the selected pay date.
+check('title follows the selected pay date', (0, pivot_1.buildPivot)(enriched, settings_1.DEFAULT_PIVOT_COLUMNS, new Date(2026, 6, 17)).title, 'NV PAYROLL: 7/17/2026');
+// Round 2 §3: crew lead first within each crew — verified against every case
+// from the spec with dedicated rows (the group label is the only input).
+console.log('crew-lead ordering…');
+const fakeRow = (username, fname, lname, group) => ({
+    username, payrollId: '', fname, lname, number: '', group,
+    localDate: null, localDay: '', localStartTime: null, localEndTime: null, tz: '',
+    hours: 1, jobcode1: 'Cust', jobcode2: 'AP24314 Ext', billable: '', klass: '',
+    department: '', payrollItem: '', serviceItem: '', location: '', notes: '',
+    approvedStatus: '', hasFlags: '', flagTypes: '',
+    apKey: '24314', estimator: 'MH', notOnCalendar: false,
+});
+const leadPivot = (0, pivot_1.buildPivot)([
+    fakeRow('ana@x.com', 'Ana', 'Bedoya Melgar', "Carlos Ruiz Cruz's Crew"),
+    fakeRow('carlos@x.com', 'Carlos', 'Ruiz Cruz', "Carlos Ruiz Cruz's Crew"),
+    fakeRow('armando@x.com', 'Armando', 'Lopez', "Daniel Bonilla's Crew"),
+    fakeRow('daniel@x.com', 'Daniel', 'Gonzales Bonilla', "Daniel Bonilla's Crew"),
+    fakeRow('al@x.com', 'Al', 'Alpha', 'Handyman'),
+    fakeRow('bob@x.com', 'Bob', 'Zeta', 'Handyman'),
+    fakeRow('sam@x.com', 'Samuel', 'Martin', 'Miguel Martin\u2019s Crew'),
+    fakeRow('miguel@x.com', 'Miguel', 'Martin', 'Miguel Martin\u2019s Crew'),
+    fakeRow('zed@x.com', 'Zed', 'Ames', "Rafael Aguilar's Crew"),
+    fakeRow('rafael@x.com', 'Rafael', 'Aguilar Echevarria', "Rafael Aguilar's Crew"),
+], settings_1.DEFAULT_PIVOT_COLUMNS, payDate);
+const crewEmps = (label) => leadPivot.crews.find((c) => c.crew === label).employees.map((e) => e.fname);
+check('Carlos listed before Ana', crewEmps("Carlos Ruiz Cruz's Crew"), ['Carlos', 'Ana']);
+check('Daniel Gonzales Bonilla precedes Armando', crewEmps("Daniel Bonilla's Crew"), ['Daniel', 'Armando']);
+check('Miguel Martin (curly apostrophe) precedes Samuel', crewEmps('Miguel Martin\u2019s Crew'), ['Miguel', 'Samuel']);
+check('extra surname match: Rafael Aguilar Echevarria first', crewEmps("Rafael Aguilar's Crew"), ['Rafael', 'Zed']);
+check('Handyman (no lead) stays alphabetical', crewEmps('Handyman'), ['Al', 'Bob']);
+check('reordering never changes subtotals', leadPivot.crews.find((c) => c.crew === "Carlos Ruiz Cruz's Crew").employees.map((e) => e.total), [1, 1]);
 console.log('exceptions…');
 const groups = (0, exceptions_1.buildExceptions)({ reportRows: rows, enriched, lunchRemoved: timesheet.lunchRemoved, payDate });
 const g = (key) => groups.find((x) => x.key === key);
@@ -356,9 +393,12 @@ async function testExport() {
     const tn = readBack.getWorksheet('TimeNavi Export');
     check('TimeNavi frozen at A2', [tn.views[0].state, tn.views[0].ySplit], ['frozen', 1]);
     check('TimeNavi header text', [tn.getCell('A1').value, tn.getCell('H1').value, tn.getCell('S1').value], ['Event', 'AP#', 'Date Difference']);
-    // §1.1: raw columns A:G stay green, appended columns H→end are black.
-    check('raw header block green', [fillOf(tn.getCell('A1')), fillOf(tn.getCell('G1'))], ['FF1BA41B', 'FF1BA41B']);
-    check('appended header block black', [fillOf(tn.getCell('H1')), fillOf(tn.getCell('S1'))], ['FF000000', 'FF000000']);
+    // Round 2 §2: the ENTIRE header row is black — zero green cells in row 1.
+    const row1Fills = [];
+    tn.getRow(1).eachCell({ includeEmpty: false }, (cell) => row1Fills.push(fillOf(cell)));
+    check('entire header row black A1→last header', row1Fills.every((f) => f === 'FF000000'), true);
+    check('header spans all populated columns', row1Fills.length, 19);
+    check('no green anywhere in row 1', row1Fills.includes('FF1BA41B'), false);
     check('header white and not bold', [tn.getCell('A1').font?.bold === true, tn.getCell('A1').font?.color?.argb, tn.getCell('H1').font?.color?.argb], [false, 'FFFFFFFF', 'FFFFFFFF']);
     // §1.2: E, F, G, L hidden — never deleted (values still present).
     check('columns E,F,G,L hidden', [5, 6, 7, 12].map((c) => tn.getColumn(c).hidden === true), [true, true, true, true]);
@@ -408,9 +448,11 @@ async function testExport() {
     check('row 4 not bold', pv.getCell('A4').font?.bold === true, false);
     check('row 4 height 15', pv.getRow(4).height, 15);
     check('MH header in palette color', [pv.getCell('E4').value, fillOf(pv.getCell('E4'))], ['MH', 'FFFFFF99']);
-    check('ND header dark blue with white text', [pv.getCell('G4').value, fillOf(pv.getCell('G4')), pv.getCell('G4').font?.color?.argb], ['ND', 'FF4472C4', 'FFFFFFFF']);
-    check('RF header dusty rose', [pv.getCell('I4').value, fillOf(pv.getCell('I4'))], ['RF', 'FFDA9694']);
-    check('#N/A header gray, last before Grand Total', [pv.getCell('J4').value, fillOf(pv.getCell('J4'))], ['#N/A', 'FF808080']);
+    check('zero-hour XC still gets its header + color', [pv.getCell('G4').value, fillOf(pv.getCell('G4'))], ['XC', 'FF95B3D7']);
+    check('ND header dark blue with white text', [pv.getCell('H4').value, fillOf(pv.getCell('H4')), pv.getCell('H4').font?.color?.argb], ['ND', 'FF4472C4', 'FFFFFFFF']);
+    // Round 2 §4: RF right after TE (column J with the current layout).
+    check('RF header dusty rose right after TE', [pv.getCell('I4').value, pv.getCell('J4').value, fillOf(pv.getCell('J4'))], ['TE', 'RF', 'FFDA9694']);
+    check('#N/A header gray, last before Grand Total', [pv.getCell('K4').value, fillOf(pv.getCell('K4'))], ['#N/A', 'FF808080']);
     check('Grand Total header gray', fillOf(pv.getCell(4, gtColNum)), 'FF808080');
     // §2.4: crew rows black full width, white text (row 5 = first crew, A→Z).
     check('first crew row (A→Z)', pv.getCell('A5').value, 'Office (NV)');
@@ -419,9 +461,15 @@ async function testExport() {
     // §2.3: full-height column bands incl. empty cells; gray Grand Total band;
     // no band under #N/A. Row 7 = OFFICE job row (values), row 6 = employee row (empty cells).
     check('MH band on an empty employee-row cell', fillOf(pv.getCell('E6')), 'FFFFFF99');
-    check('ND band + white value text on the OFFICE job row', [pv.getCell('G7').value, fillOf(pv.getCell('G7')), pv.getCell('G7').font?.color?.argb], [6, 'FF4472C4', 'FFFFFFFF']);
-    check('#N/A column has no band', fillOf(pv.getCell('J6')), null);
+    check('zero-hour XC column still banded', [isBlank(pv.getCell('G7').value), fillOf(pv.getCell('G7'))], [true, 'FF95B3D7']);
+    check('ND band + white value text on the OFFICE job row', [pv.getCell('H7').value, fillOf(pv.getCell('H7')), pv.getCell('H7').font?.color?.argb], [6, 'FF4472C4', 'FFFFFFFF']);
+    check('#N/A column has no band', fillOf(pv.getCell('K6')), null);
     check('Grand Total column light-gray band', [fillOf(pv.getCell(6, gtColNum)), fillOf(pv.getCell(7, gtColNum))], ['FFD9D9D9', 'FFD9D9D9']);
+    // Round 2 §1: bold row labels. Row 6 = employee header (Nancy), row 7 = her
+    // OFFICE job row.
+    check('employee row bold A:C', [1, 2, 3].map((c) => pv.getCell(6, c).font?.bold === true), [true, true, true]);
+    check('job row: customer (C) bold, job code (D) regular', [pv.getCell(7, 3).font?.bold === true, pv.getCell(7, 4).font?.bold === true], [true, false]);
+    check('job-row hour values regular weight', pv.getCell('H7').font?.bold === true, false);
     // Locate structural rows dynamically.
     let grandRowNum = 0;
     let leoTotalRowNum = 0;
@@ -434,14 +482,18 @@ async function testExport() {
     // §2.7: the >40h yellow is gone from the export — the Grand Total column
     // stays its gray band even on Leonardo's 42h total row.
     check('no overtime yellow leak in Grand Total column', [pv.getCell(leoTotalRowNum, gtColNum).value, fillOf(pv.getCell(leoTotalRowNum, gtColNum))], [42, 'FFD9D9D9']);
-    check('total rows not bold', pv.getCell(leoTotalRowNum, 2).font?.bold === true, false);
-    // §2.5: Grand Total row gray/white on A + value columns, B:D unfilled.
-    check('grand row A gray white', [fillOf(pv.getCell(grandRowNum, 1)), pv.getCell(grandRowNum, 1).font?.color?.argb], ['FF808080', 'FFFFFFFF']);
+    // Round 2 §1: "X Total" rows are fully bold and close the block with a thin
+    // bottom border.
+    check('total row fully bold (label + hour values)', [pv.getCell(leoTotalRowNum, 2).font?.bold, pv.getCell(leoTotalRowNum, 5).font?.bold, pv.getCell(leoTotalRowNum, gtColNum).font?.bold], [true, true, true]);
+    check('total row thin bottom border across the table', [pv.getCell(leoTotalRowNum, 1).border?.bottom?.style, pv.getCell(leoTotalRowNum, gtColNum).border?.bottom?.style], ['thin', 'thin']);
+    // §2.5 + Round 2 §1: Grand Total row bold, gray/white on A + value columns,
+    // B:D unfilled.
+    check('grand row A gray white bold', [fillOf(pv.getCell(grandRowNum, 1)), pv.getCell(grandRowNum, 1).font?.color?.argb, pv.getCell(grandRowNum, 1).font?.bold], ['FF808080', 'FFFFFFFF', true]);
     check('grand row B:D unfilled', [2, 3, 4].map((c) => fillOf(pv.getCell(grandRowNum, c))), [null, null, null]);
-    check('grand row value cells gray white + 0.00', [pv.getCell(grandRowNum, gtColNum).value, fillOf(pv.getCell(grandRowNum, gtColNum)), pv.getCell(grandRowNum, gtColNum).numFmt], [62, 'FF808080', '0.00']);
+    check('grand row value cells gray white bold + 0.00', [pv.getCell(grandRowNum, gtColNum).value, fillOf(pv.getCell(grandRowNum, gtColNum)), pv.getCell(grandRowNum, gtColNum).font?.bold, pv.getCell(grandRowNum, gtColNum).numFmt], [62, 'FF808080', true, '0.00']);
     // §2.7: Calibri 12 body, hours 0.00, widths.
     check('body font Calibri 12', [pv.getCell('C7').font?.name, pv.getCell('C7').font?.size], ['Calibri', 12]);
-    check('hours cells 0.00', pv.getCell('G7').numFmt, '0.00');
+    check('hours cells 0.00', pv.getCell('H7').numFmt, '0.00');
     check('pivot widths (A, D, first est col, GT)', [pv.getColumn(1).width, pv.getColumn(4).width, pv.getColumn(5).width, pv.getColumn(gtColNum).width], [35, 39, 8, 8]);
 }
 testExport()

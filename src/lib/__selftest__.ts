@@ -5,6 +5,7 @@
 import { extractApKey, normalizeApInput, timesheetApKey } from './apkey';
 import { dateDiffDays, isDarkColor, parsePercentInput } from './format';
 import { parseDate, parseNumberLoose } from './parsers';
+import { orderLeadFirst } from './pivot';
 import { estimatorFromTitle, extractTitleInitials, suggestPercent } from './timenavi';
 
 interface TestResult {
@@ -129,6 +130,56 @@ export function runSelfTests(): boolean {
   check('title est: known-set guard rejects (Ted)', estimatorFromTitle('Fence repair (Ted)', known), null);
   check('title est: skips unknown token to find a later known one', estimatorFromTitle('(Ted) plus (PG)', known), 'PG');
   check('title est: no parenthesized tokens', estimatorFromTitle('Paint shop maintenance', known), null);
+
+  // --- crew-lead-first ordering ----------------------------------------------------------
+  const names = (emps: { fname: string; lname: string }[]): string[] => emps.map((e) => e.fname);
+  const carlosCrew = [
+    { fname: 'Ana', lname: 'Bedoya Melgar' },
+    { fname: 'Carlos', lname: 'Ruiz Cruz' },
+  ];
+  check('lead: Carlos first in his crew', names(orderLeadFirst("Carlos Ruiz Cruz's Crew", carlosCrew)), ['Carlos', 'Ana']);
+  check(
+    'lead: extra surname matches (Daniel Bonilla → Daniel Gonzales Bonilla)',
+    names(orderLeadFirst("Daniel Bonilla's Crew", [
+      { fname: 'Armando', lname: 'Lopez' },
+      { fname: 'Daniel', lname: 'Gonzales Bonilla' },
+    ])),
+    ['Daniel', 'Armando'],
+  );
+  check(
+    'lead: token guard (Miguel Martin ≠ Samuel Martin)',
+    names(orderLeadFirst('Miguel Martin\u2019s Crew', [
+      { fname: 'Miguel', lname: 'Martin' },
+      { fname: 'Samuel', lname: 'Martin' },
+    ])),
+    ['Miguel', 'Samuel'],
+  );
+  check(
+    'lead: hyphenated surname tokenized (Leonardo Martinez → Martinez-Rincon)',
+    names(orderLeadFirst("Leonardo Martinez's Crew", [
+      { fname: 'Juan', lname: 'Perez' },
+      { fname: 'Leonardo', lname: 'Martinez-Rincon' },
+    ])),
+    ['Leonardo', 'Juan'],
+  );
+  check(
+    'lead: tie → fewest extra tokens wins',
+    orderLeadFirst("Tomas Huerta's Crew", [
+      { fname: 'Tomas', lname: 'Huerta Bonilla Garcia' },
+      { fname: 'Tomas', lname: 'Huerta Bonilla' },
+    ])[0].lname,
+    'Huerta Bonilla',
+  );
+  check(
+    'lead: no "\'s Crew" suffix → untouched',
+    names(orderLeadFirst('Handyman', carlosCrew)),
+    ['Ana', 'Carlos'],
+  );
+  check(
+    'lead: no matching employee → untouched',
+    names(orderLeadFirst("Rene Salazar's Crew", carlosCrew)),
+    ['Ana', 'Carlos'],
+  );
 
   // --- palette text contrast -----------------------------------------------------------
   check('contrast: ND dark blue → white text', isDarkColor('4472C4'), true);
