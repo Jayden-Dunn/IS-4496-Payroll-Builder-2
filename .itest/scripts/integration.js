@@ -54,7 +54,11 @@ const settings_1 = require("../src/lib/settings");
 const exceptions_1 = require("../src/lib/exceptions");
 const joins_1 = require("../src/lib/joins");
 const parsers_1 = require("../src/lib/parsers");
+const payrollExceptions_1 = require("../src/lib/payrollExceptions");
+const payrollPreview_1 = require("../src/lib/payrollPreview");
 const pivot_1 = require("../src/lib/pivot");
+const pivotByJob_1 = require("../src/lib/pivotByJob");
+const format_1 = require("../src/lib/format");
 const timenavi_1 = require("../src/lib/timenavi");
 let failures = 0;
 function check(name, actual, expected) {
@@ -120,7 +124,8 @@ const timenaviWb = wb([
             ['AP24222 SNRHA *SS* [PO48670] (JS)', '6/30/2026 7:00', '7/2/2026 16:00', 'Utah Jobs', '', '', '7/8/26 90% Complete'],
             ['AP24388 Chavez Ext', '7/1/2026 7:00', '7/1/2026 16:00', 'Commercial', '', '', '7/17/26 HOURLY -SH'],
             ['Paint shop maintenance', '7/1/2026 7:00', '7/1/2026 16:00', 'Commercial', '', '', 'no status here'],
-            ['AP24403 Lambrook (PG)', '8/1/2026 7:00', '8/2/2026 16:00', 'Residential (NV)', '', '', 'gate code 4321'],
+            // Round 3: description carries a WO Override line + an "@ NN% PS" line.
+            ['AP24403 Lambrook (PG) (Daniel)', '8/1/2026 7:00', '8/2/2026 16:00', 'Residential (NV)', '', '', 'gate code 4321\n****PER JODI $4,715.00 is the total of work order he completed****\n7/03/26 10% COMPLETE @ 40% PS'],
             // Estimator missing from BOTH sales files — must resolve via the title
             // fallback: lowercase "(te)" tag; "(Ted/Rafael)" must never match.
             ['♦[Southpoint] 3.5k (te) Framing/DW Install, AP24450 (Ted/Rafael)', '7/1/2026 7:00', '7/2/2026 16:00', 'Commercial', '', '', '7/10/26 50% Complete'],
@@ -187,6 +192,59 @@ const lastWeekWb = wb([
             ['old event 3', '6/22/2026', '6/23/2026', 'Commercial', '', '', '', '21848-A5', 0.75],
         ]],
     ['Pivot by Crew', [['NV PAYROLL: 7/3/2026']]],
+    // Round 3 §4.6: last week's Pivot by Job — one NV job partially paid with no
+    // hours this week (→ BALANCES), one fully paid (dropped), one UT-section row.
+    ['Pivot by Job', [
+            ['NV PAYROLL: 7/3/2026', '', 'Total hrs', '', 'AP#', 'On Calendar?', 'Estimator', 'Crew Lead', 'WO Override', 'WO%', '% of Completion', 'Notes'],
+            ['Sum of hours'],
+            ['Row Labels'],
+            ['Old Customer'],
+            ['AP21848-A5 Somewhere Int', '', 12, '', '21848-A5', 'TimeNavi row 9', 'MH', 'CARLOS RUIZ CRUZ', 5000, 0.38, 0.75, 'wk1 note'],
+            ['AP24314 Ext', '', 8, '', '24314', 'TimeNavi row 3', 'MH', 'DANIEL GONZALES BONILLA', '', 0.38, 1, ''],
+            ['Grand Total', '', 20],
+            ['NV PAYROLL (BALANCES): 7/3/2026'],
+            ['Older Customer'],
+            ['AP20000 Ancient Job', '', '', '', '20000', '', 'PG', 'RENE SALAZAR', 1200, 0.38, 0.5, 'still open'],
+            ['UT PAYROLL: 7/3/2026'],
+            ['Utah Customer'],
+            ['AP24111 Provo Ext', '', '', '', '24111', '', 'JS', "PEPE'S PAINTING LLC", 900, 0.5, 0.6, 'sub job'],
+        ]],
+]);
+// Round 3 slot 8 — raw QBO P&L by Customer (wide): 3 title rows, jobs as
+// columns (customer + "Total …" columns skipped), a duplicated AP column,
+// "=650" formula remnants, indented account labels, a footer line.
+const plWb = wb([
+    ['Profit and Loss by Customer', [
+            ['AllPro Painters'],
+            ['Profit and Loss by Customer'],
+            ['June 27 - July 3, 2026'],
+            ['', 'Aaron Ward', 'AP24314 Ext', 'Total Aaron Ward', 'AP24403 5321 Lambrook Dr Int/Ext', 'AP24450 Southpoint', 'AP24450 Southpoint (dup)', 'AP24500 Roof Ext'],
+            ['Income', '', '', '', '', '', '', ''],
+            ['   Construction Income', 650, 650, 650, 9000, 100, 50, 3200],
+            ['Total Income', 650, '=650', 650, 9000, 100, 50, 3200],
+            ['Expenses', '', '', '', '', '', '', ''],
+            ['   Job Materials Purchased', 20, 20, 20, 500, 0, 0, 0],
+            ['   Paint', 15.74, 15.74, 15.74, 260.1, 0, 0, 0],
+            ['   Sundries -', 0, 0, 0, 0, 0, 0, 58.51],
+            ['   Employee Labor', 113.04, 113.04, 113.04, 2081.09, 0, 0, 0],
+            ['   Wages', 0, 0, 0, 0, 0, 0, 0],
+            ['   Mileage Expense', 0, 0, 0, 0, 0, 0, 0],
+            ['Friday, Jul 17, 2026 08:00 AM GMT-07:00', '', '', '', '', '', '', ''],
+        ]],
+]);
+// Round 3 slot 9 — QB Time employee directory ("Last, First"; '*' = inactive).
+const employeesWb = wb([
+    ['Report', [
+            ['Employee directory report'],
+            ['Name', 'First Name', 'Last Name'],
+            ['Martinez-Rincon, Leonardo', 'Leonardo', 'Martinez-Rincon'],
+            ['Perez, Juan', 'Juan', 'Perez'],
+            ['Duarte, Nancy', 'Nancy', 'Duarte'],
+            ['Gonzales Bonilla, Daniel', 'Daniel', 'Gonzales Bonilla'],
+            ['Frank, Ted', 'Ted', 'Frank'],
+            ['Aguilar, Rafael', 'Rafael', 'Aguilar'],
+            ['*Climaco, Calixto  Efrain', 'Calixto  Efrain', '*Climaco'],
+        ]],
 ]);
 // ---------------------------------------------------------------------------
 // Run the pipeline exactly like the app does
@@ -382,14 +440,164 @@ check('edited AP# re-includes the row', fixed.included, true);
 check('edited AP# re-runs estimator/jobname/inqbotime/total/invoice', [fixed.estimator, fixed.qboJobName, fixed.inQboTime, fixed.jobTotal, fixed.invoiceDate.getDate()], ['MH', 'AP24314 Ext', 'AP24314 Ext', 650, 25]);
 check('duplicate AP# now detected', (0, exceptions_1.buildExceptions)({ reportRows: rows2, enriched, lunchRemoved: 0, payDate }).find((x) => x.key === 'duplicates').items.length, 1);
 // ---------------------------------------------------------------------------
+// Round 3 — slots 8/9, Pivot by Job, Payroll Preview, Payroll Exceptions
+// ---------------------------------------------------------------------------
+console.log('P&L parse (slot 8)…');
+const pl = (0, parsers_1.parsePl)(plWb);
+check('P&L job columns (customer/Total cols skipped, dup summed)', pl.byJob.size, 4);
+check('P&L duplicate column flagged', pl.duplicateColumns, ['24450']);
+const pl24314 = pl.byJob.get('24314');
+check('24314 metrics (income via "=650" remnant)', [pl24314.income, pl24314.materials, pl24314.laborWagesSubs, pl24314.mileage], [650, 35.74, 113.04, 0]);
+const pl24403 = pl.byJob.get('24403');
+check('24403 metrics', [pl24403.income, (0, format_1.round2)(pl24403.materials), pl24403.laborWagesSubs], [9000, 760.1, 2081.09]);
+check('duplicated 24450 columns summed', pl.byJob.get('24450').income, 150);
+check('sundries tracked separately (24500)', pl.byJob.get('24500').sundries, 58.51);
+console.log('employee directory (slot 9)…');
+const directory = (0, parsers_1.parseEmployeeList)(employeesWb);
+check('directory size', directory.length, 7);
+check('active/inactive split', directory.filter((d) => d.active).length, 6);
+const calixto = directory.find((d) => d.lastName === 'Climaco');
+check('* stripped, doubled space collapsed, inactive', [calixto.fullName, calixto.active], ['Calixto Efrain Climaco', false]);
+console.log('pivot by job…');
+const settings = (0, settings_1.defaultSettings)();
+const lastWeekPbj = (0, parsers_1.parseLastWeekPivotByJob)(lastWeekWb);
+check('last week Pivot by Job rows parsed', lastWeekPbj.length, 4);
+const leadCtx = {
+    directory,
+    crewGroups: [...new Set(timesheet.rows.map((r) => r.group))],
+    subcontractors: settings.subcontractors,
+};
+const pbj = (0, pivotByJob_1.buildPivotByJob)({
+    enriched,
+    reportRows: rows,
+    settings,
+    leadCtx,
+    knownEstimators,
+    payDate,
+    edits: {},
+    qbHours: {},
+    lastWeekPbj,
+    balancesState: pivotByJob_1.EMPTY_MANUAL_STATE,
+    utState: pivotByJob_1.EMPTY_MANUAL_STATE,
+});
+check('pbj title', pbj.title, 'NV PAYROLL: 7/10/2026');
+check('pbj distinct dates ascending (5, not assumed 7)', pbj.dates.map((d) => d.getDate()), [29, 30, 1, 2, 3]);
+check('pbj grand total matches the crew pivot', pbj.grandTotal, 62);
+check('pbj customers A→Z (case-insensitive)', pbj.customers.map((c) => c.customer), ['Aaron Ward', 'ALLPRO OFFICE', 'CCSD', 'Mystery Co', 'Roof Co', 'Southpoint']);
+const pbjJob = (ap) => pbj.customers.flatMap((c) => c.jobs).find((j) => j.analysis.apKey === ap);
+const j24314 = pbjJob('24314');
+check('AP# autofilled from jobcode_2', j24314.analysis.apKey, '24314');
+check('On Calendar? = TimeNavi row reference', j24314.analysis.onCalendar, 'TimeNavi row 3');
+check('% of Completion mirrors the grid (pay-date 30%)', j24314.analysis.percent, 0.3);
+check('crew lead resolved from "(Daniel)"', j24314.analysis.crewLead, 'DANIEL GONZALES BONILLA');
+check('WO% defaults from the profit-share map (38%)', j24314.analysis.woPct, 0.38);
+check('block colored by estimator (MH yellow)', j24314.colorHex, 'FFFF99');
+const j24403 = pbjJob('24403');
+check('WO Override pre-filled from "PER JODI $4,715.00 … work order"', [j24403.analysis.woOverride, j24403.analysis.woOverrideSource?.includes('PER JODI')], [4715, true]);
+check('WO% overridden by "@ 40% PS"', j24403.analysis.woPct, 0.4);
+const jOffice = pbjJob('OFFICE');
+check('OFFICE row: -, HOURLY lead, ND dark blue', [jOffice.analysis.onCalendar, jOffice.analysis.estimator, jOffice.analysis.crewLead, jOffice.colorHex, jOffice.analysis.hourly], ['-', '-', 'HOURLY', '4472C4', true]);
+const j99999 = pbjJob('99999');
+check('unmatched job: NOT ON CALENDAR, no fill', [j99999.analysis.onCalendar, j99999.colorHex], ['NOT ON CALENDAR', null]);
+const j24450 = pbjJob('24450');
+check('split leads joined with / and tagged', [j24450.analysis.crewLead, j24450.analysis.split], ['TED FRANK/RAFAEL AGUILAR', 2]);
+// §4.6 seeds.
+check('BALANCES: <100%-paid NV jobs with no hours this week, *PAID n% LAST WK*', pbj.balances.map((r) => [r.apKey, r.notes]), [['21848-A5', 'wk1 note *PAID 75% LAST WK*'], ['20000', 'still open *PAID 50% LAST WK*']]);
+check('BALANCES: fully-paid job NOT carried', pbj.balances.some((r) => r.apKey === '24314'), false);
+check('UT PAYROLL: last week UT rows + this week Utah-calendar events (deduped)', pbj.utPayroll.map((r) => r.apKey), ['24111', '24222']);
+check('UT event seed carries resolved fields', pbj.utPayroll[1].percent, 0.9);
+// Manual-state merge: delete a seed, add a row, edit a seed.
+const pbj2 = (0, pivotByJob_1.buildPivotByJob)({
+    enriched, reportRows: rows, settings, leadCtx, knownEstimators, payDate,
+    edits: { [j24314.id]: { apKey: '24450' } },
+    qbHours: { [`${j24314.id}\u0000leo@x.com`]: 42.5 },
+    lastWeekPbj,
+    balancesState: { added: [], deleted: ['balances:20000'], edits: { 'balances:21848-A5': { notes: 'edited note' } } },
+    utState: { added: [{ id: 'manual:ut:1', customer: 'X', job: 'New UT row', apKey: '24999', estimator: '', crewLead: '', woOverride: null, woPct: null, percent: null, notes: '', colorHex: null }], deleted: [], edits: {} },
+});
+check('editing an AP# re-runs On Calendar?/%Compl live', [pbj2.customers[0].jobs[0].analysis.onCalendar, pbj2.customers[0].jobs[0].analysis.percent], ['TimeNavi row 5', 0.5]);
+check('QB Hrs override stored on the employee row', pbj2.customers[0].jobs[0].employees[0].qbHours, 42.5);
+check('manual delete removes the seed', pbj2.balances.map((r) => r.apKey), ['21848-A5']);
+check('manual edit applied to a seed', pbj2.balances[0].notes, 'edited note');
+check('manual add appended', pbj2.utPayroll.map((r) => r.apKey), ['24111', '24222', '24999']);
+console.log('payroll preview…');
+const preview = (0, payrollPreview_1.buildPayrollPreview)({
+    pbj, enriched, reportRows: rows, pl, directory, settings, payDate,
+    edits: {}, qbHours: {}, knownEstimators, leadCtx,
+});
+check('title with week range', preview.title, 'PAYROLL BREAKDOWN 7/10/2026 (6/29 - 7/3)');
+check('painter blocks alphabetical by first name', preview.painters.map((b) => b.employeeName), ['Juan Perez', 'Leonardo Martinez-Rincon']);
+const leoBlock = preview.painters[1];
+check('OT split: 42h → 40 regular + 2 OT on the last job', leoBlock.lines.map((l) => [l.hours, l.ot]), [[40, false], [2, true]]);
+check('OT line at 1.5× the rate', [leoBlock.lines[0].rate, leoBlock.lines[1].rate], [18, 27]);
+check('block totals (reg+OT = actual, pay = Σ h×r)', [leoBlock.totalHours, leoBlock.totalPay], [42, 774]);
+check('[OT] tag on the line label', leoBlock.lines[1].jobLabel.endsWith('[OT]'), true);
+const juanB = preview.painters[0];
+check('unknown employee → fallback rate + flag', [juanB.lines[0].rate, juanB.lines[0].rateDefaulted], [18, true]);
+check('job display name on the line', juanB.lines[0].jobLabel, 'CCSD 5321 Lambrook Dr Int/Ext');
+check('lines in first-encounter order', juanB.lines.map((l) => l.apKey), ['24403', '99999', '24450', '24500']);
+check('lead blocks alphabetical by first name', preview.leads.map((b) => b.leadName), ['DANIEL GONZALES BONILLA', 'RAFAEL AGUILAR', 'TED FRANK']);
+const daniel = preview.leads[0];
+check('lead jobs = piece-rate jobs he leads', daniel.jobs.map((j) => j.apKey), ['24314', '24403']);
+const d24314 = daniel.jobs[0];
+check('PS chain: profitShare = income × WO%', d24314.profitShare, (0, format_1.round2)(650 * 0.38));
+check('PS chain: WO Override defaults to Profit Share', d24314.workOrderOverride, (0, format_1.round2)(650 * 0.38));
+check('PS chain: % Completion from Pivot by Job', d24314.percentCompletion, 0.3);
+check('PS chain: Total Profit Share = WO×% − labor − mileage − ½mat', d24314.totalProfitShare, (0, format_1.round2)((0, format_1.round2)(650 * 0.38) * 0.3 - 113.04 - 0 - (0, format_1.round2)(35.74 / 2)));
+const d24403 = daniel.jobs[1];
+check('PS chain: explicit WO Override (4,715) used', d24403.workOrderOverride, 4715);
+check('PS chain math on 24403 (40% PS, 10% complete)', d24403.totalProfitShare, (0, format_1.round2)(4715 * 0.1 - 2081.09 - 0 - (0, format_1.round2)(760.1 / 2)));
+check('lead Total = Σ after-split totals', daniel.total, (0, format_1.round2)(d24314.totalAfterSplit + d24403.totalAfterSplit));
+check('lead with no timesheet hours: no T-SHEETS block, Hourly Pay 0', [daniel.tsheets, daniel.hourlyPay], [null, 0]);
+check('Total Pay = Total + Mileage + Hourly + Reimb + Deductions', daniel.totalPay, daniel.total);
+const ted = preview.leads[2];
+check('split job: each co-lead gets ÷2', [ted.jobs[0].splitWith, ted.jobs[0].totalAfterSplit], [2, (0, format_1.round2)(((0, format_1.round2)(150 * 0.38) * 0.5) / 2)]);
+check('office block: single Office line', [preview.office.length, preview.office[0].lines.length, preview.office[0].lines[0].jobLabel], [1, 1, 'Office']);
+check('salary sections from the roster', [preview.admin.length, preview.estimators.length, preview.managers.length], [1, 5, 4]);
+check('inactive zero-hour employees parked', preview.inactiveZeroHours, ['Calixto Efrain Climaco']);
+// Live edit: entering net computes taxes; PS-cell edits recompute the chain.
+const previewEdited = (0, payrollPreview_1.buildPayrollPreview)({
+    pbj, enriched, reportRows: rows, pl, directory, settings, payDate,
+    edits: {
+        [`hb:${leoBlock.key}`]: { net: 600 },
+        [`ps:${daniel.key}:${d24403.jobRowId}`]: { percentCompletion: 1 },
+        [`psb:${daniel.key}`]: { reimbursements: 100 },
+    },
+    qbHours: {}, knownEstimators, leadCtx,
+});
+check('net edit stored (taxes = total − net downstream)', previewEdited.painters[1].net, 600);
+const editedJob = previewEdited.leads[0].jobs[1];
+check('percent edit recomputes Total Profit Share', editedJob.totalProfitShare, (0, format_1.round2)(4715 - 2081.09 - (0, format_1.round2)(760.1 / 2)));
+check('reimbursement edit flows into Total Pay', previewEdited.leads[0].totalPay, (0, format_1.round2)(previewEdited.leads[0].total + 100));
+console.log('payroll exceptions…');
+const pGroups = (0, payrollExceptions_1.buildPayrollExceptions)({ pbj, preview, reportRows: rows, pl, hasDirectory: true });
+const pg = (key) => pGroups.find((x) => x.key === key);
+check('lead resolution flags (not-a-crew-lead ×4 + missing lead on 24500)', pg('leadResolution').items.length, 5);
+check('hours on a job not on the calendar (99999)', pg('hoursNotOnCalendar').items.length, 1);
+check('calendar job with no hours (24388, Utah excluded)', pg('calendarNoHours').items.length, 1);
+check('40+ hours item (Leonardo OT)', pg('hours40or10').items.length, 1);
+check('missing pay inputs (99999 ×2 + 2 default-rate employees)', pg('missingInputs').items.length, 4);
+check('job missing from P&L: none (all leads\u2019 jobs present)', pg('missingFromPl').items.length, 0);
+check('low profit-share items (Daniel\u2019s two negative jobs)', pg('lowProfitShare').items.length, 2);
+check('inactive-with-hours: none', pg('inactiveWithHours').items.length, 0);
+check('duplicate P&L column surfaced', pg('duplicatePlColumn').items.length, 1);
+check('UT carry-forward that matched nothing (24111)', pg('carryForward').items.length, 1);
+// ---------------------------------------------------------------------------
 // Export: build the styled workbook and read it back with ExcelJS
 // ---------------------------------------------------------------------------
 async function testExport() {
     console.log('xlsx export…');
-    const buf = await (0, exportXlsx_1.buildWorkbookBuffer)({ rows, pivot, legend: settings_1.DEFAULT_LEGEND, payDate });
+    const buf = await (0, exportXlsx_1.buildWorkbookBuffer)({
+        rows,
+        pivot,
+        legend: settings_1.DEFAULT_LEGEND,
+        payDate,
+        pivotByJob: pbj,
+        payrollPreview: preview,
+    });
     const readBack = new exceljs_1.default.Workbook();
     await readBack.xlsx.load(buf);
-    check('sheet names', readBack.worksheets.map((w) => w.name), ['TimeNavi Export', 'Pivot by Crew']);
+    check('sheet names (Round 3 order + Inactive Employees when non-empty)', readBack.worksheets.map((w) => w.name), ['TimeNavi Export', 'Pivot by Crew', 'Pivot by Job', 'Payroll Preview', 'Inactive Employees']);
     const tn = readBack.getWorksheet('TimeNavi Export');
     check('TimeNavi frozen at A2', [tn.views[0].state, tn.views[0].ySplit], ['frozen', 1]);
     check('TimeNavi header text', [tn.getCell('A1').value, tn.getCell('H1').value, tn.getCell('S1').value], ['Event', 'AP#', 'Date Difference']);
@@ -495,6 +703,62 @@ async function testExport() {
     check('body font Calibri 12', [pv.getCell('C7').font?.name, pv.getCell('C7').font?.size], ['Calibri', 12]);
     check('hours cells 0.00', pv.getCell('H7').numFmt, '0.00');
     check('pivot widths (A, D, first est col, GT)', [pv.getColumn(1).width, pv.getColumn(4).width, pv.getColumn(5).width, pv.getColumn(gtColNum).width], [35, 39, 8, 8]);
+    // ---------- Pivot by Job (Round 3) ----------
+    const pj = readBack.getWorksheet('Pivot by Job');
+    check('pbj frozen at A5', [pj.views[0].state, pj.views[0].ySplit], ['frozen', 4]);
+    check('pbj A1 title', pj.getCell('A1').value, 'NV PAYROLL: 7/10/2026');
+    check('pbj title black/white 17 bold, height 31.5', [fillOf(pj.getCell('A1')), pj.getCell('A1').font?.color?.argb, pj.getCell('A1').font?.size, pj.getRow(1).height], ['FF000000', 'FFFFFFFF', 17, 31.5]);
+    // 5 date cols → Total hrs at G1; % of Completion header red, Notes dark red.
+    check('pbj Total hrs header position (computed from 5 dates)', pj.getCell('G1').value, 'Total hrs');
+    const lastColNum = 1 + 5 + 2 + 8;
+    check('pbj % of Completion header red', pj.getCell(1, lastColNum - 1).font?.color?.argb, 'FFFF0000');
+    check('pbj Notes header dark red', pj.getCell(1, lastColNum).font?.color?.argb, 'FFC00000');
+    // Row 2: computed weekday names (Sunday would be present on an 8-date week).
+    check('pbj computed day names', [pj.getCell('B2').value, pj.getCell('F2').value], ['Mon', 'Fri']);
+    check('pbj row 3 chrome', [pj.getCell('A3').value, pj.getCell('B3').value], ['Sum of hours', 'Column Labels']);
+    check('pbj row 4 labels', [pj.getCell('A4').value, pj.getCell('G4').value], ['Row Labels', 'Grand Total']);
+    // Row 5 = Aaron Ward customer row (MH yellow), then the job + employee rows.
+    check('pbj first customer row + MH fill', [pj.getCell('A5').value, fillOf(pj.getCell('A5'))], ['Aaron Ward', 'FFFFFF99']);
+    check('pbj job row analysis: AP#, On Calendar?, lead', [pj.getCell('I6').value, pj.getCell('J6').value, pj.getCell('L6').value], ['24314', 'TimeNavi row 3', 'DANIEL GONZALES BONILLA']);
+    check('pbj job % of Completion 0% format', [pj.getCell('O6').value, pj.getCell('O6').numFmt], [0.3, '0%']);
+    check('pbj hours 0.00 format', pj.getCell('G6').numFmt, '0.00');
+    check('pbj widths (A, first date, Crew Lead)', [pj.getColumn(1).width, pj.getColumn(2).width, pj.getColumn(12).width], [40, 10, 43]);
+    // BALANCES + UT sections rendered beneath at computed positions.
+    const colA = pj.getColumn(1).values;
+    const balTitleRow = colA.findIndex((v) => typeof v === 'string' && v.startsWith('NV PAYROLL (BALANCES):'));
+    const utTitleRow = colA.findIndex((v) => typeof v === 'string' && v.startsWith('UT PAYROLL:'));
+    check('BALANCES section below the pivot', balTitleRow > 5, true);
+    check('UT section below BALANCES', utTitleRow > balTitleRow, true);
+    check('BALANCES title black band', fillOf(pj.getCell(balTitleRow, 1)), 'FF000000');
+    // ---------- Payroll Preview (Round 3) ----------
+    const pp = readBack.getWorksheet('Payroll Preview');
+    check('preview title', pp.getCell('A1').value, 'PAYROLL BREAKDOWN 7/10/2026 (6/29 - 7/3)');
+    check('preview title black band', fillOf(pp.getCell('A1')), 'FF000000');
+    // Live formulas: find the DANIEL PS block and an hourly line.
+    const ppColA = pp.getColumn(1).values;
+    const danielRow = ppColA.findIndex((v) => v === 'DANIEL GONZALES BONILLA');
+    check('DANIEL block present with tan header', [danielRow > 0, fillOf(pp.getCell(danielRow, 1))], [true, 'FFD6D4CA']);
+    const psFormulaCell = pp.getCell(danielRow + 3, 2); // Profit Share row
+    check('Profit Share is a live formula (income × WO%)', typeof psFormulaCell.value?.formula === 'string', true);
+    const tpsRowNum = ppColA.findIndex((v) => v === 'Total Profit Share');
+    check('Total Profit Share formula chain', String(pp.getCell(tpsRowNum, 2).value?.formula ?? '').includes('*'), true);
+    const totalPayRowNum = ppColA.findIndex((v) => v === 'Total Pay');
+    check('Total Pay is a SUM formula', String(pp.getCell(totalPayRowNum, 2).value?.formula ?? '').startsWith('SUM'), true);
+    // An hourly line total =C×D.
+    let lineFormulaOk = false;
+    pp.eachRow((row) => {
+        const v = row.getCell(5).value;
+        if (v && typeof v === 'object' && typeof v.formula === 'string' && /^C\d+\*D\d+$/.test(v.formula))
+            lineFormulaOk = true;
+    });
+    check('hourly line total = C×D live formula', lineFormulaOk, true);
+    // Section headers present in order.
+    const sectionRows = ['OFFICE', 'ADMIN', 'ESTIMATORS', 'MANAGER SALARY'].map((s) => ppColA.findIndex((v) => v === s));
+    check('section headers in order', sectionRows.every((r, i) => r > 0 && (i === 0 || r > sectionRows[i - 1])), true);
+    check('preview widths (A, B)', [pp.getColumn(1).width, pp.getColumn(2).width], [22, 41.4]);
+    // ---------- Inactive Employees ----------
+    const inact = readBack.getWorksheet('Inactive Employees');
+    check('inactive sheet lists parked names', inact.getCell('A2').value, 'Calixto Efrain Climaco');
 }
 testExport()
     .catch((err) => {

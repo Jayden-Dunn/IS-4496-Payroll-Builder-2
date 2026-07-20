@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.orderLeadFirst = orderLeadFirst;
 exports.buildPivot = buildPivot;
 const format_1 = require("./format");
+const settings_1 = require("./settings");
 // ---------------------------------------------------------------------------
 // Crew-lead detection (dynamic — derived from the group label, never names)
 // ---------------------------------------------------------------------------
@@ -91,12 +92,13 @@ function buildPivot(rows, pivotColumnOrder, payDate) {
         grand.set(est, (grand.get(est) ?? 0) + r.hours);
         grandTotal += r.hours;
     }
-    // Columns: the configured estimator set ALWAYS renders (even with zero
-    // hours this period); estimators discovered in the data outside the set
-    // append after it; #N/A renders only when unresolved hours exist, last.
+    // Columns: the fixed configured set (MH…RF) ALWAYS renders — including RF
+    // with zero hours — even when stale settings omit it; estimators discovered
+    // in the data outside the set append after it; #N/A only when unresolved
+    // hours exist, last.
     const present = [...grand.keys()].filter((e) => (0, format_1.round2)(grand.get(e) ?? 0) !== 0);
     const hasNA = present.includes('#N/A');
-    const configured = pivotColumnOrder.filter((e) => e !== '#N/A');
+    const configured = (0, settings_1.ensureDefaultPivotColumns)(pivotColumnOrder);
     const extras = present.filter((e) => e !== '#N/A' && !configured.includes(e));
     const estimators = [...configured, ...extras, ...(hasNA ? ['#N/A'] : [])];
     const toRecord = (m) => {

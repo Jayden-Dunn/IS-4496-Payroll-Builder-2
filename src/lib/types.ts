@@ -134,6 +134,36 @@ export interface ReportRow {
 }
 
 // ---------------------------------------------------------------------------
+// Slot 8 — P&L "Profit and Loss by Customer" (QBO, wide layout)
+// ---------------------------------------------------------------------------
+
+export interface PlJobMetrics {
+  income: number; // 'Total Income'
+  materials: number; // equipment + job materials + other job costs + paint + sundries + tools
+  laborWagesSubs: number; // Employee Labor + Subcontractor Labor + Wages
+  mileage: number; // Mileage Expense
+  sundries: number; // the 'Sundries -' row alone (double-count hint, §6.8)
+  plJobHeader: string; // the raw column header text
+}
+
+export interface PlParseResult {
+  byJob: Map<string, PlJobMetrics>;
+  /** apKeys that appeared in more than one column (values summed). */
+  duplicateColumns: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Slot 9 — Employee Name List (QB Time directory)
+// ---------------------------------------------------------------------------
+
+export interface DirectoryEmployee {
+  fullName: string; // "First M Last", single-spaced, '*' stripped
+  firstName: string;
+  lastName: string;
+  active: boolean; // false when the raw name started with '*'
+}
+
+// ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------
 
@@ -142,10 +172,41 @@ export interface LegendEntry {
   color: string; // 6-digit hex, no '#'
 }
 
+/** Crew profit-share map entry ({crew lead → WO%}, §7.1). Pct is a fraction. */
+export interface ProfitShareEntry {
+  lead: string;
+  pct: number; // 0.38 = 38%
+}
+
+/** Wage-rate map entry (§7.2). */
+export interface WageRateEntry {
+  name: string;
+  rate: number;
+  /** Optional different rate on hourly (T&M) jobs. */
+  hourlyRate?: number;
+}
+
+export type SalarySection = 'ADMIN' | 'ESTIMATORS' | 'MANAGER SALARY';
+
+/** Salaried roster entry (§7.3). */
+export interface SalariedEntry {
+  name: string;
+  section: SalarySection;
+  role: string;
+  amount: number; // weekly
+}
+
 export interface AppSettings {
   legend: LegendEntry[];
   /** Pivot estimator column order (separate from legend row-sort order). */
   pivotColumnOrder: string[];
+  profitShare: ProfitShareEntry[];
+  defaultProfitSharePct: number; // fraction; seed 0.38
+  wageRates: WageRateEntry[];
+  defaultWageRate: number; // seed 18
+  salariedRoster: SalariedEntry[];
+  mileageRate: number; // $/mile; seed 0.625
+  subcontractors: string[]; // §7.4 — valid crew leads without directory matches
 }
 
 // ---------------------------------------------------------------------------
@@ -198,3 +259,225 @@ export interface ExceptionGroup {
   note?: string;
   items: ExceptionItem[];
 }
+
+// ---------------------------------------------------------------------------
+// Crew-lead resolution (§3.2)
+// ---------------------------------------------------------------------------
+
+export type CrewLeadFlagKind =
+  | 'noMatch'
+  | 'ambiguous'
+  | 'notACrewLead'
+  | 'inactiveMatch';
+
+export interface CrewLeadResolution {
+  /** ALL-CAPS resolved display value ("CARLOS RUIZ CRUZ" or "A/B" joins). */
+  display: string;
+  /** Individual resolved names (ALL CAPS); empty when nothing matched. */
+  names: string[];
+  /** >1 when the parenthetical listed several leads ("Ted/Rafael"). */
+  split: number;
+  /** True when the lead resolved through the Subcontractors list. */
+  sub: boolean;
+  /** Raw parenthetical text, for exception messages/tooltips. */
+  raw: string;
+  flags: { kind: CrewLeadFlagKind; candidate: string }[];
+}
+
+// ---------------------------------------------------------------------------
+// Pivot by Job (Round 3 §4)
+// ---------------------------------------------------------------------------
+
+/** Per-job analysis fields shown on job rows (all editable). */
+export interface JobAnalysis {
+  apKey: string | null;
+  onCalendar: string; // 'NOT ON CALENDAR', '-', or the TimeNavi row ref
+  estimator: string;
+  crewLead: string; // resolved display, editable
+  crewLeadResolution: CrewLeadResolution | null;
+  woOverride: number | null; // $ — editable, pre-filled from description
+  woOverrideSource: string | null; // tooltip
+  woPct: number | null; // fraction; null renders '-' (hourly)
+  woPctSource: string | null; // tooltip when description-overridden
+  percent: PercentValue; // live mirror of the TimeNavi grid value
+  notes: string;
+  hourly: boolean; // job is hourly (vs piece-rate)
+  sub: boolean; // paid to a subcontractor
+  split: number; // co-lead count (≥1)
+}
+
+export interface PbjEmployeeRow {
+  username: string;
+  byDate: Record<string, number>; // ISO date → hours
+  total: number;
+  qbHours: number | null; // column K override (editable)
+}
+
+export interface PbjJobRow {
+  /** Stable id for edits: `${customer}\u0000${jobcode2}`. */
+  id: string;
+  jobcode2: string;
+  byDate: Record<string, number>;
+  total: number;
+  analysis: JobAnalysis;
+  employees: PbjEmployeeRow[];
+  colorHex: string | null; // estimator fill for the block
+}
+
+export interface PbjCustomerBlock {
+  customer: string;
+  byDate: Record<string, number>;
+  total: number;
+  jobs: PbjJobRow[];
+  colorHex: string | null; // first job's color
+}
+
+/** Manual BALANCES / UT PAYROLL section row (§4.6). */
+export interface ManualSectionRow {
+  id: string;
+  customer: string;
+  job: string;
+  apKey: string | null;
+  estimator: string;
+  crewLead: string;
+  woOverride: number | null;
+  woPct: number | null;
+  percent: PercentValue;
+  notes: string;
+  colorHex: string | null;
+}
+
+export interface PivotByJobModel {
+  title: string;
+  dates: Date[]; // distinct local_dates ascending
+  dateIsos: string[]; // same, as ISO keys
+  customers: PbjCustomerBlock[];
+  grandByDate: Record<string, number>;
+  grandTotal: number;
+  balances: ManualSectionRow[];
+  utPayroll: ManualSectionRow[];
+}
+
+/** Sparse user edits on Pivot by Job rows (keyed by PbjJobRow.id). */
+export interface PbjJobEdit {
+  apKey?: string | null;
+  crewLead?: string;
+  woOverride?: number | null;
+  woPct?: number | null;
+  notes?: string;
+}
+
+/** QB Hrs overrides keyed by `${jobRowId}\u0000${username}`. */
+export type QbHoursMap = Record<string, number>;
+
+export type PbjEditsMap = Record<string, PbjJobEdit>;
+
+// ---------------------------------------------------------------------------
+// Payroll Preview (Round 3 §5)
+// ---------------------------------------------------------------------------
+
+/** One job line inside an hourly (T-SHEETS) block. */
+export interface HourlyLine {
+  id: string; // for edits: employee + jobRowId (+ ':OT')
+  apKey: string | null;
+  jobLabel: string; // display name (+ ' [hrly]' / ' [OT]' tags)
+  hours: number;
+  rate: number;
+  rateDefaulted: boolean; // true when no configured wage rate was found
+  ot: boolean;
+  hourlyJob: boolean;
+  colorHex: string | null; // estimator fill for the PO#/Job cells
+}
+
+export interface HourlyBlock {
+  key: string; // employee username or full name
+  title: string; // "{Full Name} ({Lead}'s Crew)" or office variants
+  employeeName: string;
+  lines: HourlyLine[];
+  totalHours: number;
+  totalPay: number;
+  net: number | null; // editable; taxes = total − net once entered
+  inactive: boolean;
+}
+
+/** One job column inside a profit-share block. */
+export interface PsJobColumn {
+  jobRowId: string;
+  apKey: string | null;
+  jobShort: string; // "AP24403 5321 Lambrook Dr Int/Ext" style
+  customer: string;
+  woPct: number | null;
+  profitShare: number; // income × woPct
+  workOrderOverride: number; // editable default
+  percentCompletion: number; // fraction (HOURLY jobs excluded from PS blocks)
+  laborWages: number;
+  mileage: number;
+  halfMaterials: number;
+  totalProfitShare: number; // WO×% − labor − mileage − ½materials
+  splitWith: number; // 1 = no split
+  totalAfterSplit: number;
+  missingFromPl: boolean;
+  income: number;
+  materials: number;
+}
+
+export interface PsBlock {
+  key: string;
+  leadName: string; // ALL CAPS
+  sub: boolean;
+  jobs: PsJobColumn[];
+  total: number; // Σ totalAfterSplit
+  mileageNew: number; // editable, default 0
+  hourlyPay: number; // own T-SHEETS gross
+  reimbursements: number; // editable
+  reimbMemo: string;
+  deductions: number; // editable (negative)
+  deductMemo: string;
+  totalPay: number;
+  tsheets: HourlyBlock | null; // the lead's own hourly block
+}
+
+/** Salary block (§5.4/§5.5). */
+export interface SalaryBlock {
+  key: string;
+  name: string;
+  role: string;
+  amount: number;
+  section: SalarySection;
+  timesheetHours: number; // shown as "(Nhrs)" when > 0
+  miles: number; // editable
+  mileageReimb: number; // miles × rate
+}
+
+export interface PayrollPreviewModel {
+  title: string;
+  painters: HourlyBlock[]; // non-lead timesheet employees
+  leads: PsBlock[]; // crew-lead PS blocks
+  office: HourlyBlock[];
+  admin: SalaryBlock[];
+  estimators: SalaryBlock[];
+  managers: SalaryBlock[];
+  inactiveZeroHours: string[]; // §5.7 parked names
+}
+
+/** Sparse edits for Payroll Preview (keyed by block/line ids). */
+export interface PayrollEdit {
+  rate?: number;
+  net?: number | null;
+  workOrderOverride?: number;
+  percentCompletion?: number;
+  laborWages?: number;
+  mileage?: number;
+  halfMaterials?: number;
+  mileageNew?: number;
+  reimbursements?: number;
+  reimbMemo?: string;
+  deductions?: number;
+  deductMemo?: string;
+  income?: number;
+  materials?: number;
+  miles?: number;
+  hours?: number;
+}
+
+export type PayrollEditsMap = Record<string, PayrollEdit>;

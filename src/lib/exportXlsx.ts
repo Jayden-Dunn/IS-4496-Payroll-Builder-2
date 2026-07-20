@@ -1,7 +1,18 @@
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
 import { isDarkColor } from './format';
-import type { LegendEntry, PivotModel, ReportRow } from './types';
+import { weekdayShort } from './pivotByJob';
+import type {
+  HourlyBlock,
+  LegendEntry,
+  ManualSectionRow,
+  PayrollPreviewModel,
+  PivotByJobModel,
+  PivotModel,
+  PsBlock,
+  ReportRow,
+  SalaryBlock,
+} from './types';
 
 const BLACK = 'FF000000';
 const WHITE = 'FFFFFFFF';
@@ -40,6 +51,9 @@ export interface ExportInput {
   pivot: PivotModel;
   legend: LegendEntry[];
   payDate: Date | null;
+  /** Round 3 sheets — optional so %-only exports still work. */
+  pivotByJob?: PivotByJobModel | null;
+  payrollPreview?: PayrollPreviewModel | null;
 }
 
 export function exportFilename(payDate: Date | null): string {
@@ -56,6 +70,13 @@ export async function buildWorkbookBuffer(input: ExportInput): Promise<ArrayBuff
   const palette = new Map(input.legend.map((l) => [l.estimator, l.color.toUpperCase()]));
   buildTimeNaviSheet(wb, input, palette);
   buildPivotSheet(wb, input.pivot, palette);
+  if (input.pivotByJob) buildPivotByJobSheet(wb, input.pivotByJob);
+  if (input.payrollPreview) {
+    buildPayrollPreviewSheet(wb, input.payrollPreview);
+    if (input.payrollPreview.inactiveZeroHours.length > 0) {
+      buildInactiveSheet(wb, input.payrollPreview.inactiveZeroHours);
+    }
+  }
   return (await wb.xlsx.writeBuffer()) as ArrayBuffer;
 }
 
@@ -282,4 +303,399 @@ function buildPivotSheet(wb: ExcelJS.Workbook, pivot: PivotModel, palette: Reado
     paint(cell, { fill: HEADER_GRAY, color: WHITE, bold: true });
     if (typeof cell.value === 'number') cell.numFmt = HOURS_FMT;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Sheet 3 — Pivot by Job (Round 3 §4/§8)
+// ---------------------------------------------------------------------------
+
+const RED = 'FFFF0000';
+const DARK_RED = 'FFC00000';
+const ACCT_NO_DOLLAR = '#,##0.00';
+
+function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): void {
+  const ws = wb.addWorksheet('Pivot by Job', {
+    views: [{ state: 'frozen', ySplit: 4 }], // freeze at A5
+  });
+  const dateCount = model.dateIsos.length;
+  // A · dates · Total · QB Hrs(K) · AP# · OnCal · Est · Lead · WO$ · WO% · % · Notes
+  const analysisStart = 1 + dateCount + 2 + 1; // first analysis col (AP#)
+  const lastCol = analysisStart + 7;
+  ws.columns = [
+    { width: 40 },
+    ...model.dateIsos.map(() => ({ width: 10 })),
+    { width: 11 },
+    { width: 7.6 },
+    { width: 10.5 },
+    { width: 17.8 },
+    { width: 9.4 },
+    { width: 43 },
+    { width: 23 },
+    { width: 12 },
+    { width: 11 },
+    { width: 18.5 },
+  ];
+
+  const baseFont = { name: FONT, size: 12 };
+  const paint = (
+    cell: ExcelJS.Cell,
+    opts: { fill?: string; color?: string; bold?: boolean; size?: number },
+  ): void => {
+    if (opts.fill) cell.fill = solidFill(opts.fill);
+    cell.font = {
+      ...baseFont,
+      ...(opts.size !== undefined ? { size: opts.size } : {}),
+      ...(opts.bold ? { bold: true } : {}),
+      color: { argb: opts.color ?? BLACK },
+    };
+  };
+
+  const totalCol = 1 + dateCount + 1;
+  const qbCol = totalCol + 1;
+
+  const headerBlock = (title: string, withDates: boolean): void => {
+    // Row 1 — black: title, dates, Total hrs, analysis headers.
+    const r1Vals: (string | Date)[] = [title];
+    for (let i = 0; i < dateCount; i++) {
+      r1Vals.push(withDates && i < model.dates.length ? excelDate(model.dates[i]) : '');
+    }
+    r1Vals.push('Total hrs', '', 'AP#', 'On Calendar?', 'Estimator', 'Crew Lead', 'WO Override', 'WO%', '% of Completion', 'Notes');
+    const r1 = ws.addRow(r1Vals);
+    r1.height = 31.5;
+    for (let c = 1; c <= lastCol; c++) {
+      const color = c === lastCol ? DARK_RED : c === lastCol - 1 ? RED : WHITE;
+      paint(r1.getCell(c), { fill: BLACK, color, bold: c === 1 });
+      if (c === 1) paint(r1.getCell(1), { fill: BLACK, color: WHITE, bold: true, size: 17 });
+      if (c > 1 && c <= 1 + dateCount && r1.getCell(c).value instanceof Date) r1.getCell(c).numFmt = 'm/d';
+    }
+    // Row 2 — black: computed weekday names (Sunday included).
+    const r2 = ws.addRow(['']);
+    for (let c = 1; c <= lastCol; c++) paint(r2.getCell(c), { fill: BLACK, color: WHITE });
+    if (withDates) {
+      model.dates.forEach((d, i) => {
+        r2.getCell(2 + i).value = weekdayShort(d);
+      });
+    }
+    // Row 3 — black: Sum of hours / Column Labels + repeated analysis labels.
+    const r3 = ws.addRow(['Sum of hours', 'Column Labels']);
+    for (let c = 1; c <= lastCol; c++) paint(r3.getCell(c), { fill: BLACK, color: WHITE });
+    ['AP#', 'Estimator', 'Crew Lead', 'WO Amt', 'WO%', '% of Completion', 'Notes'].forEach((label, i) => {
+      const c = analysisStart + (i === 0 ? 0 : i + 1); // skip On Calendar? on this row
+      r3.getCell(c).value = label;
+    });
+    // Row 4 — Row Labels + dates + Grand Total.
+    const r4 = ws.addRow(['Row Labels']);
+    paint(r4.getCell(1), { bold: true });
+    if (withDates) {
+      model.dates.forEach((d, i) => {
+        const cell = r4.getCell(2 + i);
+        cell.value = excelDate(d);
+        cell.numFmt = 'm/d';
+        paint(cell, { bold: true });
+      });
+    }
+    const gt = r4.getCell(totalCol);
+    gt.value = 'Grand Total';
+    paint(gt, { bold: true });
+  };
+
+  headerBlock(model.title, true);
+
+  const hourVals = (byDate: Record<string, number>): (number | '')[] =>
+    model.dateIsos.map((iso) => (byDate[iso] !== undefined ? byDate[iso] : ('' as const)));
+
+  const fillRow = (row: ExcelJS.Row, hex: string | null, bold = false, upTo = lastCol): void => {
+    for (let c = 1; c <= upTo; c++) {
+      const cell = row.getCell(c);
+      paint(cell, { ...(hex ? { fill: 'FF' + hex, color: textOn(hex) } : {}), bold });
+      if (typeof cell.value === 'number' && c <= qbCol && c > 1) cell.numFmt = HOURS_FMT;
+    }
+  };
+
+  for (const cust of model.customers) {
+    const cRow = ws.addRow([cust.customer, ...hourVals(cust.byDate), cust.total]);
+    fillRow(cRow, cust.colorHex, true);
+    for (const job of cust.jobs) {
+      const a = job.analysis;
+      const jRow = ws.addRow([
+        job.jobcode2,
+        ...hourVals(job.byDate),
+        job.total,
+        '', // QB Hrs (job level blank)
+        a.apKey ?? '',
+        a.onCalendar,
+        a.estimator,
+        a.crewLead,
+        a.hourly ? '-' : (a.woOverride ?? ''),
+        a.hourly ? '-' : (a.woPct ?? ''),
+        a.percent === null ? '' : a.percent,
+        a.notes,
+      ]);
+      fillRow(jRow, job.colorHex);
+      // Job-row analysis cells bold (§4.4) + formats (§4.5).
+      for (let c = analysisStart; c <= lastCol; c++) {
+        const cell = jRow.getCell(c);
+        const color =
+          c === lastCol
+            ? job.colorHex && isDarkColor(job.colorHex)
+              ? 'FFFFC7C7'
+              : DARK_RED
+            : job.colorHex
+              ? textOn(job.colorHex)
+              : BLACK;
+        paint(cell, { ...(job.colorHex ? { fill: 'FF' + job.colorHex } : {}), color, bold: true });
+      }
+      const woCell = jRow.getCell(analysisStart + 4);
+      if (typeof woCell.value === 'number') woCell.numFmt = ACCT_NO_DOLLAR;
+      const woPctCell = jRow.getCell(analysisStart + 5);
+      if (typeof woPctCell.value === 'number') woPctCell.numFmt = PCT_FMT;
+      const pctCell = jRow.getCell(analysisStart + 6);
+      if (typeof pctCell.value === 'number') pctCell.numFmt = PCT_FMT;
+
+      for (const emp of job.employees) {
+        const eRow = ws.addRow([emp.username, ...hourVals(emp.byDate), emp.total, emp.qbHours ?? '']);
+        fillRow(eRow, job.colorHex);
+        const qb = eRow.getCell(qbCol);
+        if (typeof qb.value === 'number') {
+          qb.numFmt = HOURS_FMT;
+          qb.font = { ...baseFont, color: { argb: DARK_RED } };
+        }
+      }
+    }
+  }
+
+  // Grand Total row — gray, white text on A and the analysis columns.
+  const gRow = ws.addRow([
+    'Grand Total',
+    ...model.dateIsos.map((iso) => model.grandByDate[iso] ?? ('' as const)),
+    model.grandTotal,
+  ]);
+  for (let c = 1; c <= lastCol; c++) {
+    const cell = gRow.getCell(c);
+    paint(cell, { fill: HEADER_GRAY, color: WHITE, bold: true });
+    if (typeof cell.value === 'number') cell.numFmt = HOURS_FMT;
+  }
+
+  // §4.6 — BALANCES and UT sections auto-position below the pivot.
+  const manualSection = (title: string, rows: ManualSectionRow[]): void => {
+    ws.addRow([]);
+    headerBlock(title, false);
+    for (const r of rows) {
+      if (r.customer) {
+        const cRow = ws.addRow([r.customer]);
+        fillRow(cRow, r.colorHex, true);
+      }
+      const jRow = ws.addRow([r.job]);
+      const cells: (string | number)[] = [
+        r.apKey ?? '',
+        '',
+        r.estimator,
+        r.crewLead,
+        r.woOverride ?? '',
+        r.woPct ?? '',
+        r.percent === null ? '' : r.percent === 'HOURLY' ? 'HOURLY' : r.percent,
+        r.notes,
+      ];
+      cells.forEach((v, i) => {
+        jRow.getCell(analysisStart + i).value = v;
+      });
+      fillRow(jRow, r.colorHex);
+      const wo = jRow.getCell(analysisStart + 4);
+      if (typeof wo.value === 'number') wo.numFmt = ACCT_NO_DOLLAR;
+      for (const c of [analysisStart + 5, analysisStart + 6]) {
+        const cell = jRow.getCell(c);
+        if (typeof cell.value === 'number') cell.numFmt = PCT_FMT;
+      }
+    }
+  };
+  manualSection(model.title.replace('NV PAYROLL:', 'NV PAYROLL (BALANCES):'), model.balances);
+  manualSection(model.title.replace('NV PAYROLL:', 'UT PAYROLL:'), model.utPayroll);
+}
+
+// ---------------------------------------------------------------------------
+// Sheet 4 — Payroll Preview (Round 3 §5/§8, with live formulas)
+// ---------------------------------------------------------------------------
+
+const TAN = 'FFD6D4CA';
+const NEAR_WHITE = 'FFF9F9F9';
+const MANAGER_FILL = 'FFD99694';
+const OFFICE_BLUE = 'FF4F81BD';
+const MONEY_FMT = '_("$"* #,##0.00_);_("$"* \\(#,##0.00\\);_("$"* "-"??_);_(@_)';
+
+function buildPayrollPreviewSheet(wb: ExcelJS.Workbook, model: PayrollPreviewModel): void {
+  const ws = wb.addWorksheet('Payroll Preview');
+  ws.columns = [{ width: 22 }, { width: 41.4 }, { width: 32.4 }, { width: 16.2 }, { width: 9.4 }, { width: 12 }, { width: 12 }];
+  const baseFont = { name: FONT, size: 11 };
+
+  const band = (values: (string | number)[], fill: string, color: string, bold = true, upTo = 7): ExcelJS.Row => {
+    const row = ws.addRow(values);
+    for (let c = 1; c <= upTo; c++) {
+      row.getCell(c).fill = solidFill(fill);
+      row.getCell(c).font = { ...baseFont, bold, color: { argb: color } };
+    }
+    return row;
+  };
+
+  band([model.title], BLACK, WHITE);
+  ws.addRow([]);
+
+  const hourlyBlock = (block: HourlyBlock, headerFill = TAN): void => {
+    band([block.title], headerFill, BLACK);
+    const firstLineRow = ws.rowCount + 1;
+    for (const l of block.lines) {
+      const r = ws.addRow([l.apKey ? `AP${l.apKey}` : '', l.jobLabel, l.hours, l.rate]);
+      const n = r.number;
+      r.getCell(5).value = { formula: `C${n}*D${n}` };
+      r.getCell(3).numFmt = HOURS_FMT;
+      r.getCell(4).numFmt = HOURS_FMT;
+      r.getCell(5).numFmt = ACCOUNTING_FMT;
+      if (l.colorHex) {
+        for (const c of [1, 2]) {
+          r.getCell(c).fill = solidFill('FF' + l.colorHex);
+          r.getCell(c).font = { ...baseFont, color: { argb: textOn(l.colorHex) } };
+        }
+      }
+      if (l.ot) {
+        r.getCell(3).fill = solidFill('FFFFFF00');
+      }
+    }
+    const lastLineRow = ws.rowCount;
+    const sums = ws.addRow(['', '']);
+    const n = sums.number;
+    sums.getCell(3).value = { formula: `SUM(C${firstLineRow}:C${lastLineRow})` };
+    sums.getCell(5).value = { formula: `SUM(E${firstLineRow}:E${lastLineRow})` };
+    sums.getCell(6).value = block.net !== null ? { formula: `E${n}-G${n}` } : '';
+    sums.getCell(7).value = block.net ?? '';
+    sums.getCell(3).numFmt = HOURS_FMT;
+    for (const c of [5, 6, 7]) sums.getCell(c).numFmt = ACCOUNTING_FMT;
+    sums.font = { ...baseFont, bold: true };
+    ws.addRow([]);
+  };
+
+  const colLetter = (i: number): string => String.fromCharCode(65 + i); // 0→A
+
+  const psBlock = (block: PsBlock): void => {
+    const jobCount = block.jobs.length;
+    const hdr = band(
+      [block.leadName, ...block.jobs.map((j) => (j.woPct !== null ? j.woPct : '-'))],
+      TAN,
+      BLACK,
+      true,
+      1 + jobCount,
+    );
+    for (let i = 0; i < jobCount; i++) {
+      const cell = hdr.getCell(2 + i);
+      if (typeof cell.value === 'number') cell.numFmt = PCT_FMT;
+    }
+    const hdrRow = hdr.number;
+    ws.addRow(['PO', ...block.jobs.map((j) => j.jobShort)]);
+    ws.addRow(['Name', ...block.jobs.map((j) => j.customer)]);
+
+    // Value rows first (the formula chain references them).
+    const psRow = ws.addRow(['Profit Share']).number;
+    const woRow = ws.addRow(['Work Order Override', ...block.jobs.map((j) => j.workOrderOverride)]).number;
+    const pctRow = ws.addRow(['% Completion', ...block.jobs.map((j) => j.percentCompletion)]).number;
+    const laborRow = ws.addRow(['- Labor + Wages', ...block.jobs.map((j) => j.laborWages)]).number;
+    const milesRow = ws.addRow(['-Mileage', ...block.jobs.map((j) => j.mileage)]).number;
+    const halfRow = ws.addRow(['-½ Materials', ...block.jobs.map((j) => j.halfMaterials)]).number;
+    const tpsRow = ws.addRow(['Total Profit Share']).number;
+    let splitRow = 0;
+    if (block.jobs.some((j) => j.splitWith > 1)) {
+      splitRow = ws.addRow(['split w/', ...block.jobs.map((j) => (j.splitWith > 1 ? j.splitWith : ''))]).number;
+    }
+    ws.addRow([]);
+    const totalRow = ws.addRow(['Total']).number;
+    const mileNewRow = ws.addRow(['Mileage - New', block.mileageNew]).number;
+    const hourlyPayRow = ws.addRow(['Hourly Pay', block.hourlyPay]).number;
+    const reimbRow = ws.addRow(['Reimbursements', block.reimbursements, block.reimbMemo]).number;
+    const deductRow = ws.addRow(['Deductions/Sundries', block.deductions, block.deductMemo]).number;
+    const totalPayRow = ws.addRow(['Total Pay']).number;
+    ws.addRow([]);
+    const incomeRow = ws.addRow(['Total Income', ...block.jobs.map((j) => j.income)]).number;
+    const matRow = ws.addRow(['Materials', ...block.jobs.map((j) => j.materials)]).number;
+    ws.addRow(['QB Labor-Wages-Subs', ...block.jobs.map((j) => j.laborWages)]);
+    ws.addRow(['Mileage in Books', ...block.jobs.map((j) => j.mileage)]);
+    const pctMatRow = ws.addRow(['% Materials']).number;
+
+    for (let i = 0; i < jobCount; i++) {
+      const L = colLetter(1 + i); // B, C, …
+      ws.getCell(`${L}${psRow}`).value = { formula: `${L}${incomeRow}*${L}${hdrRow}` };
+      const tps = ws.getCell(`${L}${tpsRow}`);
+      tps.value = {
+        formula: `${L}${woRow}*${L}${pctRow}-${L}${laborRow}-${L}${milesRow}-${L}${halfRow}`,
+      };
+      tps.font = { ...baseFont, bold: true };
+      ws.getCell(`${L}${pctMatRow}`).value = {
+        formula: `IF(${L}${incomeRow}=0,0,${L}${matRow}/${L}${incomeRow})`,
+      };
+      ws.getCell(`${L}${pctRow}`).numFmt = PCT_FMT;
+      ws.getCell(`${L}${pctMatRow}`).numFmt = PCT_FMT;
+      for (const rn of [psRow, woRow, laborRow, milesRow, halfRow, tpsRow, incomeRow, matRow]) {
+        ws.getCell(`${L}${rn}`).numFmt = MONEY_FMT;
+      }
+    }
+
+    // Total: SUM across the Total Profit Share row (÷ split when present).
+    const totalCell = ws.getCell(`B${totalRow}`);
+    if (splitRow > 0) {
+      totalCell.value = block.total; // splits make a single SUM wrong — write the value
+    } else {
+      totalCell.value = { formula: `SUM(B${tpsRow}:${colLetter(jobCount)}${tpsRow})` };
+    }
+    ws.getCell(`B${totalPayRow}`).value = { formula: `SUM(B${totalRow}:B${deductRow})` };
+    for (const rn of [totalRow, mileNewRow, hourlyPayRow, reimbRow, deductRow, totalPayRow]) {
+      ws.getCell(`B${rn}`).numFmt = ACCOUNTING_FMT;
+      ws.getCell(`A${rn}`).font = { ...baseFont, bold: rn === totalRow || rn === totalPayRow };
+      ws.getCell(`B${rn}`).font = { ...baseFont, bold: rn === totalRow || rn === totalPayRow };
+    }
+    ws.addRow([]);
+
+    if (block.tsheets) {
+      band([`${block.tsheets.employeeName.split(' ')[0]}'s T-SHEETS BREAKDOWN`], NEAR_WHITE, BLACK);
+      hourlyBlock(block.tsheets, NEAR_WHITE);
+    }
+  };
+
+  const salaryBlock = (block: SalaryBlock, fill: string): void => {
+    band([`${block.name}${block.timesheetHours > 0 ? ` (${block.timesheetHours}hrs)` : ''}`], fill, BLACK);
+    const r1 = ws.addRow([block.role, '', block.amount]);
+    r1.getCell(3).numFmt = ACCOUNTING_FMT;
+    // Reimb already computed at the Settings mileage rate.
+    const r2 = ws.addRow([`mileage reimb: ${block.miles} miles`, '', block.mileageReimb]);
+    r2.getCell(3).numFmt = ACCOUNTING_FMT;
+    const r3 = ws.addRow(['Total', '', '']);
+    r3.getCell(3).value = { formula: `C${r1.number}+C${r2.number}` };
+    r3.getCell(3).numFmt = ACCOUNTING_FMT;
+    r3.font = { ...baseFont, bold: true };
+    ws.addRow([]);
+  };
+
+  for (const b of model.leads) psBlock(b);
+  for (const b of model.painters) hourlyBlock(b);
+
+  band(['OFFICE'], BLACK, WHITE);
+  for (const b of model.office) {
+    // Office job lines fill blue per §5.1.
+    const patched: HourlyBlock = {
+      ...b,
+      lines: b.lines.map((l) => ({ ...l, colorHex: OFFICE_BLUE.slice(2) })),
+    };
+    hourlyBlock(patched);
+  }
+
+  band(['ADMIN'], BLACK, WHITE);
+  for (const b of model.admin) salaryBlock(b, TAN);
+  band(['ESTIMATORS'], BLACK, WHITE);
+  for (const b of model.estimators) salaryBlock(b, TAN);
+  band(['MANAGER SALARY'], BLACK, WHITE);
+  for (const b of model.managers) salaryBlock(b, MANAGER_FILL);
+}
+
+function buildInactiveSheet(wb: ExcelJS.Workbook, names: string[]): void {
+  const ws = wb.addWorksheet('Inactive Employees');
+  ws.columns = [{ width: 40 }];
+  const hdr = ws.addRow(['Inactive Employees (zero hours this week)']);
+  hdr.getCell(1).fill = solidFill(BLACK);
+  hdr.getCell(1).font = { name: FONT, bold: true, color: { argb: WHITE } };
+  for (const n of names) ws.addRow([n]);
 }

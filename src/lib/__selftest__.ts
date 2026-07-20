@@ -5,8 +5,21 @@
 import { extractApKey, normalizeApInput, timesheetApKey } from './apkey';
 import { dateDiffDays, isDarkColor, parsePercentInput } from './format';
 import { parseDate, parseNumberLoose } from './parsers';
+import {
+  extractLeadParenthetical,
+  extractWoOverride,
+  extractWoPct,
+  jobDisplayName,
+  profitSharePctFor,
+  resolveCrewLead,
+  splitLeadCandidates,
+  splitOvertime,
+  tokensSubset,
+  wageRateFor,
+} from './payroll';
 import { orderLeadFirst } from './pivot';
 import { estimatorFromTitle, extractTitleInitials, suggestPercent } from './timenavi';
+import type { DirectoryEmployee } from './types';
 
 interface TestResult {
   name: string;
@@ -185,6 +198,96 @@ export function runSelfTests(): boolean {
   check('contrast: ND dark blue → white text', isDarkColor('4472C4'), true);
   check('contrast: MH light yellow → black text', isDarkColor('FFFF99'), false);
   check('contrast: RF dusty rose → black text', isDarkColor('DA9694'), false);
+
+  // --- Round 3 §3.1: job display name -----------------------------------------------------
+  check('jobName: AP token stripped', jobDisplayName('Aaron Ward', 'AP24314 Ext'), 'Aaron Ward Ext');
+  check(
+    'jobName: suffixed AP + inner text',
+    jobDisplayName('Tri-State', 'AP24097-A Sams Club Int'),
+    'Tri-State Sams Club Int',
+  );
+  check('jobName: single-spaced', jobDisplayName(' CCSD ', 'AP24403  5321 Lambrook Dr Int/Ext'), 'CCSD 5321 Lambrook Dr Int/Ext');
+
+  // --- Round 3 §3.2: crew-lead extraction ---------------------------------------------------
+  check(
+    'lead extract: last parenthetical, not the estimator',
+    extractLeadParenthetical('♦Int 13k (XC) Regina Conrad Ph1, AP24180-A *PAID* (Daniel)', known),
+    'Daniel',
+  );
+  check('lead extract: estimator-only title → null', extractLeadParenthetical('AP24403 Lambrook (PG)', known), null);
+  check('lead extract: no parentheses → null', extractLeadParenthetical('AP24477 Plain title', known), null);
+  check('lead extract: business name kept', extractLeadParenthetical("Ext 8k (MH) Smith, AP24499 (Pepe's Painting)", known), "Pepe's Painting");
+  check('lead split: slash', splitLeadCandidates('Ted/Rafael'), ['Ted', 'Rafael']);
+  check('lead split: commas', splitLeadCandidates('Ted, Antonio, Tomas'), ['Ted', 'Antonio', 'Tomas']);
+  check('lead split: hrly_ prefix stripped', splitLeadCandidates('hrly_Damian/Juan Salazar'), ['Damian', 'Juan Salazar']);
+  check('lead split: asterisks stripped', splitLeadCandidates('*Carlos*'), ['Carlos']);
+
+  const dir: DirectoryEmployee[] = [
+    { fullName: 'Carlos Ruiz Cruz', firstName: 'Carlos', lastName: 'Ruiz Cruz', active: true },
+    { fullName: 'Miguel Martin', firstName: 'Miguel', lastName: 'Martin', active: true },
+    { fullName: 'Miguel Borquez Gil', firstName: 'Miguel', lastName: 'Borquez Gil', active: true },
+    { fullName: 'Calixto Efrain Climaco', firstName: 'Calixto Efrain', lastName: 'Climaco', active: false },
+    { fullName: 'Ted Frank', firstName: 'Ted', lastName: 'Frank', active: true },
+    { fullName: 'Rafael Aguilar', firstName: 'Rafael', lastName: 'Aguilar', active: true },
+  ];
+  const ctx = {
+    directory: dir,
+    crewGroups: ["Carlos Ruiz Cruz's Crew", "Miguel Martin's Crew", "Ted Frank's Crew", "Rafael Aguilar's Crew"],
+    subcontractors: ["Pepe's Painting LLC", 'Color Enterprises LLC'],
+  };
+  check('lead resolve: Carlos → CARLOS RUIZ CRUZ', resolveCrewLead('Carlos', ctx).display, 'CARLOS RUIZ CRUZ');
+  check(
+    'lead resolve: crew-lead Miguel Martin preferred over other Miguels',
+    resolveCrewLead('Miguel', ctx).display,
+    'MIGUEL MARTIN',
+  );
+  check('lead resolve: sub via token match', [resolveCrewLead("Pepe's Painting", ctx).display, resolveCrewLead("Pepe's Painting", ctx).sub], ["PEPE'S PAINTING LLC", true]);
+  const welder = resolveCrewLead('Welder', ctx);
+  check('lead resolve: no match anywhere → flag', [welder.display, welder.flags[0]?.kind], ['', 'noMatch']);
+  const split = resolveCrewLead('Ted/Rafael', ctx);
+  check('lead resolve: split leads joined + split:2', [split.display, split.split], ['TED FRANK/RAFAEL AGUILAR', 2]);
+  const calixto = resolveCrewLead('Calixto', ctx);
+  check('lead resolve: inactive-only match used but flagged', [calixto.display, calixto.flags.some((f) => f.kind === 'inactiveMatch')], ['CALIXTO EFRAIN CLIMACO', true]);
+  check('lead resolve: empty raw → empty, no flags', resolveCrewLead(null, ctx), { display: '', names: [], split: 1, sub: false, raw: '', flags: [] });
+  check('tokens: middle initial optional', tokensSubset('Antonio Zuniga', 'Antonio J Zuniga'), true);
+
+  // --- Round 3 §3.4: overtime split ---------------------------------------------------------
+  const day2 = (m: number, d: number): Date => new Date(2026, m - 1, d);
+  const ot = splitOvertime([
+    { jobId: 'a', hours: 25, lastDate: day2(6, 30), lastRowIndex: 1 },
+    { jobId: 'b', hours: 15.67, lastDate: day2(7, 3), lastRowIndex: 5 },
+  ]);
+  check('OT: overage on the LAST job', [ot.otJobId, ot.otHours], ['b', 0.67]);
+  check('OT: regular reduced so reg+OT = actual', ot.regularByJob.get('b'), 15);
+  check('OT: other jobs untouched', ot.regularByJob.get('a'), 25);
+  const noOt = splitOvertime([{ jobId: 'a', hours: 40, lastDate: day2(7, 3), lastRowIndex: 0 }]);
+  check('OT: exactly 40 → none', [noOt.otJobId, noOt.otHours], [null, 0]);
+  const tie = splitOvertime([
+    { jobId: 'x', hours: 30, lastDate: day2(7, 3), lastRowIndex: 2 },
+    { jobId: 'y', hours: 12, lastDate: day2(7, 3), lastRowIndex: 7 },
+  ]);
+  check('OT: same-day tie → last by file order', tie.otJobId, 'y');
+
+  // --- Round 3 §4.3: WO pre-fills -------------------------------------------------------------
+  const jodi = extractWoOverride('gate 1234\n****PER JODI $4,715.00 is the total of work order he completed****');
+  check('WO$: $ before "work order" caught', [jodi?.amount, jodi?.line?.includes('PER JODI')], [4715, true]);
+  check('WO$: W.O. before $', extractWoOverride('W.O. total came to $2,300')?.amount, 2300);
+  check('WO$: plain money line ignored', extractWoOverride('Invoice total $9,000 sent'), null);
+  check('WO%: "@ 40% PS" line', extractWoPct('7/03/26 10% COMPLETE @ 40% PS')?.pct, 0.4);
+  check('WO%: absent → null', extractWoPct('7/03/26 10% COMPLETE'), null);
+
+  // --- Round 3 §7: settings lookups -----------------------------------------------------------
+  const psMap = [
+    { lead: 'Antonio Zuniga', pct: 0.36 },
+    { lead: "Pepe's Painting LLC", pct: 0.5 },
+  ];
+  check('PS%: token match (ALL-CAPS lead)', profitSharePctFor('ANTONIO ZUNIGA', psMap, 0.38), 0.36);
+  check('PS%: unlisted crew → default', profitSharePctFor('NEW GUY', psMap, 0.38), 0.38);
+  check("PS%: sub matched (PEPE'S PAINTING LLC)", profitSharePctFor("PEPE'S PAINTING LLC", psMap, 0.38), 0.5);
+  const rates = [{ name: 'Rafael Aguilar', rate: 18, hourlyRate: 25 }];
+  check('wage: piece-rate job → default rate', wageRateFor('RAFAEL AGUILAR', rates, 18, false), { rate: 18, defaulted: false });
+  check('wage: hourly job → hourly rate', wageRateFor('RAFAEL AGUILAR', rates, 18, true), { rate: 25, defaulted: false });
+  check('wage: unknown employee → fallback + flag', wageRateFor('Nobody Known', rates, 18, false), { rate: 18, defaulted: true });
 
   const failed = results.filter((r) => !r.pass);
   const label = `[% of Completion Builder self-test] ${results.length - failed.length}/${results.length} passed`;

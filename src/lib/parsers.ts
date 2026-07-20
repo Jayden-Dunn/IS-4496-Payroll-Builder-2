@@ -2,6 +2,10 @@ import * as XLSX from 'xlsx';
 import { extractApKey, normalizeApInput } from './apkey';
 import type {
   CellValue,
+  DirectoryEmployee,
+  PercentValue,
+  PlJobMetrics,
+  PlParseResult,
   PrevPercent,
   SalesRow,
   SheetData,
@@ -457,4 +461,249 @@ export function parseLastWeek(wbd: WorkbookData): Map<string, PrevPercent> {
     throw new Error('No AP# / % Completion pairs found on the "TimeNavi Export" sheet.');
   }
   return map;
+}
+
+// ---------------------------------------------------------------------------
+// Slot 7 (extended) — last week's "Pivot by Job" sheet, for §4.6 carry-forward
+// ---------------------------------------------------------------------------
+
+export interface LastWeekPbjRow {
+  section: 'pivot' | 'balances' | 'ut';
+  customer: string; // best-effort (judgment sections are editable anyway)
+  job: string;
+  apKey: string;
+  crewLead: string;
+  woOverride: number | null;
+  woPct: number | null;
+  percent: PercentValue;
+  notes: string;
+}
+
+function parsePercentCell(v: CellValue): PercentValue {
+  if (typeof v === 'number') return v;
+  if (typeof v !== 'string') return null;
+  const t = v.trim();
+  if (/hourly/i.test(t)) return 'HOURLY';
+  const m = /^(\d+(?:\.\d+)?)\s*%?$/.exec(t);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return n > 1 ? n / 100 : n;
+}
+
+/**
+ * Best-effort reader of last week's "Pivot by Job" sheet (our own export or
+ * the human-built original). Splits the sheet into pivot / BALANCES / UT
+ * regions by their title rows and pulls the analysis columns off every row
+ * with an AP#. Returns [] when the sheet is absent — never throws.
+ */
+export function parseLastWeekPivotByJob(wbd: WorkbookData): LastWeekPbjRow[] {
+  const sheet = wbd.sheets.find((s) => s.name.trim().toLowerCase() === 'pivot by job');
+  if (!sheet) return [];
+
+  // Column map from any header row containing "ap#".
+  let cols: Map<string, number> | null = null;
+  for (const row of sheet.rows) {
+    if (!row) continue;
+    const found = new Map<string, number>();
+    for (let c = 0; c < row.length; c++) {
+      const v = row[c];
+      if (typeof v !== 'string') continue;
+      const key = v.trim().toLowerCase();
+      if (key && !found.has(key)) found.set(key, c);
+    }
+    if (found.has('ap#')) {
+      cols = found;
+      break;
+    }
+  }
+  if (!cols) return [];
+  const apCol = cols.get('ap#') as number;
+  const leadCol = cols.get('crew lead');
+  const woCol = cols.get('wo override') ?? cols.get('wo amt');
+  const woPctCol = cols.get('wo%');
+  const pctCol = cols.get('% of completion');
+  const notesCol = cols.get('notes');
+
+  const out: LastWeekPbjRow[] = [];
+  let section: LastWeekPbjRow['section'] = 'pivot';
+  let prevNonApText = '';
+  for (const row of sheet.rows) {
+    if (!row || isEmptyRow(row)) continue;
+    const a = asString(row[0]);
+    if (/^NV PAYROLL \(BALANCES\)/i.test(a)) {
+      section = 'balances';
+      prevNonApText = '';
+      continue;
+    }
+    if (/^UT PAYROLL/i.test(a)) {
+      section = 'ut';
+      prevNonApText = '';
+      continue;
+    }
+    const apRaw = cellAt(row, apCol);
+    if (typeof apRaw === 'string' && apRaw.trim().toLowerCase() === 'ap#') continue; // repeated header rows
+    const apKey = apRaw == null || apRaw === '' ? null : normalizeApInput(String(apRaw));
+    if (!apKey) {
+      if (a && !/^(row labels|grand total|sum of hours|nv payroll)/i.test(a)) prevNonApText = a;
+      continue;
+    }
+    const wo = parseNumberLoose(cellAt(row, woCol));
+    const woPct = parsePercentCell(cellAt(row, woPctCol));
+    out.push({
+      section,
+      customer: prevNonApText,
+      job: a,
+      apKey,
+      crewLead: asString(cellAt(row, leadCol)),
+      woOverride: typeof wo === 'number' ? wo : null,
+      woPct: typeof woPct === 'number' ? woPct : null,
+      percent: parsePercentCell(cellAt(row, pctCol)),
+      notes: asString(cellAt(row, notesCol)),
+    });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Slot 8 — P&L "Profit and Loss by Customer" (QBO, wide layout)
+// ---------------------------------------------------------------------------
+
+/** Account rows summed per metric (trimmed, case-insensitive; missing = 0). */
+const PL_MATERIALS_ROWS = [
+  'equipment rental for jobs',
+  'job materials purchased',
+  'other job related costs',
+  'paint',
+  'sundries -',
+  'tools and small equipment',
+];
+const PL_LABOR_ROWS = ['employee labor', 'subcontractor labor', 'wages'];
+
+export function parsePl(wbd: WorkbookData): PlParseResult {
+  const sheet = wbd.sheets[0];
+  // The header row sits immediately above the row whose column A reads
+  // "Income" (title rows above it never do).
+  let incomeRow = -1;
+  for (let i = 1; i < sheet.rows.length; i++) {
+    const r = sheet.rows[i];
+    if (r && asString(r[0]).toLowerCase() === 'income') {
+      incomeRow = i;
+      break;
+    }
+  }
+  if (incomeRow < 1) {
+    throw new Error(
+      'Could not find the "Income" row. Expected a raw QBO "Profit and Loss by Customer" export (jobs as columns, accounts as rows).',
+    );
+  }
+  const headerRow = sheet.rows[incomeRow - 1];
+
+  // Job columns: header matches the AP regex; "Total …" and customer columns
+  // without an AP are skipped (they roll up jobs anyway).
+  const jobCols: { col: number; apKey: string; header: string }[] = [];
+  for (let c = 1; c < headerRow.length; c++) {
+    const h = asString(headerRow[c]);
+    if (!h || /^total\b/i.test(h)) continue;
+    const apKey = extractApKey(h);
+    if (apKey) jobCols.push({ col: c, apKey, header: h });
+  }
+  if (jobCols.length === 0) {
+    throw new Error('No job columns (headers containing an AP number) found on the P&L header row.');
+  }
+
+  // Account label → row values, matched after trim (indentation ignored).
+  const rowByLabel = new Map<string, CellValue[]>();
+  for (let i = incomeRow; i < sheet.rows.length; i++) {
+    const r = sheet.rows[i];
+    if (!r) continue;
+    const label = asString(r[0]).toLowerCase();
+    if (label && !rowByLabel.has(label)) rowByLabel.set(label, r);
+  }
+
+  const valueAt = (label: string, col: number): number => {
+    const r = rowByLabel.get(label);
+    if (!r) return 0;
+    const n = parseNumberLoose(cellAt(r, col));
+    return typeof n === 'number' ? n : 0; // 'FORMULA' remnants & blanks → 0
+  };
+  const sumAt = (labels: string[], col: number): number =>
+    labels.reduce((acc, l) => acc + valueAt(l, col), 0);
+
+  const byJob = new Map<string, PlJobMetrics>();
+  const duplicateColumns: string[] = [];
+  for (const jc of jobCols) {
+    const metrics: PlJobMetrics = {
+      income: valueAt('total income', jc.col),
+      materials: sumAt(PL_MATERIALS_ROWS, jc.col),
+      laborWagesSubs: sumAt(PL_LABOR_ROWS, jc.col),
+      mileage: valueAt('mileage expense', jc.col),
+      sundries: valueAt('sundries -', jc.col),
+      plJobHeader: jc.header,
+    };
+    const existing = byJob.get(jc.apKey);
+    if (existing) {
+      // Same apKey in more than one column: sum + flag (§2 slot 8).
+      if (!duplicateColumns.includes(jc.apKey)) duplicateColumns.push(jc.apKey);
+      byJob.set(jc.apKey, {
+        income: existing.income + metrics.income,
+        materials: existing.materials + metrics.materials,
+        laborWagesSubs: existing.laborWagesSubs + metrics.laborWagesSubs,
+        mileage: existing.mileage + metrics.mileage,
+        sundries: existing.sundries + metrics.sundries,
+        plJobHeader: existing.plJobHeader,
+      });
+    } else {
+      byJob.set(jc.apKey, metrics);
+    }
+  }
+  return { byJob, duplicateColumns };
+}
+
+// ---------------------------------------------------------------------------
+// Slot 9 — Employee Name List (QB Time employee directory)
+// ---------------------------------------------------------------------------
+
+/** Collapse doubled internal spaces ("Adriana  G" → "Adriana G"). */
+function singleSpaced(s: string): string {
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+export function parseEmployeeList(wbd: WorkbookData): DirectoryEmployee[] {
+  const sheet = wbd.sheets[0];
+  const hdr = findHeaderRow(sheet.rows, ['name'], ['first name', 'last name']);
+  if (!hdr) {
+    throw new Error(
+      'Header row not found. Expected a QB Time employee directory with columns Name, First Name, Last Name in the first 10 rows.',
+    );
+  }
+  const out: DirectoryEmployee[] = [];
+  for (let i = hdr.rowIndex + 1; i < sheet.rows.length; i++) {
+    const r = sheet.rows[i];
+    if (!r || isEmptyRow(r)) continue;
+    const get = (name: string): CellValue => cellAt(r, hdr.colMap.get(name));
+    const rawName = asString(get('name'));
+    let firstName = singleSpaced(asString(get('first name')));
+    let lastName = singleSpaced(asString(get('last name')));
+    if (!rawName && !firstName && !lastName) continue;
+    // Leading '*' anywhere in the name fields marks the employee inactive.
+    const active = !/^\s*\*/.test(rawName) && !/^\s*\*/.test(lastName) && !/^\s*\*/.test(firstName);
+    firstName = firstName.replace(/^\*+/, '').trim();
+    lastName = lastName.replace(/^\*+/, '').trim();
+    if (!firstName && !lastName) {
+      // Derive from "Last, First M".
+      const cleaned = singleSpaced(rawName.replace(/^\*+/, ''));
+      const comma = cleaned.indexOf(',');
+      if (comma >= 0) {
+        lastName = cleaned.slice(0, comma).trim();
+        firstName = cleaned.slice(comma + 1).trim();
+      } else {
+        firstName = cleaned;
+      }
+    }
+    const fullName = singleSpaced(`${firstName} ${lastName}`);
+    if (!fullName) continue;
+    out.push({ fullName, firstName, lastName, active });
+  }
+  if (out.length === 0) throw new Error('No employees found under the header row.');
+  return out;
 }

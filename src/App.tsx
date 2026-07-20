@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ExceptionsPanel } from './components/ExceptionsPanel';
+import { PayrollPreview } from './components/PayrollPreview';
+import { PivotByJobTable } from './components/PivotByJobTable';
 import { PivotTable } from './components/PivotTable';
 import { SettingsModal } from './components/SettingsModal';
 import { TimeNaviTable } from './components/TimeNaviTable';
@@ -12,20 +14,35 @@ import { addDays, dateToIso, isoToDate } from './lib/format';
 import { enrichTimesheet } from './lib/joins';
 import {
   parseCustomerSummary,
+  parseEmployeeList,
   parseLastWeek,
+  parseLastWeekPivotByJob,
+  parsePl,
   parseSalesDetail,
   parseTimeNavi,
   parseTimesheet,
   readWorkbook,
+  type LastWeekPbjRow,
 } from './lib/parsers';
+import { directoryFromTimesheet, type LeadResolverContext } from './lib/payroll';
+import { buildPayrollExceptions } from './lib/payrollExceptions';
+import { buildPayrollPreview } from './lib/payrollPreview';
 import { buildPivot } from './lib/pivot';
+import { buildPivotByJob, EMPTY_MANUAL_STATE, type ManualSectionState } from './lib/pivotByJob';
 import { ensureDefaultPivotColumns, loadSettings, saveSettings } from './lib/settings';
 import { buildReportRows, sortReportRows } from './lib/timenavi';
 import type {
   AppSettings,
+  DirectoryEmployee,
   EditsMap,
-  LegendEntry,
+  ManualSectionRow,
+  PayrollEdit,
+  PayrollEditsMap,
+  PbjEditsMap,
+  PbjJobEdit,
+  PlParseResult,
   PrevPercent,
+  QbHoursMap,
   RowEdit,
   SalesRow,
   TimeNaviEvent,
@@ -36,7 +53,9 @@ import type {
 // Upload slots
 // ---------------------------------------------------------------------------
 
-type SlotId = 'timesheet' | 'timenavi' | 'nvSales' | 'nvSummary' | 'utSales' | 'utSummary' | 'lastWeek';
+type SlotId =
+  | 'timesheet' | 'timenavi' | 'nvSales' | 'nvSummary' | 'utSales' | 'utSummary' | 'lastWeek'
+  | 'pl' | 'employees';
 
 interface SlotDef {
   id: SlotId;
@@ -52,7 +71,9 @@ const SLOT_DEFS: SlotDef[] = [
   { id: 'nvSummary', label: '4 · NV Sales by Customer Summary', hint: 'Job totals (Nevada)' },
   { id: 'utSales', label: '5 · UT Transaction List by Date', hint: 'AllPro Painters LLC (Utah)' },
   { id: 'utSummary', label: '6 · UT Sales by Customer Summary', hint: 'Job totals (Utah)' },
-  { id: 'lastWeek', label: '7 · Last week\u2019s % of Completion', hint: 'For the "Last % Paid" column', optional: true },
+  { id: 'lastWeek', label: '7 · Last week\u2019s % of Completion', hint: 'Last % Paid + Balances/UT carry-forward', optional: true },
+  { id: 'pl', label: '8 · P&L by Customer (QBO)', hint: 'Required for the payroll tabs', optional: true },
+  { id: 'employees', label: '9 · Employee Name List (QB Time)', hint: 'Crew-lead name resolution', optional: true },
 ];
 
 interface ParsedData {
@@ -63,6 +84,9 @@ interface ParsedData {
   utSales: SalesRow[] | null;
   utTotals: Map<string, number> | null;
   lastWeek: Map<string, PrevPercent> | null;
+  lastWeekPbj: LastWeekPbjRow[] | null;
+  pl: PlParseResult | null;
+  directory: DirectoryEmployee[] | null;
 }
 
 const EMPTY_PARSED: ParsedData = {
@@ -73,11 +97,14 @@ const EMPTY_PARSED: ParsedData = {
   utSales: null,
   utTotals: null,
   lastWeek: null,
+  lastWeekPbj: null,
+  pl: null,
+  directory: null,
 };
 
 const EMPTY_CHIP: SlotChip = { status: 'empty', fileName: '', message: '' };
 
-type Tab = 'timenavi' | 'pivot' | 'exceptions';
+type Tab = 'timenavi' | 'pivot' | 'pivotByJob' | 'payroll' | 'exceptions' | 'payrollExceptions';
 
 export default function App(): JSX.Element {
   const [chips, setChips] = useState<Record<SlotId, SlotChip>>({
@@ -88,11 +115,18 @@ export default function App(): JSX.Element {
     utSales: EMPTY_CHIP,
     utSummary: EMPTY_CHIP,
     lastWeek: EMPTY_CHIP,
+    pl: EMPTY_CHIP,
+    employees: EMPTY_CHIP,
   });
   const [parsed, setParsed] = useState<ParsedData>(EMPTY_PARSED);
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
   const [payDateIso, setPayDateIso] = useState<string>('');
   const [edits, setEdits] = useState<EditsMap>({});
+  const [pbjEdits, setPbjEdits] = useState<PbjEditsMap>({});
+  const [qbHours, setQbHours] = useState<QbHoursMap>({});
+  const [balancesState, setBalancesState] = useState<ManualSectionState>(EMPTY_MANUAL_STATE);
+  const [utState, setUtState] = useState<ManualSectionState>(EMPTY_MANUAL_STATE);
+  const [payrollEdits, setPayrollEdits] = useState<PayrollEditsMap>({});
   const [created, setCreated] = useState(false);
   const [tab, setTab] = useState<Tab>('timenavi');
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -152,7 +186,25 @@ export default function App(): JSX.Element {
         }
         case 'lastWeek': {
           const map = parseLastWeek(wbd);
-          ok(`✓ ${map.size} prior % values`, { lastWeek: map });
+          const pbjRows = parseLastWeekPivotByJob(wbd);
+          ok(
+            `✓ ${map.size} prior % values${pbjRows.length > 0 ? ` · ${pbjRows.length} Pivot by Job rows` : ''}`,
+            { lastWeek: map, lastWeekPbj: pbjRows },
+          );
+          break;
+        }
+        case 'pl': {
+          const pl = parsePl(wbd);
+          ok(
+            `✓ ${pl.byJob.size} job columns${pl.duplicateColumns.length > 0 ? ` · ${pl.duplicateColumns.length} duplicated` : ''}`,
+            { pl },
+          );
+          break;
+        }
+        case 'employees': {
+          const directory = parseEmployeeList(wbd);
+          const active = directory.filter((d) => d.active).length;
+          ok(`✓ ${active} active / ${directory.length - active} inactive`, { directory });
           break;
         }
       }
@@ -270,6 +322,74 @@ export default function App(): JSX.Element {
   );
   const exceptionCount = useMemo(() => countExceptions(exceptions), [exceptions]);
 
+  // ------------------------------------------------ Round 3: payroll models
+
+  const leadCtx = useMemo<LeadResolverContext>(() => {
+    const crewGroups = [...new Set((parsed.timesheet?.rows ?? []).map((r) => r.group).filter(Boolean))];
+    return {
+      directory: parsed.directory ?? directoryFromTimesheet(parsed.timesheet?.rows ?? []),
+      crewGroups,
+      subcontractors: settings.subcontractors,
+    };
+  }, [parsed.directory, parsed.timesheet, settings.subcontractors]);
+
+  const pivotByJob = useMemo(
+    () =>
+      buildPivotByJob({
+        enriched,
+        reportRows,
+        settings,
+        leadCtx,
+        knownEstimators,
+        payDate,
+        edits: pbjEdits,
+        qbHours,
+        lastWeekPbj: parsed.lastWeekPbj,
+        balancesState,
+        utState,
+      }),
+    [enriched, reportRows, settings, leadCtx, knownEstimators, payDate, pbjEdits, qbHours, parsed.lastWeekPbj, balancesState, utState],
+  );
+
+  const payrollPreview = useMemo(() => {
+    if (!created || !parsed.pl) return null;
+    return buildPayrollPreview({
+      pbj: pivotByJob,
+      enriched,
+      reportRows,
+      pl: parsed.pl,
+      directory: parsed.directory,
+      settings,
+      payDate,
+      edits: payrollEdits,
+      qbHours,
+      knownEstimators,
+      leadCtx,
+    });
+  }, [created, parsed.pl, parsed.directory, pivotByJob, enriched, reportRows, settings, payDate, payrollEdits, qbHours, knownEstimators, leadCtx]);
+
+  const payrollExceptions = useMemo(() => {
+    if (!created) return [];
+    return buildPayrollExceptions({
+      pbj: pivotByJob,
+      preview:
+        payrollPreview ?? {
+          title: '',
+          painters: [],
+          leads: [],
+          office: [],
+          admin: [],
+          estimators: [],
+          managers: [],
+          inactiveZeroHours: [],
+        },
+      reportRows,
+      pl: parsed.pl,
+      hasDirectory: parsed.directory !== null,
+    });
+  }, [created, pivotByJob, payrollPreview, reportRows, parsed.pl, parsed.directory]);
+  const payrollExceptionCount = useMemo(() => countExceptions(payrollExceptions), [payrollExceptions]);
+
   const estimatorOptions = useMemo(() => {
     const set = new Set<string>(legendOrder);
     for (const r of reportRows) if (r.estimator) set.add(r.estimator);
@@ -303,12 +423,72 @@ export default function App(): JSX.Element {
     }, 80);
   }, []);
 
-  const onDownload = useCallback((): void => {
-    void exportWorkbook({ rows: reportRows, pivot, legend: settings.legend, payDate });
-  }, [reportRows, pivot, settings.legend, payDate]);
+  // ---------------------------------------------- Round 3 edit callbacks
 
-  const onSaveSettings = useCallback((legend: LegendEntry[], pivotColumnOrder: string[]): void => {
-    const next: AppSettings = { legend, pivotColumnOrder };
+  const onEditPbjJob = useCallback((jobId: string, patch: PbjJobEdit): void => {
+    setPbjEdits((prev) => ({ ...prev, [jobId]: { ...prev[jobId], ...patch } }));
+  }, []);
+
+  const onEditQbHours = useCallback((jobId: string, username: string, value: number | null): void => {
+    const key = `${jobId}\u0000${username}`;
+    setQbHours((prev) => {
+      const next = { ...prev };
+      if (value === null) delete next[key];
+      else next[key] = value;
+      return next;
+    });
+  }, []);
+
+  const manualStateSetter = (section: 'balances' | 'ut') =>
+    section === 'balances' ? setBalancesState : setUtState;
+
+  const onManualEdit = useCallback(
+    (section: 'balances' | 'ut', rowId: string, patch: Partial<ManualSectionRow>): void => {
+      manualStateSetter(section)((prev) => ({
+        ...prev,
+        edits: { ...prev.edits, [rowId]: { ...prev.edits[rowId], ...patch } },
+      }));
+    },
+    [],
+  );
+
+  const onManualAdd = useCallback((section: 'balances' | 'ut'): void => {
+    const row: ManualSectionRow = {
+      id: `manual:${section}:${Date.now()}`,
+      customer: '',
+      job: '',
+      apKey: null,
+      estimator: '',
+      crewLead: '',
+      woOverride: null,
+      woPct: null,
+      percent: null,
+      notes: '',
+      colorHex: null,
+    };
+    manualStateSetter(section)((prev) => ({ ...prev, added: [...prev.added, row] }));
+  }, []);
+
+  const onManualDelete = useCallback((section: 'balances' | 'ut', rowId: string): void => {
+    manualStateSetter(section)((prev) => ({ ...prev, deleted: [...prev.deleted, rowId] }));
+  }, []);
+
+  const onPayrollEdit = useCallback((key: string, patch: PayrollEdit): void => {
+    setPayrollEdits((prev) => ({ ...prev, [key]: { ...prev[key], ...patch } }));
+  }, []);
+
+  const onDownload = useCallback((): void => {
+    void exportWorkbook({
+      rows: reportRows,
+      pivot,
+      legend: settings.legend,
+      payDate,
+      pivotByJob,
+      payrollPreview,
+    });
+  }, [reportRows, pivot, settings.legend, payDate, pivotByJob, payrollPreview]);
+
+  const onSaveSettings = useCallback((next: AppSettings): void => {
     setSettings(next);
     saveSettings(next);
     setSettingsOpen(false);
@@ -376,7 +556,10 @@ export default function App(): JSX.Element {
               [
                 ['timenavi', `TimeNavi Export${created ? ` (${includedCount})` : ''}`],
                 ['pivot', 'Pivot by Crew'],
-                ['exceptions', `Exceptions${created ? ` (${exceptionCount})` : ''}`],
+                ['pivotByJob', 'Pivot by Job'],
+                ['payroll', 'Payroll Preview'],
+                ['exceptions', `%'s Exceptions${created ? ` (${exceptionCount})` : ''}`],
+                ['payrollExceptions', `Payroll Exceptions${created ? ` (${payrollExceptionCount})` : ''}`],
               ] as [Tab, string][]
             ).map(([t, label]) => (
               <button
@@ -405,20 +588,28 @@ export default function App(): JSX.Element {
               />
             ) : tab === 'pivot' ? (
               <PivotTable pivot={pivot} colorByEstimator={colorByEstimator} />
-            ) : (
+            ) : tab === 'pivotByJob' ? (
+              <PivotByJobTable
+                model={pivotByJob}
+                onEditJob={onEditPbjJob}
+                onEditQbHours={onEditQbHours}
+                onManualEdit={onManualEdit}
+                onManualAdd={onManualAdd}
+                onManualDelete={onManualDelete}
+              />
+            ) : tab === 'payroll' ? (
+              <PayrollPreview model={payrollPreview} mileageRate={settings.mileageRate} onEdit={onPayrollEdit} />
+            ) : tab === 'exceptions' ? (
               <ExceptionsPanel groups={exceptions} onNavigate={navigateToRow} />
+            ) : (
+              <ExceptionsPanel groups={payrollExceptions} onNavigate={navigateToRow} />
             )}
           </div>
         </main>
       </div>
 
       {settingsOpen && (
-        <SettingsModal
-          legend={settings.legend}
-          pivotColumnOrder={settings.pivotColumnOrder}
-          onSave={onSaveSettings}
-          onClose={() => setSettingsOpen(false)}
-        />
+        <SettingsModal settings={settings} onSave={onSaveSettings} onClose={() => setSettingsOpen(false)} />
       )}
     </div>
   );
@@ -439,7 +630,11 @@ function clearForSlot(id: SlotId): Partial<ParsedData> {
     case 'utSummary':
       return { utTotals: null };
     case 'lastWeek':
-      return { lastWeek: null };
+      return { lastWeek: null, lastWeekPbj: null };
+    case 'pl':
+      return { pl: null };
+    case 'employees':
+      return { directory: null };
   }
 }
 

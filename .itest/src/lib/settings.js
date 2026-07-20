@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.DEFAULT_PIVOT_COLUMNS = exports.DEFAULT_LEGEND = void 0;
+exports.DEFAULT_SUBCONTRACTORS = exports.DEFAULT_MILEAGE_RATE = exports.DEFAULT_SALARIED = exports.DEFAULT_WAGE_RATE = exports.DEFAULT_WAGE_RATES = exports.DEFAULT_PROFIT_SHARE_PCT = exports.DEFAULT_PROFIT_SHARE = exports.DEFAULT_PIVOT_COLUMNS = exports.DEFAULT_LEGEND = void 0;
 exports.ensureDefaultPivotColumns = ensureDefaultPivotColumns;
 exports.defaultSettings = defaultSettings;
 exports.loadSettings = loadSettings;
@@ -25,9 +25,83 @@ exports.DEFAULT_LEGEND = [
 ];
 /** Default pivot estimator column order (separate from legend row-sort order). */
 exports.DEFAULT_PIVOT_COLUMNS = ['MH', 'PG', 'XC', 'ND', 'TE', 'RF'];
-// v3: palette changed (ND recolored, RF added) — older stored settings are
-// intentionally not migrated so the new defaults take effect.
-const STORAGE_KEY = 'pct-completion-builder.settings.v3';
+/**
+ * Round 3 payroll seeds. These are tribal-knowledge DEFAULTS from the
+ * reference documents — fully editable in Settings, never logic.
+ */
+exports.DEFAULT_PROFIT_SHARE = [
+    { lead: 'Antonio Zuniga', pct: 0.36 },
+    { lead: 'Calixto Efrain Climaco', pct: 0.36 },
+    { lead: 'Jesus Perez', pct: 0.36 },
+    { lead: 'Carlos Ruiz Cruz', pct: 0.38 },
+    { lead: 'Damian Vasquez', pct: 0.38 },
+    { lead: 'Daniel Gonzales Bonilla', pct: 0.38 },
+    { lead: 'Henry Limay Flores', pct: 0.38 },
+    { lead: 'Rafael Aguilar', pct: 0.38 },
+    { lead: 'Rene Salazar', pct: 0.38 },
+    { lead: 'Sergio Viera', pct: 0.38 },
+    { lead: 'Tomas Huerta', pct: 0.38 },
+    { lead: "Pepe's Painting LLC", pct: 0.5 },
+    { lead: 'Color Enterprises LLC', pct: 0.53 },
+    { lead: 'Merino Custom Painting', pct: 0.5 },
+    { lead: 'Alvaro Reyes', pct: 0.4 },
+];
+exports.DEFAULT_PROFIT_SHARE_PCT = 0.38;
+exports.DEFAULT_WAGE_RATES = [
+    { name: 'Adriana Lopez Barajas', rate: 25, hourlyRate: 20 },
+    { name: 'Ana Bedoya Melgar', rate: 20 },
+    { name: 'Antonio Zuniga', rate: 18 },
+    { name: 'Arlette Zuniga Lopez', rate: 19.18 },
+    { name: 'Armando Alfonso Marin', rate: 15 },
+    { name: 'Calixto Efrain Climaco', rate: 19.18 },
+    { name: 'Jesus Perez', rate: 19.18 },
+    { name: 'Carlos Ruiz Cruz', rate: 18 },
+    { name: 'Damian Vasquez', rate: 18 },
+    { name: 'Daniel Gonzales Bonilla', rate: 18 },
+    { name: 'Gertrudis Campoverde Anguiano', rate: 20 },
+    { name: 'Henry Limay Flores', rate: 18 },
+    { name: 'Leonardo Martinez-Rincon', rate: 18 },
+    { name: 'Manuel Aguilar Campoverde', rate: 22 },
+    { name: 'Miguel Borquez Gil', rate: 20 },
+    { name: 'Miguel Martin', rate: 20 },
+    { name: 'Miguel Rebollar Bocanegra', rate: 23 },
+    { name: 'Natividad Ortega', rate: 25 },
+    { name: 'Rafael Aguilar', rate: 18, hourlyRate: 25 },
+    { name: 'Randolfo Lopez', rate: 18 },
+    { name: 'Rene Salazar', rate: 18 },
+    { name: 'Samuel Martin', rate: 20 },
+    { name: 'Sergio Viera', rate: 18 },
+    { name: 'Ted Frank', rate: 21 },
+    { name: 'Tomas Huerta', rate: 18 },
+    { name: 'Emily Trujillo', rate: 16 },
+    { name: 'Jayden Dunn', rate: 18 },
+    { name: 'Mikayla Dunn', rate: 17 },
+    { name: 'Sandra Hermosillo', rate: 18 },
+    { name: 'Tyler Dunn', rate: 15 },
+];
+exports.DEFAULT_WAGE_RATE = 18;
+exports.DEFAULT_SALARIED = [
+    { name: 'Jodi Dunn', section: 'ADMIN', role: 'Manager Salary', amount: 865 },
+    { name: 'Jason Thompson', section: 'ESTIMATORS', role: 'Salary', amount: 1200 },
+    { name: 'Paul Good', section: 'ESTIMATORS', role: 'Commissions', amount: 1600 },
+    { name: 'Ryan Frey', section: 'ESTIMATORS', role: 'Commercial Estimator', amount: 1442 },
+    { name: 'Terry Emry', section: 'ESTIMATORS', role: 'Commissions', amount: 1442 },
+    { name: 'Xavier Cuellar', section: 'ESTIMATORS', role: 'Commercial Estimator', amount: 1200 },
+    { name: 'Charles Mike Holden', section: 'MANAGER SALARY', role: 'Manager Salary', amount: 2500 },
+    { name: 'Maria Donofrio', section: 'MANAGER SALARY', role: 'Manager Salary', amount: 1650 },
+    { name: 'Nathan Dunn', section: 'MANAGER SALARY', role: 'Manager Salary', amount: 1000 },
+    { name: 'Kristina Benson', section: 'MANAGER SALARY', role: 'Manager Salary', amount: 150 },
+];
+exports.DEFAULT_MILEAGE_RATE = 0.625;
+exports.DEFAULT_SUBCONTRACTORS = [
+    "Pepe's Painting LLC",
+    'Color Enterprises LLC',
+    'Merino Custom Painting',
+];
+// v4: Round 3 payroll settings added. v3 legend/pivot values are migrated;
+// missing payroll sections get the seeds.
+const STORAGE_KEY = 'pct-completion-builder.settings.v4';
+const STORAGE_KEY_V3 = 'pct-completion-builder.settings.v3';
 /**
  * Heal a stored pivot column order so every DEFAULT_PIVOT_COLUMNS entry is
  * present, and RF sits immediately after TE (even if a prior auto-append left
@@ -62,6 +136,13 @@ function defaultSettings() {
     return {
         legend: exports.DEFAULT_LEGEND.map((l) => ({ ...l })),
         pivotColumnOrder: [...exports.DEFAULT_PIVOT_COLUMNS],
+        profitShare: exports.DEFAULT_PROFIT_SHARE.map((e) => ({ ...e })),
+        defaultProfitSharePct: exports.DEFAULT_PROFIT_SHARE_PCT,
+        wageRates: exports.DEFAULT_WAGE_RATES.map((e) => ({ ...e })),
+        defaultWageRate: exports.DEFAULT_WAGE_RATE,
+        salariedRoster: exports.DEFAULT_SALARIED.map((e) => ({ ...e })),
+        mileageRate: exports.DEFAULT_MILEAGE_RATE,
+        subcontractors: [...exports.DEFAULT_SUBCONTRACTORS],
     };
 }
 function parseLegend(raw) {
@@ -97,15 +178,76 @@ function parsePivotOrder(raw) {
     }
     return out.length > 0 ? out : null;
 }
+function parsePayroll(raw) {
+    const out = {};
+    if (typeof raw !== 'object' || raw === null)
+        return out;
+    const r = raw;
+    if (Array.isArray(r.profitShare)) {
+        const list = [];
+        for (const e of r.profitShare) {
+            const x = e;
+            if (typeof x.lead === 'string' && typeof x.pct === 'number' && Number.isFinite(x.pct)) {
+                list.push({ lead: x.lead, pct: x.pct });
+            }
+        }
+        if (list.length > 0)
+            out.profitShare = list;
+    }
+    if (typeof r.defaultProfitSharePct === 'number' && Number.isFinite(r.defaultProfitSharePct)) {
+        out.defaultProfitSharePct = r.defaultProfitSharePct;
+    }
+    if (Array.isArray(r.wageRates)) {
+        const list = [];
+        for (const e of r.wageRates) {
+            const x = e;
+            if (typeof x.name === 'string' && typeof x.rate === 'number' && Number.isFinite(x.rate)) {
+                list.push({
+                    name: x.name,
+                    rate: x.rate,
+                    ...(typeof x.hourlyRate === 'number' && Number.isFinite(x.hourlyRate) ? { hourlyRate: x.hourlyRate } : {}),
+                });
+            }
+        }
+        if (list.length > 0)
+            out.wageRates = list;
+    }
+    if (typeof r.defaultWageRate === 'number' && Number.isFinite(r.defaultWageRate)) {
+        out.defaultWageRate = r.defaultWageRate;
+    }
+    if (Array.isArray(r.salariedRoster)) {
+        const list = [];
+        for (const e of r.salariedRoster) {
+            const x = e;
+            if (typeof x.name === 'string' &&
+                (x.section === 'ADMIN' || x.section === 'ESTIMATORS' || x.section === 'MANAGER SALARY') &&
+                typeof x.amount === 'number' &&
+                Number.isFinite(x.amount)) {
+                list.push({ name: x.name, section: x.section, role: typeof x.role === 'string' ? x.role : '', amount: x.amount });
+            }
+        }
+        if (list.length > 0)
+            out.salariedRoster = list;
+    }
+    if (typeof r.mileageRate === 'number' && Number.isFinite(r.mileageRate))
+        out.mileageRate = r.mileageRate;
+    if (Array.isArray(r.subcontractors)) {
+        const subs = r.subcontractors.filter((s) => typeof s === 'string' && s.trim() !== '');
+        if (subs.length > 0)
+            out.subcontractors = subs;
+    }
+    return out;
+}
 function loadSettings() {
     try {
-        const raw = localStorage.getItem(STORAGE_KEY);
+        // v4 first; fall back to v3 (legend/pivot only) so users keep palette edits.
+        const raw = localStorage.getItem(STORAGE_KEY) ?? localStorage.getItem(STORAGE_KEY_V3);
         if (raw) {
             const parsed = JSON.parse(raw);
             const legend = parseLegend(parsed);
             if (legend) {
                 const pivotColumnOrder = ensureDefaultPivotColumns(parsePivotOrder(parsed) ?? [...exports.DEFAULT_PIVOT_COLUMNS]);
-                return { legend, pivotColumnOrder };
+                return { ...defaultSettings(), ...parsePayroll(parsed), legend, pivotColumnOrder };
             }
         }
     }
