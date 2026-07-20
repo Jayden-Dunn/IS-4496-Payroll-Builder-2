@@ -1,5 +1,5 @@
 import { useState, type CSSProperties } from 'react';
-import { fmtHoursFixed, fmtPercent, isDarkColor, parseMoneyInput, parsePercentInput } from '../lib/format';
+import { fmtAccounting, fmtHoursFixed, fmtPercent, isDarkColor, parseMoneyInput, parsePercentInput } from '../lib/format';
 import { fmtMonthDay, weekdayShort } from '../lib/pivotByJob';
 import type { ManualSectionRow, PbjJobEdit, PivotByJobModel } from '../lib/types';
 
@@ -87,13 +87,13 @@ export function PivotByJobTable(props: PivotByJobTableProps): JSX.Element {
             {model.dateIsos.length > model.dates.length && <th className="xcell2" style={BLACK} />}
             <th className="xcell2 text-right" style={BLACK}>Total hrs</th>
             <th className="xcell2" style={BLACK} title="QB Hrs override (optional)" />
-            <th className="xcell2 text-left" style={BLACK}>AP#</th>
-            <th className="xcell2 text-left" style={BLACK}>On Calendar?</th>
-            <th className="xcell2 text-left" style={BLACK}>Estimator</th>
-            <th className="xcell2 text-left" style={BLACK}>Crew Lead</th>
-            <th className="xcell2 text-left" style={BLACK}>WO Override</th>
-            <th className="xcell2 text-left" style={BLACK}>WO%</th>
-            <th className="xcell2 text-left" style={{ ...BLACK, color: '#FF0000' }}>% of Completion</th>
+            <th className="xcell2 text-center" style={BLACK}>AP#</th>
+            <th className="xcell2 text-center" style={BLACK}>On Calendar?</th>
+            <th className="xcell2 text-center" style={BLACK}>Estimator</th>
+            <th className="xcell2 text-center" style={BLACK}>Crew Lead</th>
+            <th className="xcell2 text-center" style={BLACK}>WO Override</th>
+            <th className="xcell2 text-center" style={BLACK}>WO%</th>
+            <th className="xcell2 text-center" style={{ ...BLACK, color: '#FF0000' }}>% of Completion</th>
             <th className="xcell2 text-left" style={{ ...BLACK, color: '#FF6A6A' }}>Notes</th>
           </tr>
           {/* Row 2 — computed weekday names (Sunday included, unlike the hand-typed reference). */}
@@ -117,13 +117,13 @@ export function PivotByJobTable(props: PivotByJobTableProps): JSX.Element {
             ))}
             <th className="xcell2 sticky top-0 z-10 min-w-[70px] text-right" style={GRAY}>Grand Total</th>
             <th className="xcell2 sticky top-0 z-10 min-w-[56px] text-right" style={GRAY} title="Optional QuickBooks-approved hours override">QB Hrs</th>
-            <th className="xcell2 sticky top-0 z-10 min-w-[76px] text-left" style={GRAY}>AP#</th>
-            <th className="xcell2 sticky top-0 z-10 min-w-[120px] text-left" style={GRAY}>On Calendar?</th>
-            <th className="xcell2 sticky top-0 z-10 min-w-[64px] text-left" style={GRAY}>Estimator</th>
-            <th className="xcell2 sticky top-0 z-10 min-w-[220px] text-left" style={GRAY}>Crew Lead</th>
-            <th className="xcell2 sticky top-0 z-10 min-w-[110px] text-left" style={GRAY}>WO Override</th>
-            <th className="xcell2 sticky top-0 z-10 min-w-[64px] text-left" style={GRAY}>WO%</th>
-            <th className="xcell2 sticky top-0 z-10 min-w-[76px] text-left" style={GRAY}>% of Compl.</th>
+            <th className="xcell2 sticky top-0 z-10 min-w-[76px] text-center" style={GRAY}>AP#</th>
+            <th className="xcell2 sticky top-0 z-10 min-w-[120px] text-center" style={GRAY}>On Calendar?</th>
+            <th className="xcell2 sticky top-0 z-10 min-w-[64px] text-center" style={GRAY}>Estimator</th>
+            <th className="xcell2 sticky top-0 z-10 min-w-[220px] text-center" style={GRAY}>Crew Lead</th>
+            <th className="xcell2 sticky top-0 z-10 min-w-[110px] text-center" style={GRAY}>WO Override</th>
+            <th className="xcell2 sticky top-0 z-10 min-w-[64px] text-center" style={GRAY}>WO%</th>
+            <th className="xcell2 sticky top-0 z-10 min-w-[76px] text-center" style={GRAY}>% of Compl.</th>
             <th className="xcell2 sticky top-0 z-10 min-w-[160px] text-left" style={GRAY}>Notes</th>
           </tr>
         </thead>
@@ -226,30 +226,31 @@ function JobRows({
         {hourCells(job.byDate)}
         <td className="xcell text-right font-bold">{fmtHoursFixed(job.total)}</td>
         <td className="xcell" />
-        <td className="xcell font-bold">
+        <td className="xcell text-center font-bold">
           <EditCell
             value={a.apKey ?? ''}
             onCommit={(t) => onEditJob(job.id, { apKey: t.trim() === '' ? null : t.trim().toUpperCase() })}
+            className="text-center"
           />
         </td>
-        <td className={`xcell font-bold ${a.onCalendar === 'NOT ON CALENDAR' ? 'text-red-700' : ''}`}>{a.onCalendar}</td>
-        <td className="xcell font-bold">{a.estimator}</td>
-        <td className="xcell font-bold" title={a.crewLeadResolution?.raw ? `From "(${a.crewLeadResolution.raw})"` : undefined}>
-          <EditCell value={a.crewLead} onCommit={(t) => onEditJob(job.id, { crewLead: t })} placeholder="—" />
+        <td className={`xcell text-center font-bold ${a.onCalendar === 'NOT ON CALENDAR' ? 'text-red-700' : ''}`}>{a.onCalendar}</td>
+        <td className="xcell text-center font-bold">{a.estimator}</td>
+        <td className="xcell text-center font-bold" title={a.crewLeadResolution?.raw ? `From "(${a.crewLeadResolution.raw})"` : undefined}>
+          <EditCell value={a.crewLead} onCommit={(t) => onEditJob(job.id, { crewLead: t })} className="text-center" placeholder="—" />
         </td>
-        <td className="xcell text-right font-bold" title={a.woOverrideSource ?? undefined}>
+        <td className="xcell text-center font-bold" title={a.woOverrideSource ?? undefined}>
           {a.hourly ? (
             '-'
           ) : (
             <EditCell
-              value={a.woOverride !== null ? a.woOverride.toFixed(2) : ''}
+              value={a.woOverride !== null ? `$${fmtAccounting(a.woOverride)}` : ''}
               onCommit={(t) => onEditJob(job.id, { woOverride: parseMoneyInput(t) })}
-              className="text-right"
+              className="text-center"
               placeholder="—"
             />
           )}
         </td>
-        <td className="xcell text-right font-bold" title={a.woPctSource ?? undefined}>
+        <td className="xcell text-center font-bold" title={a.woPctSource ?? undefined}>
           {a.hourly ? (
             '-'
           ) : (
@@ -259,11 +260,11 @@ function JobRows({
                 const p = parsePercentInput(t);
                 onEditJob(job.id, { woPct: typeof p === 'number' ? p : null });
               }}
-              className="text-right"
+              className="text-center"
             />
           )}
         </td>
-        <td className="xcell text-right font-bold" title="Mirrors the TimeNavi Export grid — edit it there">
+        <td className="xcell text-center font-bold" title="Mirrors the TimeNavi Export grid — edit it there">
           {fmtPercent(a.percent)}
         </td>
         <td className="xcell font-bold" style={{ color: style && isDarkColor(job.colorHex ?? 'FFFFFF') ? '#FFC7C7' : '#C00000' }}>
@@ -347,33 +348,33 @@ function ManualSection({
             <tr key={r.id} style={style}>
               <td className="xcell min-w-[160px]">{cell('customer')}</td>
               <td className="xcell min-w-[260px]">{cell('job')}</td>
-              <td className="xcell min-w-[76px]">
-                <EditCell value={r.apKey ?? ''} onCommit={(t) => onManualEdit(section, r.id, { apKey: t.trim() || null })} />
+              <td className="xcell min-w-[76px] text-center">
+                <EditCell value={r.apKey ?? ''} onCommit={(t) => onManualEdit(section, r.id, { apKey: t.trim() || null })} className="text-center" />
               </td>
-              <td className="xcell min-w-[64px]">{cell('estimator')}</td>
-              <td className="xcell min-w-[200px]">{cell('crewLead')}</td>
-              <td className="xcell min-w-[100px] text-right">
+              <td className="xcell min-w-[64px] text-center">{cell('estimator', 'text-center')}</td>
+              <td className="xcell min-w-[200px] text-center">{cell('crewLead', 'text-center')}</td>
+              <td className="xcell min-w-[100px] text-center">
                 <EditCell
-                  value={r.woOverride !== null ? r.woOverride.toFixed(2) : ''}
+                  value={r.woOverride !== null ? `$${fmtAccounting(r.woOverride)}` : ''}
                   onCommit={(t) => onManualEdit(section, r.id, { woOverride: parseMoneyInput(t) })}
-                  className="text-right"
+                  className="text-center"
                 />
               </td>
-              <td className="xcell min-w-[56px] text-right">
+              <td className="xcell min-w-[56px] text-center">
                 <EditCell
                   value={r.woPct !== null ? `${Math.round(r.woPct * 100)}%` : ''}
                   onCommit={(t) => {
                     const p = parsePercentInput(t);
                     onManualEdit(section, r.id, { woPct: typeof p === 'number' ? p : null });
                   }}
-                  className="text-right"
+                  className="text-center"
                 />
               </td>
-              <td className="xcell min-w-[64px] text-right">
+              <td className="xcell min-w-[64px] text-center">
                 <EditCell
                   value={fmtPercent(r.percent)}
                   onCommit={(t) => onManualEdit(section, r.id, { percent: parsePercentInput(t) })}
-                  className="text-right"
+                  className="text-center"
                 />
               </td>
               <td className="xcell min-w-[160px]" style={{ color: '#C00000' }}>{cell('notes')}</td>

@@ -4,6 +4,8 @@ exports.jobDisplayName = jobDisplayName;
 exports.nameTokens = nameTokens;
 exports.nameTokenSets = nameTokenSets;
 exports.tokensSubset = tokensSubset;
+exports.stripSingleLetterTokens = stripSingleLetterTokens;
+exports.titleCaseLeadName = titleCaseLeadName;
 exports.extractLeadParenthetical = extractLeadParenthetical;
 exports.splitLeadCandidates = splitLeadCandidates;
 exports.resolveCrewLead = resolveCrewLead;
@@ -13,6 +15,8 @@ exports.extractWoOverride = extractWoOverride;
 exports.extractWoPct = extractWoPct;
 exports.profitSharePctFor = profitSharePctFor;
 exports.wageRateFor = wageRateFor;
+exports.isPrevailingWageJob = isPrevailingWageJob;
+exports.resolveLineRate = resolveLineRate;
 /**
  * Round 3 shared payroll derivations (§3): job display names, crew-lead
  * extraction/resolution, overtime split, WO pre-fills. All pure functions —
@@ -57,6 +61,40 @@ function tokensSubset(candidate, employeeFullName) {
         return false;
     const { all } = nameTokenSets(employeeFullName);
     return cand.every((t) => all.has(t));
+}
+/**
+ * Round 4 §3.2-2 — display names drop single-letter tokens (optionally
+ * followed by '.') anywhere in the name: "Rene Salazar M" → "Rene Salazar",
+ * "Adriana G Lopez Barajas" → "Adriana Lopez Barajas". Matching logic keeps
+ * the raw tokens; only display changes.
+ */
+function stripSingleLetterTokens(name) {
+    const kept = name
+        .split(/\s+/)
+        .filter((t) => !/^[A-Za-z]\.?$/.test(t));
+    return (kept.length > 0 ? kept : name.split(/\s+/)).join(' ').trim();
+}
+/**
+ * Resolve an ALL-CAPS lead key (possibly "A/B" joined) back to the stored
+ * Title Case names from the directory / subcontractors list (§5.3). Never
+ * invents casing — an unmatched part keeps its original text.
+ */
+function titleCaseLeadName(leadDisplay, directory, subcontractors) {
+    return leadDisplay
+        .split('/')
+        .map((part) => {
+        const p = part.trim();
+        if (!p)
+            return p;
+        const dir = directory.find((d) => d.fullName.toUpperCase() === p.toUpperCase());
+        if (dir)
+            return stripSingleLetterTokens(dir.fullName);
+        const sub = subcontractors.find((s) => s.toUpperCase() === p.toUpperCase());
+        if (sub)
+            return sub;
+        return stripSingleLetterTokens(p);
+    })
+        .join('/');
 }
 // ---------------------------------------------------------------------------
 // §3.2 Crew-lead extraction from the event title
@@ -142,7 +180,9 @@ function resolveCandidate(candidate, ctx) {
         flags.push({ kind: 'ambiguous', candidate });
         matches = [...matches].sort((a, b) => a.fullName.localeCompare(b.fullName, 'en', { sensitivity: 'base' }));
     }
-    return { name: matches[0].fullName.toUpperCase(), sub: false, flags };
+    // §3.2-2 display rule: single-letter tokens dropped ("Rene Salazar M" →
+    // "RENE SALAZAR"); matching elsewhere is token-based so nothing breaks.
+    return { name: stripSingleLetterTokens(matches[0].fullName).toUpperCase(), sub: false, flags };
 }
 /**
  * Resolve a raw lead parenthetical ("Ted/Rafael", "Pepe's Painting"…) into
@@ -264,4 +304,29 @@ function wageRateFor(employeeName, rates, fallback, hourlyJob) {
     if (!entry)
         return { rate: fallback, defaulted: true };
     return { rate: hourlyJob && entry.hourlyRate !== undefined ? entry.hourlyRate : entry.rate, defaulted: false };
+}
+// ---------------------------------------------------------------------------
+// Round 4 §5.8 — prevailing-wage (Davis-Bacon) rate suggestion chain
+// ---------------------------------------------------------------------------
+/** Case-insensitive substring match of any configured pattern on the job text. */
+function isPrevailingWageJob(jobText, patterns) {
+    const t = jobText.toLowerCase();
+    return patterns.some((p) => p.trim() !== '' && t.includes(p.trim().toLowerCase()));
+}
+/**
+ * §5.8 suggestion chain (a per-line user edit — rule 1 — is applied by the
+ * caller): prevailing-wage jobs pay max(default rate, prevailing minimum);
+ * hourly (T&M) jobs pay the employee's hourly-jobs rate; else the default.
+ */
+function resolveLineRate(employeeName, jobText, hourlyJob, settings) {
+    if (isPrevailingWageJob(jobText, settings.prevailingWagePatterns)) {
+        const base = wageRateFor(employeeName, settings.wageRates, settings.defaultWageRate, false);
+        return {
+            rate: Math.max(base.rate, settings.prevailingMinRate),
+            defaulted: base.defaulted,
+            prevailing: true,
+        };
+    }
+    const info = wageRateFor(employeeName, settings.wageRates, settings.defaultWageRate, hourlyJob);
+    return { rate: info.rate, defaulted: info.defaulted, prevailing: false };
 }

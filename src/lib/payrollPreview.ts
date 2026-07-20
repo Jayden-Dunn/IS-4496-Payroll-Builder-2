@@ -1,7 +1,8 @@
 /**
- * Round 3 §5 — "Payroll Preview": one block per person (hourly painters,
- * crew-lead profit-share blocks, office/admin/estimator/manager sections).
- * Every derived number is an editable default; edits recompute live.
+ * Round 3 §5 / Round 4 §5 — "Payroll Preview": one block per person (hourly
+ * painters + crew-lead profit-share blocks in a single A→Z sequence, then
+ * office/admin/estimator/manager sections). Every derived number is an
+ * editable default; edits recompute live.
  */
 import { fmtDate, round2 } from './format';
 import {
@@ -12,9 +13,11 @@ import {
   jobDisplayName,
   profitSharePctFor,
   resolveCrewLead,
+  resolveLineRate,
   splitOvertime,
+  stripSingleLetterTokens,
+  titleCaseLeadName,
   tokensSubset,
-  wageRateFor,
   type LeadResolverContext,
   type OtJobHours,
 } from './payroll';
@@ -25,6 +28,7 @@ import type {
   EnrichedTimesheetRow,
   HourlyBlock,
   HourlyLine,
+  PainterSectionEntry,
   PayrollEditsMap,
   PayrollPreviewModel,
   PivotByJobModel,
@@ -42,7 +46,7 @@ export interface PayrollPreviewInput {
   enriched: EnrichedTimesheetRow[];
   reportRows: ReportRow[];
   pl: PlParseResult | null;
-  directory: DirectoryEmployee[] | null; // Slot 9 (null → timesheet fallback)
+  directory: DirectoryEmployee[] | null; // Slot 9 / saved (null → timesheet fallback)
   settings: AppSettings;
   payDate: Date | null;
   edits: PayrollEditsMap;
@@ -71,7 +75,8 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     if (!weekStart || r.localDate.getTime() < weekStart.getTime()) weekStart = r.localDate;
     if (!weekEnd || r.localDate.getTime() > weekEnd.getTime()) weekEnd = r.localDate;
   }
-  const range = weekStart && weekEnd ? `(${fmtMonthDay(weekStart)} - ${fmtMonthDay(weekEnd)})` : '';
+  const weekRange = weekStart && weekEnd ? `${fmtMonthDay(weekStart)} - ${fmtMonthDay(weekEnd)}` : '';
+  const range = weekRange ? `(${weekRange})` : '';
   const title = `PAYROLL BREAKDOWN ${payDate ? fmtDate(payDate) : ''} ${range}`.replace(/\s+/g, ' ').trim();
 
   // ----- employee snapshot --------------------------------------------------
@@ -80,7 +85,8 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     fname: string;
     lname: string;
     group: string;
-    fullName: string; // directory name when matched
+    fullName: string; // directory name when matched (raw, for matching)
+    displayName: string; // §3.2-2 single-letter tokens stripped
     inactive: boolean;
   }
   const emps = new Map<string, Emp>();
@@ -89,12 +95,14 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     if (emps.has(key)) continue;
     const tsName = `${r.fname} ${r.lname}`.replace(/\s+/g, ' ').trim();
     const dirMatch = directory.find((d) => tokensSubset(tsName, d.fullName) || tokensSubset(d.fullName, tsName));
+    const fullName = dirMatch?.fullName ?? tsName;
     emps.set(key, {
       username: key,
       fname: r.fname,
       lname: r.lname,
       group: r.group,
-      fullName: dirMatch?.fullName ?? tsName,
+      fullName,
+      displayName: stripSingleLetterTokens(fullName),
       inactive: dirMatch ? !dirMatch.active : false,
     });
   }
@@ -112,9 +120,15 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     lastDate: Date | null;
     lastRowIndex: number;
     office: boolean;
+    /** Text used for prevailing-wage pattern matching (§5.8). */
+    jobText: string;
   }
   const empJobs = new Map<string, EmpJob[]>(); // username → jobs in first-encounter order
   const jobRowById = new Map(pbj.customers.flatMap((c) => c.jobs.map((j) => [j.id, j] as const)));
+  const eventByApKey = new Map<string, ReportRow>();
+  for (const r of reportRows) {
+    if (r.included && r.apKey && !eventByApKey.has(r.apKey)) eventByApKey.set(r.apKey, r);
+  }
 
   enriched.forEach((r, idx) => {
     if (r.hours === 0) return;
@@ -128,6 +142,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     let j = list.find((x) => x.jobId === jobId);
     if (!j) {
       const pbjJob = jobRowById.get(jobId);
+      const eventTitle = r.apKey ? (eventByApKey.get(r.apKey)?.event ?? '') : '';
       j = {
         jobId,
         apKey: r.apKey,
@@ -140,6 +155,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
         lastDate: r.localDate,
         lastRowIndex: idx,
         office: r.apKey === 'OFFICE',
+        jobText: `${r.jobcode1} ${r.jobcode2} ${eventTitle}`,
       };
       list.push(j);
     }
@@ -221,12 +237,13 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     return false;
   };
 
-  // ----- hourly block construction ------------------------------------------
-  const crewSuffix = (group: string): string => {
-    const m = /^(.*?)['\u2019]s\s+crew\s*$/i.exec(group.trim());
-    return m ? ` (${m[1]}'s Crew)` : group ? ` (${group})` : '';
-  };
+  /** §5.9 — salaried-roster people never get an hourly block. */
+  const isSalaried = (fullName: string): boolean =>
+    settings.salariedRoster.some(
+      (s) => tokensSubset(s.name, fullName) || tokensSubset(fullName, s.name),
+    );
 
+  // ----- hourly block construction ------------------------------------------
   const buildHourlyBlock = (emp: Emp, officeStyle: boolean): HourlyBlock => {
     const jobs = empJobs.get(emp.username) ?? [];
     // §3.4 overtime on the QB-adjusted hours.
@@ -239,19 +256,26 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     const pushLine = (j: EmpJob, hours: number, isOt: boolean): void => {
       const lineId = `${emp.username}\u0000${j.jobId}${isOt ? ':OT' : ''}`;
       const e = edits[`hl:${lineId}`] ?? {};
-      const rateInfo = wageRateFor(emp.fullName, settings.wageRates, settings.defaultWageRate, j.hourly);
+      const rateInfo = resolveLineRate(emp.fullName, j.jobText, j.hourly, settings);
       const baseRate = e.rate !== undefined ? e.rate : rateInfo.rate;
       const rate = isOt ? round2(baseRate * 1.5) : baseRate;
-      const label = officeStyle
+      const isOfficeLine = officeStyle || j.office;
+      const label = isOfficeLine
         ? `Office${isOt ? ' [OT]' : ''}`
         : `${jobDisplayName(j.customer, j.jobcode2)}${j.hourly ? ' [hrly]' : ''}${isOt ? ' [OT]' : ''}`;
+      // §5.5 — office lines carry the week range (or "Allpro Office" inside a
+      // mixed painter block) on the blue PO cell instead of an AP number.
+      const poText = officeStyle ? `(${weekRange})` : j.office ? 'Allpro Office' : null;
       lines.push({
         id: lineId,
         apKey: j.apKey,
+        poText,
         jobLabel: label,
         hours: e.hours !== undefined ? e.hours : round2(hours),
         rate,
         rateDefaulted: rateInfo.defaulted && e.rate === undefined,
+        prevailing: rateInfo.prevailing,
+        belowPrevailing: rateInfo.prevailing && baseRate < settings.prevailingMinRate,
         ot: isOt,
         hourlyJob: j.hourly,
         colorHex: j.colorHex,
@@ -277,8 +301,9 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     const blockEdit = edits[`hb:${emp.username}`] ?? {};
     return {
       key: emp.username,
-      title: officeStyle ? emp.fullName : `${emp.fullName}${crewSuffix(emp.group)}`,
-      employeeName: emp.fullName,
+      title: officeStyle ? emp.displayName : `${emp.displayName}${emp.group ? ` (${emp.group})` : ''}`,
+      employeeName: emp.displayName,
+      crewTag: officeStyle ? '' : emp.group,
       lines,
       totalHours,
       totalPay,
@@ -292,6 +317,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
   const painterEmps: Emp[] = [];
   const leadEmps: Emp[] = [];
   for (const emp of emps.values()) {
+    if (isSalaried(emp.fullName)) continue; // §5.9 — roster block only
     if (/office/i.test(emp.group)) officeEmps.push(emp);
     else if (isLead(emp.fullName)) leadEmps.push(emp);
     else painterEmps.push(emp);
@@ -317,6 +343,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     woOverride: number | null,
     percent: number,
     split: number,
+    colorHex: string | null,
   ): PsJobColumn => {
     const e = edits[`ps:${blockKey}:${jobRowId}`] ?? {};
     const metrics = apKey ? plByJob.get(apKey) : undefined;
@@ -325,18 +352,19 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     const materials = e.materials !== undefined ? e.materials : (metrics?.materials ?? 0);
     const laborWages = e.laborWages !== undefined ? e.laborWages : (metrics?.laborWagesSubs ?? 0);
     const mileage = e.mileage !== undefined ? e.mileage : (metrics?.mileage ?? 0);
-    const halfMaterials = e.halfMaterials !== undefined ? e.halfMaterials : round2(materials / 2);
+    // §5.6 precision — full-precision derived values; formats round the display.
+    const halfMaterials = e.halfMaterials !== undefined ? e.halfMaterials : materials / 2;
     const pct = woPct ?? 0;
-    const profitShare = round2(income * pct);
+    const profitShare = income * pct;
     const workOrderOverride =
       e.workOrderOverride !== undefined ? e.workOrderOverride : (woOverride ?? profitShare);
     const percentCompletion = e.percentCompletion !== undefined ? e.percentCompletion : percent;
-    const totalProfitShare = round2(
-      workOrderOverride * percentCompletion - laborWages - mileage - halfMaterials,
-    );
+    const totalProfitShare =
+      workOrderOverride * percentCompletion - laborWages - mileage - halfMaterials;
     return {
       jobRowId,
       apKey,
+      colorHex,
       jobShort,
       customer,
       woPct,
@@ -348,7 +376,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       halfMaterials,
       totalProfitShare,
       splitWith: split,
-      totalAfterSplit: round2(totalProfitShare / Math.max(1, split)),
+      totalAfterSplit: totalProfitShare / Math.max(1, split),
       missingFromPl,
       income,
       materials,
@@ -380,6 +408,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
           job.analysis.woOverride,
           pctNum,
           job.analysis.split,
+          job.colorHex,
         ),
       );
     }
@@ -397,6 +426,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
           cj.woOverride,
           pctNum,
           cj.split,
+          colorByEstimator.get(cj.row.estimator) ?? null,
         ),
       );
     }
@@ -407,7 +437,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     );
     const tsheets = leadEmp && !meta.sub ? buildHourlyBlock(leadEmp, false) : null;
     const be = edits[`psb:${blockKey}`] ?? {};
-    const total = round2(jobs.reduce((a, j) => a + j.totalAfterSplit, 0));
+    const total = jobs.reduce((a, j) => a + j.totalAfterSplit, 0);
     const mileageNew = be.mileageNew !== undefined ? be.mileageNew : 0;
     const hourlyPay = tsheets ? tsheets.totalPay : 0;
     const reimbursements = be.reimbursements !== undefined ? be.reimbursements : 0;
@@ -415,6 +445,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     leads.push({
       key: blockKey,
       leadName: leadUpper,
+      displayName: titleCaseLeadName(leadUpper, directory, settings.subcontractors),
       sub: meta.sub,
       jobs,
       total,
@@ -424,11 +455,24 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       reimbMemo: be.reimbMemo ?? '',
       deductions,
       deductMemo: be.deductMemo ?? '',
-      totalPay: round2(total + mileageNew + hourlyPay + reimbursements + deductions),
+      totalPay: total + mileageNew + hourlyPay + reimbursements + deductions,
       tsheets,
     });
   }
-  leads.sort((a, b) => byText(firstNameOf(a.leadName), firstNameOf(b.leadName)));
+  leads.sort((a, b) => byText(firstNameOf(a.displayName), firstNameOf(b.displayName)));
+
+  // §5.2 — one alphabetical sequence: painters + lead blocks interleaved A→Z
+  // by first name; subcontractor lead blocks last (A→Z among themselves).
+  const painterSequence: PainterSectionEntry[] = [
+    ...painters.map((b): PainterSectionEntry => ({ kind: 'hourly', block: b })),
+    ...leads.filter((b) => !b.sub).map((b): PainterSectionEntry => ({ kind: 'ps', block: b })),
+  ].sort((a, b) =>
+    byText(
+      firstNameOf(a.kind === 'hourly' ? a.block.employeeName : a.block.displayName),
+      firstNameOf(b.kind === 'hourly' ? b.block.employeeName : b.block.displayName),
+    ),
+  );
+  for (const b of leads.filter((x) => x.sub)) painterSequence.push({ kind: 'ps', block: b });
 
   // ----- salary sections ---------------------------------------------------
   const salaryBlock = (entry: AppSettings['salariedRoster'][number]): SalaryBlock => {
@@ -442,7 +486,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     const miles = e.miles !== undefined ? e.miles : 0;
     return {
       key: `sal:${entry.name}`,
-      name: entry.name,
+      name: stripSingleLetterTokens(entry.name),
       role: entry.role,
       amount: entry.amount,
       section: entry.section,
@@ -459,12 +503,23 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
   const managers = roster.filter((r) => r.section === 'MANAGER SALARY').map(salaryBlock)
     .sort((a, b) => byText(firstNameOf(a.name), firstNameOf(b.name)));
 
-  // ----- §5.7 inactive employees with zero hours ---------------------------
+  // ----- inactive employees with zero hours (feeds Payroll Exceptions only) --
   const namesWithHours = new Set([...emps.values()].map((e) => e.fullName.toLowerCase()));
   const inactiveZeroHours = directory
     .filter((d) => !d.active && !namesWithHours.has(d.fullName.toLowerCase()))
     .map((d) => d.fullName)
     .sort(byText);
 
-  return { title, painters, leads, office, admin, estimators, managers, inactiveZeroHours };
+  return {
+    title,
+    weekRange,
+    painters,
+    leads,
+    painterSequence,
+    office,
+    admin,
+    estimators,
+    managers,
+    inactiveZeroHours,
+  };
 }

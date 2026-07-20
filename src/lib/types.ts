@@ -163,6 +163,15 @@ export interface DirectoryEmployee {
   active: boolean; // false when the raw name started with '*'
 }
 
+/** Round 4 §4.2 — the employee directory persisted to localStorage. */
+export interface SavedDirectory {
+  employees: DirectoryEmployee[];
+  sourceFilename: string;
+  uploadedAt: string; // ISO timestamp
+  activeCount: number;
+  inactiveCount: number;
+}
+
 // ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------
@@ -207,6 +216,10 @@ export interface AppSettings {
   salariedRoster: SalariedEntry[];
   mileageRate: number; // $/mile; seed 0.625
   subcontractors: string[]; // §7.4 — valid crew leads without directory matches
+  /** Round 4 §5.8 — substring patterns marking prevailing-wage (Davis-Bacon) jobs. */
+  prevailingWagePatterns: string[];
+  /** Round 4 §5.8 — prevailing minimum hourly rate; seed 19.18. */
+  prevailingMinRate: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -380,19 +393,26 @@ export type PbjEditsMap = Record<string, PbjJobEdit>;
 export interface HourlyLine {
   id: string; // for edits: employee + jobRowId (+ ':OT')
   apKey: string | null;
+  /** PO# cell text override (office lines: the "(M/D - M/D)" range or "Allpro Office"). */
+  poText: string | null;
   jobLabel: string; // display name (+ ' [hrly]' / ' [OT]' tags)
   hours: number;
   rate: number;
   rateDefaulted: boolean; // true when no configured wage rate was found
+  /** True when the prevailing-wage rule (§5.8 rule 2) suggested the rate. */
+  prevailing: boolean;
+  /** True when rule 2 fired but the rendered rate is below the prevailing minimum. */
+  belowPrevailing: boolean;
   ot: boolean;
   hourlyJob: boolean;
-  colorHex: string | null; // estimator fill for the PO#/Job cells
+  colorHex: string | null; // estimator fill for the PO# cell
 }
 
 export interface HourlyBlock {
   key: string; // employee username or full name
-  title: string; // "{Full Name} ({Lead}'s Crew)" or office variants
-  employeeName: string;
+  title: string; // "{Full Name} ({group})" or office variants
+  employeeName: string; // display name (single-letter tokens stripped)
+  crewTag: string; // timesheet `group` label verbatim ('' for office variants)
   lines: HourlyLine[];
   totalHours: number;
   totalPay: number;
@@ -404,6 +424,7 @@ export interface HourlyBlock {
 export interface PsJobColumn {
   jobRowId: string;
   apKey: string | null;
+  colorHex: string | null; // estimator fill for the PO/Name cells (§5.6)
   jobShort: string; // "AP24403 5321 Lambrook Dr Int/Ext" style
   customer: string;
   woPct: number | null;
@@ -423,7 +444,9 @@ export interface PsJobColumn {
 
 export interface PsBlock {
   key: string;
-  leadName: string; // ALL CAPS
+  leadName: string; // ALL CAPS (matching key)
+  /** Title Case band name as stored in the directory / subs list (§5.3). */
+  displayName: string;
   sub: boolean;
   jobs: PsJobColumn[];
   total: number; // Σ totalAfterSplit
@@ -449,10 +472,19 @@ export interface SalaryBlock {
   mileageReimb: number; // miles × rate
 }
 
+/** Round 4 §5.2 — the single A→Z painter/crew-lead sequence. */
+export type PainterSectionEntry =
+  | { kind: 'hourly'; block: HourlyBlock }
+  | { kind: 'ps'; block: PsBlock };
+
 export interface PayrollPreviewModel {
   title: string;
+  /** "M/D - M/D" week range (office PO cells, salary date-range lines). */
+  weekRange: string;
   painters: HourlyBlock[]; // non-lead timesheet employees
   leads: PsBlock[]; // crew-lead PS blocks
+  /** §5.2 — painters + lead blocks interleaved A→Z by first name; subs last. */
+  painterSequence: PainterSectionEntry[];
   office: HourlyBlock[];
   admin: SalaryBlock[];
   estimators: SalaryBlock[];

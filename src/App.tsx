@@ -29,7 +29,15 @@ import { buildPayrollExceptions } from './lib/payrollExceptions';
 import { buildPayrollPreview } from './lib/payrollPreview';
 import { buildPivot } from './lib/pivot';
 import { buildPivotByJob, EMPTY_MANUAL_STATE, type ManualSectionState } from './lib/pivotByJob';
-import { ensureDefaultPivotColumns, loadSettings, saveSettings } from './lib/settings';
+import { applyPivotView, EMPTY_PIVOT_VIEW, isPivotViewActive, type PivotViewState } from './lib/pivotView';
+import {
+  clearSavedDirectory,
+  ensureDefaultPivotColumns,
+  loadSavedDirectory,
+  loadSettings,
+  saveDirectory,
+  saveSettings,
+} from './lib/settings';
 import { buildReportRows, sortReportRows } from './lib/timenavi';
 import type {
   AppSettings,
@@ -45,6 +53,7 @@ import type {
   QbHoursMap,
   RowEdit,
   SalesRow,
+  SavedDirectory,
   TimeNaviEvent,
   TimesheetParseResult,
 } from './lib/types';
@@ -130,6 +139,11 @@ export default function App(): JSX.Element {
   const [created, setCreated] = useState(false);
   const [tab, setTab] = useState<Tab>('timenavi');
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Round 4 §2 — Pivot by Crew view-level filters (start cleared each session).
+  const [pivotView, setPivotView] = useState<PivotViewState>({ ...EMPTY_PIVOT_VIEW });
+  const [exportFiltered, setExportFiltered] = useState(false);
+  // Round 4 §4.2 — the persisted employee directory.
+  const [savedDirectory, setSavedDirectory] = useState<SavedDirectory | null>(() => loadSavedDirectory());
 
   // ------------------------------------------------------------------ uploads
 
@@ -205,6 +219,8 @@ export default function App(): JSX.Element {
           const directory = parseEmployeeList(wbd);
           const active = directory.filter((d) => d.active).length;
           ok(`✓ ${active} active / ${directory.length - active} inactive`, { directory });
+          // §4.2 — persist the parsed directory on first successful parse.
+          setSavedDirectory(saveDirectory(directory, file.name));
           break;
         }
       }
@@ -324,14 +340,20 @@ export default function App(): JSX.Element {
 
   // ------------------------------------------------ Round 3: payroll models
 
+  /** §4.2 — fresh upload wins, else the persisted directory, else null. */
+  const effectiveDirectory = useMemo(
+    () => parsed.directory ?? savedDirectory?.employees ?? null,
+    [parsed.directory, savedDirectory],
+  );
+
   const leadCtx = useMemo<LeadResolverContext>(() => {
     const crewGroups = [...new Set((parsed.timesheet?.rows ?? []).map((r) => r.group).filter(Boolean))];
     return {
-      directory: parsed.directory ?? directoryFromTimesheet(parsed.timesheet?.rows ?? []),
+      directory: effectiveDirectory ?? directoryFromTimesheet(parsed.timesheet?.rows ?? []),
       crewGroups,
       subcontractors: settings.subcontractors,
     };
-  }, [parsed.directory, parsed.timesheet, settings.subcontractors]);
+  }, [effectiveDirectory, parsed.timesheet, settings.subcontractors]);
 
   const pivotByJob = useMemo(
     () =>
@@ -358,7 +380,7 @@ export default function App(): JSX.Element {
       enriched,
       reportRows,
       pl: parsed.pl,
-      directory: parsed.directory,
+      directory: effectiveDirectory,
       settings,
       payDate,
       edits: payrollEdits,
@@ -366,7 +388,7 @@ export default function App(): JSX.Element {
       knownEstimators,
       leadCtx,
     });
-  }, [created, parsed.pl, parsed.directory, pivotByJob, enriched, reportRows, settings, payDate, payrollEdits, qbHours, knownEstimators, leadCtx]);
+  }, [created, parsed.pl, effectiveDirectory, pivotByJob, enriched, reportRows, settings, payDate, payrollEdits, qbHours, knownEstimators, leadCtx]);
 
   const payrollExceptions = useMemo(() => {
     if (!created) return [];
@@ -375,8 +397,10 @@ export default function App(): JSX.Element {
       preview:
         payrollPreview ?? {
           title: '',
+          weekRange: '',
           painters: [],
           leads: [],
+          painterSequence: [],
           office: [],
           admin: [],
           estimators: [],
@@ -385,9 +409,9 @@ export default function App(): JSX.Element {
         },
       reportRows,
       pl: parsed.pl,
-      hasDirectory: parsed.directory !== null,
+      hasDirectory: effectiveDirectory !== null,
     });
-  }, [created, pivotByJob, payrollPreview, reportRows, parsed.pl, parsed.directory]);
+  }, [created, pivotByJob, payrollPreview, reportRows, parsed.pl, effectiveDirectory]);
   const payrollExceptionCount = useMemo(() => countExceptions(payrollExceptions), [payrollExceptions]);
 
   const estimatorOptions = useMemo(() => {
@@ -477,21 +501,52 @@ export default function App(): JSX.Element {
     setPayrollEdits((prev) => ({ ...prev, [key]: { ...prev[key], ...patch } }));
   }, []);
 
+  // §2 — the filtered view model renders on screen; the underlying data,
+  // the other tabs, the payroll math and the exceptions never change.
+  const viewPivot = useMemo(() => applyPivotView(pivot, pivotView), [pivot, pivotView]);
+  const filtersActive = isPivotViewActive(pivotView);
+
   const onDownload = useCallback((): void => {
     void exportWorkbook({
       rows: reportRows,
-      pivot,
+      // §2.3 — full unfiltered pivot unless the toggle is on.
+      pivot: exportFiltered && filtersActive ? viewPivot : pivot,
       legend: settings.legend,
       payDate,
       pivotByJob,
       payrollPreview,
     });
-  }, [reportRows, pivot, settings.legend, payDate, pivotByJob, payrollPreview]);
+  }, [reportRows, pivot, viewPivot, exportFiltered, filtersActive, settings.legend, payDate, pivotByJob, payrollPreview]);
 
   const onSaveSettings = useCallback((next: AppSettings): void => {
     setSettings(next);
     saveSettings(next);
     setSettingsOpen(false);
+  }, []);
+
+  // §4.2 — replace / clear the persisted employee directory from Settings.
+  const onDirectoryReplace = useCallback(async (file: File): Promise<string | null> => {
+    try {
+      const wbd = readWorkbook(await file.arrayBuffer());
+      const directory = parseEmployeeList(wbd);
+      setSavedDirectory(saveDirectory(directory, file.name));
+      setParsed((p) => ({ ...p, directory }));
+      const active = directory.filter((d) => d.active).length;
+      setChips((c) => ({
+        ...c,
+        employees: { status: 'ok', fileName: file.name, message: `✓ ${active} active / ${directory.length - active} inactive` },
+      }));
+      return null;
+    } catch (err) {
+      return err instanceof Error ? err.message : 'Could not read this file.';
+    }
+  }, []);
+
+  const onDirectoryClear = useCallback((): void => {
+    clearSavedDirectory();
+    setSavedDirectory(null);
+    setParsed((p) => ({ ...p, directory: null }));
+    setChips((c) => ({ ...c, employees: EMPTY_CHIP }));
   }, []);
 
   // ------------------------------------------------------------------ render
@@ -505,6 +560,9 @@ export default function App(): JSX.Element {
         onDownload={onDownload}
         onOpenSettings={() => setSettingsOpen(true)}
         downloadName={exportFilename(payDate)}
+        exportFiltered={exportFiltered}
+        onExportFilteredChange={setExportFiltered}
+        filtersActive={filtersActive}
       />
       <div className="flex min-h-0 flex-1">
         {/* Left rail — uploads */}
@@ -513,16 +571,34 @@ export default function App(): JSX.Element {
             Upload the weekly reports (<b>.xlsx</b> or <b>.csv</b>). Everything is parsed locally in your browser — no
             data leaves this computer.
           </p>
-          {SLOT_DEFS.map((def) => (
-            <UploadSlot
-              key={def.id}
-              label={def.label}
-              hint={def.hint}
-              optional={def.optional}
-              chip={chips[def.id]}
-              onFile={(file) => void handleFile(def.id, file)}
-            />
-          ))}
+          {SLOT_DEFS.map((def) =>
+            // §4.2 — once a directory is saved, the employee slot collapses
+            // to a compact status chip linking to Settings.
+            def.id === 'employees' && savedDirectory ? (
+              <button
+                key={def.id}
+                type="button"
+                className="flex items-center gap-1.5 rounded border border-emerald-300 bg-emerald-50 px-2 py-1.5 text-left text-[11px] text-emerald-800 hover:bg-emerald-100"
+                onClick={() => setSettingsOpen(true)}
+                title="Manage the saved directory in Settings → Employee Directory"
+              >
+                <span className="font-semibold">Employee list:</span>
+                <span>
+                  ✓ {savedDirectory.activeCount} active / {savedDirectory.inactiveCount} inactive · saved{' '}
+                  {new Date(savedDirectory.uploadedAt).toLocaleDateString()}
+                </span>
+              </button>
+            ) : (
+              <UploadSlot
+                key={def.id}
+                label={def.label}
+                hint={def.hint}
+                optional={def.optional}
+                chip={chips[def.id]}
+                onFile={(file) => void handleFile(def.id, file)}
+              />
+            ),
+          )}
           <label className="mt-1 flex flex-col gap-1 text-xs font-semibold">
             Pay date
             <input
@@ -587,7 +663,13 @@ export default function App(): JSX.Element {
                 onEdit={onEdit}
               />
             ) : tab === 'pivot' ? (
-              <PivotTable pivot={pivot} colorByEstimator={colorByEstimator} />
+              <PivotTable
+                pivot={viewPivot}
+                fullPivot={pivot}
+                colorByEstimator={colorByEstimator}
+                view={pivotView}
+                onViewChange={setPivotView}
+              />
             ) : tab === 'pivotByJob' ? (
               <PivotByJobTable
                 model={pivotByJob}
@@ -609,7 +691,14 @@ export default function App(): JSX.Element {
       </div>
 
       {settingsOpen && (
-        <SettingsModal settings={settings} onSave={onSaveSettings} onClose={() => setSettingsOpen(false)} />
+        <SettingsModal
+          settings={settings}
+          directory={savedDirectory}
+          onDirectoryReplace={onDirectoryReplace}
+          onDirectoryClear={onDirectoryClear}
+          onSave={onSaveSettings}
+          onClose={() => setSettingsOpen(false)}
+        />
       )}
     </div>
   );

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState, type CSSProperties } from 'react';
 import { normalizeApInput } from '../lib/apkey';
 import {
   fmtAccounting,
@@ -10,6 +10,7 @@ import {
   parseMoneyInput,
   parsePercentInput,
 } from '../lib/format';
+import { dollarDiffIsFlagged, duplicateInQboValues, percentIsFlagged } from '../lib/timenavi';
 import type { ReportRow, RowEdit } from '../lib/types';
 
 interface TimeNaviTableProps {
@@ -24,6 +25,12 @@ const HEADERS = [
   'AP#', '% Completion', 'Estimator', 'Last % Paid', 'QBO Job Name', 'In QBO Time?',
   'Job Total $', 'Apptivo $', '$ Difference', '%compl', 'Invoice Date', 'Date Difference',
 ];
+
+/** Round 4 §1.2 — horizontally centered columns (header + data). */
+const CENTERED_HEADERS = new Set(['AP#', '% Completion', 'Estimator', 'Last % Paid', '$ Difference']);
+
+/** Round 4 §1.1 — Excel's classic "bad" style. */
+const PINK: CSSProperties = { backgroundColor: '#FFC7CE', color: '#9C0006' };
 
 /** Small uncontrolled-ish text cell that commits on blur / Enter. */
 function EditableCell({
@@ -62,6 +69,7 @@ function EditableCell({
 
 export function TimeNaviTable({ rows, colorByEstimator, estimatorOptions, onEdit }: TimeNaviTableProps): JSX.Element {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
+  const dupInQbo = useMemo(() => duplicateInQboValues(rows), [rows]);
 
   const toggleExpanded = (id: string): void => {
     setExpanded((prev) => {
@@ -77,7 +85,7 @@ export function TimeNaviTable({ rows, colorByEstimator, estimatorOptions, onEdit
       <thead>
         <tr>
           {HEADERS.map((h) => (
-            <th key={h} className="xhead sticky top-0 z-10 whitespace-nowrap">
+            <th key={h} className={`xhead sticky top-0 z-10 whitespace-nowrap ${CENTERED_HEADERS.has(h) ? 'text-center' : ''}`}>
               {h}
             </th>
           ))}
@@ -122,24 +130,28 @@ export function TimeNaviTable({ rows, colorByEstimator, estimatorOptions, onEdit
                   {r.description}
                 </div>
               </td>
-              <td className="xcell w-20 font-mono">
+              <td className="xcell w-20 text-center font-mono">
                 <EditableCell
                   display={r.apKey ?? ''}
                   onCommit={(text) => onEdit(r.id, { apKey: normalizeApInput(text) })}
+                  className="text-center"
                   title="AP# — edit to fix a wrong calendar AP#; all lookups re-run"
                 />
               </td>
-              <td className="xcell w-20 text-right">
+              <td
+                className="xcell w-20 text-center"
+                style={r.included && percentIsFlagged(r.percent) ? PINK : undefined}
+              >
                 <EditableCell
                   display={fmtPercent(r.percent)}
                   onCommit={(text) => onEdit(r.id, { percent: parsePercentInput(text) })}
-                  className="text-right"
+                  className="text-center"
                   title={r.suggestedSourceLine ? `Suggested from: "${r.suggestedSourceLine}"` : 'No suggestion found in Description'}
                 />
               </td>
-              <td className="xcell w-16">
+              <td className="xcell w-16 text-center">
                 <select
-                  className="cell-input"
+                  className="cell-input text-center"
                   value={r.estimator}
                   onChange={(e) => onEdit(r.id, { estimator: e.target.value })}
                   title="Estimator override"
@@ -154,12 +166,17 @@ export function TimeNaviTable({ rows, colorByEstimator, estimatorOptions, onEdit
                     ))}
                 </select>
               </td>
-              <td className="xcell w-16 text-right">{r.lastPaid === null ? '-' : fmtPercent(r.lastPaid)}</td>
+              <td className="xcell w-16 text-center">{r.lastPaid === null ? '-' : fmtPercent(r.lastPaid)}</td>
               <td className="xcell max-w-[240px] truncate" title={r.qboJobName}>
                 {r.qboJobName}
               </td>
               <td
-                className={`xcell max-w-[200px] truncate ${r.inQboTime === 'NotClockedIn' ? 'font-semibold text-red-700' : ''}`}
+                className="xcell max-w-[200px] truncate"
+                style={
+                  r.included && (r.inQboTime === 'NotClockedIn' || dupInQbo.has(r.inQboTime.trim()))
+                    ? PINK
+                    : undefined
+                }
                 title={r.inQboTime}
               >
                 {r.inQboTime}
@@ -177,9 +194,8 @@ export function TimeNaviTable({ rows, colorByEstimator, estimatorOptions, onEdit
                 />
               </td>
               <td
-                className={`xcell whitespace-nowrap text-right ${
-                  r.dollarDiff !== null && r.dollarDiff !== 0 ? 'font-semibold' : ''
-                }`}
+                className="xcell whitespace-nowrap text-center"
+                style={r.included && dollarDiffIsFlagged(r.dollarDiff) ? PINK : undefined}
               >
                 {r.dollarDiff === null ? '' : fmtAccounting(r.dollarDiff)}
               </td>

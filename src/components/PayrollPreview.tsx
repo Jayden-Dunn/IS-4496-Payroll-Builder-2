@@ -8,10 +8,16 @@ interface PayrollPreviewProps {
   onEdit: (key: string, patch: PayrollEdit) => void;
 }
 
+// Round 4 §5.1 — the whole tab renders in Garamond.
+const GARAMOND: CSSProperties = { fontFamily: 'Garamond, "EB Garamond", "Times New Roman", serif' };
+
 const BLACK: CSSProperties = { backgroundColor: '#000', color: '#fff' };
-const TAN: CSSProperties = { backgroundColor: '#D6D4CA', fontWeight: 700 };
+// Round 4 supersession — name bands are DDD9C4.
+const TAN: CSSProperties = { backgroundColor: '#DDD9C4', fontWeight: 700 };
 const NEARWHITE: CSSProperties = { backgroundColor: '#F9F9F9', fontWeight: 700 };
 const MANAGER: CSSProperties = { backgroundColor: '#D99694', fontWeight: 700 };
+const OFFICE_BLUE: CSSProperties = { backgroundColor: '#4F81BD', color: '#fff' };
+const HOURLY_PAY_YELLOW: CSSProperties = { backgroundColor: '#FFFF99' };
 
 function NumCell({
   value,
@@ -56,60 +62,100 @@ function jobCellStyle(hex: string | null): CSSProperties | undefined {
   return { backgroundColor: `#${hex}`, color: isDarkColor(hex) ? '#fff' : '#000' };
 }
 
+/**
+ * §5.5/§5.7 — one hourly block with the labeled `PO# | Job | hrs | rate |
+ * total` columns, `(-) taxes`/`net` labels on the last job line, and (in the
+ * T-SHEETS variant) the boxed near-white table with dotted separators.
+ */
 function HourlyBlockView({
   block,
   onEdit,
-  headerStyle = TAN,
+  tsheets = false,
 }: {
   block: HourlyBlock;
   onEdit: PayrollPreviewProps['onEdit'];
-  headerStyle?: CSSProperties;
+  tsheets?: boolean;
 }): JSX.Element {
   const taxes = block.net !== null ? block.totalPay - block.net : null;
+  const bodyCls = tsheets ? 'bg-[#F9F9F9]' : '';
+  const dotted = tsheets ? 'border-b border-dotted border-neutral-400' : '';
   return (
-    <table className="mb-3 w-full max-w-4xl border-collapse bg-white text-xs" id={`pp-${block.key}`}>
+    <table
+      className={`mb-3 w-full max-w-4xl border-collapse bg-white text-xs ${tsheets ? 'border border-neutral-500' : ''}`}
+      id={`pp-${tsheets ? 'ts-' : ''}${block.key}`}
+    >
       <thead>
+        {tsheets ? (
+          <tr>
+            <th className="xcell border border-neutral-500 text-center" style={NEARWHITE} colSpan={5}>
+              {block.employeeName.split(' ')[0]}&apos;s T-SHEETS BREAKDOWN
+            </th>
+            <th className="xcell" colSpan={2} />
+          </tr>
+        ) : (
+          <tr>
+            {/* §5.4 — merged tan name band: name bold black + crew tag bold white. */}
+            <th className="xcell py-1 text-center" style={TAN} colSpan={7}>
+              <span className="text-[13px] font-bold text-black">{block.employeeName}</span>
+              {block.crewTag && <span className="ml-1 text-[11px] font-bold text-white">({block.crewTag})</span>}
+              {block.inactive && <span className="ml-2 rounded bg-red-100 px-1 text-[10px] text-red-700">inactive (*)</span>}
+            </th>
+          </tr>
+        )}
         <tr>
-          <th className="xcell text-left" style={headerStyle} colSpan={7}>
-            {block.title}
-            {block.inactive && <span className="ml-2 rounded bg-red-100 px-1 text-[10px] text-red-700">inactive (*)</span>}
-          </th>
-        </tr>
-        <tr className="text-neutral-500">
-          <th className="xcell w-24 text-left font-normal">PO#</th>
-          <th className="xcell text-left font-normal">Job</th>
-          <th className="xcell w-16 text-right font-normal">hrs</th>
-          <th className="xcell w-16 text-right font-normal">rate</th>
-          <th className="xcell w-24 text-right font-normal">total</th>
-          <th className="xcell w-24 text-right font-normal">(-) taxes</th>
-          <th className="xcell w-24 text-right font-normal">net</th>
+          <th className={`xcell w-24 text-center font-bold underline ${bodyCls}`}>PO#</th>
+          <th className={`xcell text-center font-bold underline ${bodyCls}`}>Job</th>
+          <th className={`xcell w-16 text-center font-bold underline ${bodyCls}`}>hrs</th>
+          <th className={`xcell w-16 text-center font-bold underline ${bodyCls}`}>rate</th>
+          <th className={`xcell w-24 text-center font-bold underline ${bodyCls}`}>total</th>
+          <th className="xcell w-24" />
+          <th className="xcell w-24" />
         </tr>
       </thead>
       <tbody>
-        {block.lines.map((l) => (
-          <tr key={l.id}>
-            <td className="xcell" style={jobCellStyle(l.colorHex)}>{l.apKey ? `AP${l.apKey}` : ''}</td>
-            <td className="xcell" style={jobCellStyle(l.colorHex)}>{l.jobLabel}</td>
-            <td className={`xcell text-right ${l.ot ? 'bg-yellow-100' : ''}`}>
-              <NumCell value={l.hours} onCommit={(n) => onEdit(`hl:${l.id}`, { hours: n ?? 0 })} />
-            </td>
-            <td className={`xcell text-right ${l.rateDefaulted ? 'bg-amber-50' : ''}`} title={l.rateDefaulted ? 'No configured wage rate — default applied' : undefined}>
-              <NumCell value={l.rate} onCommit={(n) => onEdit(`hl:${l.id}`, { rate: n ?? 0 })} />
-            </td>
-            <td className="xcell text-right">{fmtAccounting(l.hours * l.rate)}</td>
-            <td className="xcell" />
-            <td className="xcell" />
-          </tr>
-        ))}
+        {block.lines.map((l, i) => {
+          const isLast = i === block.lines.length - 1;
+          return (
+            <tr key={l.id}>
+              <td
+                className={`xcell ${l.poText !== null ? 'text-center text-[10px]' : ''} ${dotted} ${bodyCls}`}
+                style={l.poText !== null ? OFFICE_BLUE : jobCellStyle(l.colorHex)}
+              >
+                {l.poText ?? (l.apKey ? `AP${l.apKey}` : '')}
+              </td>
+              <td className={`xcell text-[11px] ${dotted} ${bodyCls}`}>{l.jobLabel}</td>
+              <td className={`xcell text-center ${l.ot ? 'bg-yellow-100' : bodyCls} ${dotted}`}>
+                <NumCell value={l.hours} onCommit={(n) => onEdit(`hl:${l.id}`, { hours: n ?? 0 })} className="text-center" />
+              </td>
+              <td
+                className={`xcell text-center ${l.rateDefaulted ? 'bg-amber-50' : bodyCls} ${l.belowPrevailing ? 'bg-red-100' : ''} ${dotted}`}
+                title={
+                  l.belowPrevailing
+                    ? 'Prevailing-wage job paid below the prevailing minimum'
+                    : l.prevailing
+                      ? 'Prevailing-wage job — rate = max(default, prevailing minimum)'
+                      : l.rateDefaulted
+                        ? 'No configured wage rate — default applied'
+                        : undefined
+                }
+              >
+                <NumCell value={l.rate} onCommit={(n) => onEdit(`hl:${l.id}`, { rate: n ?? 0 })} className="text-center" />
+              </td>
+              <td className={`xcell text-center ${dotted} ${bodyCls}`}>{fmtAccounting(l.hours * l.rate)}</td>
+              <td className="xcell text-center font-bold">{isLast ? '(-) taxes' : ''}</td>
+              <td className="xcell text-center font-bold">{isLast ? 'net' : ''}</td>
+            </tr>
+          );
+        })}
         <tr className="font-semibold">
-          <td className="xcell" />
-          <td className="xcell" />
-          <td className="xcell text-right">{block.totalHours.toFixed(2)}</td>
-          <td className="xcell" />
-          <td className="xcell text-right">{fmtAccounting(block.totalPay)}</td>
-          <td className="xcell text-right">{taxes !== null ? fmtAccounting(taxes) : ''}</td>
-          <td className="xcell text-right">
-            <NumCell value={block.net} onCommit={(n) => onEdit(`hb:${block.key}`, { net: n })} />
+          <td className={`xcell border-t border-t-neutral-500 ${bodyCls}`} />
+          <td className={`xcell border-t border-t-neutral-500 ${bodyCls}`} />
+          <td className={`xcell border-t border-t-neutral-500 text-center ${bodyCls}`}>{block.totalHours.toFixed(2)}</td>
+          <td className={`xcell border-t border-t-neutral-500 ${bodyCls}`} />
+          <td className={`xcell border-t border-t-neutral-500 text-center ${bodyCls}`}>{fmtAccounting(block.totalPay)}</td>
+          <td className="xcell text-center">{taxes !== null ? fmtAccounting(taxes) : ''}</td>
+          <td className="xcell text-center">
+            <NumCell value={block.net} onCommit={(n) => onEdit(`hb:${block.key}`, { net: n })} className="text-center" />
           </td>
         </tr>
       </tbody>
@@ -121,12 +167,24 @@ function PsBlockView({ block, onEdit }: { block: PsBlock; onEdit: PayrollPreview
   const label = (t: string): JSX.Element => <td className="xcell w-44 font-medium">{t}</td>;
   const psKey = (jobRowId: string): string => `ps:${block.key}:${jobRowId}`;
   const anySplit = block.jobs.some((j) => j.splitWith > 1);
+  // §5.6 — PO/Name value cells: right-aligned, bold, estimator fill.
+  const poNameCell = (j: PsBlock['jobs'][number], text: string, title?: string): JSX.Element => (
+    <td
+      key={j.jobRowId}
+      className={`xcell text-right text-[11px] font-bold ${j.missingFromPl ? 'text-red-700' : ''}`}
+      style={jobCellStyle(j.colorHex)}
+      title={title}
+    >
+      {text}
+    </td>
+  );
   return (
     <table className="mb-4 w-max min-w-[560px] border-collapse bg-white text-xs" id={`pp-${block.key}`}>
       <thead>
         <tr>
+          {/* §5.4 — Title Case name in column A; B+ hold the WO% values. */}
           <th className="xcell text-left" style={TAN}>
-            {block.leadName}
+            {block.displayName}
             {block.sub && <span className="ml-2 rounded bg-blue-100 px-1 text-[10px] font-normal text-blue-700">sub</span>}
           </th>
           {block.jobs.map((j) => (
@@ -139,22 +197,18 @@ function PsBlockView({ block, onEdit }: { block: PsBlock; onEdit: PayrollPreview
       <tbody>
         <tr>
           {label('PO')}
-          {block.jobs.map((j) => (
-            <td key={j.jobRowId} className={`xcell text-right ${j.missingFromPl ? 'text-red-700' : ''}`} title={j.missingFromPl ? 'No P&L column for this job — values default to 0' : undefined}>
-              {j.jobShort}
-            </td>
-          ))}
+          {block.jobs.map((j) =>
+            poNameCell(j, j.jobShort, j.missingFromPl ? 'No P&L column for this job — values default to 0' : undefined),
+          )}
         </tr>
         <tr>
           {label('Name')}
-          {block.jobs.map((j) => (
-            <td key={j.jobRowId} className="xcell text-right">{j.customer}</td>
-          ))}
+          {block.jobs.map((j) => poNameCell(j, j.customer))}
         </tr>
         <tr>
           {label('Profit Share')}
           {block.jobs.map((j) => (
-            <td key={j.jobRowId} className="xcell text-right">{fmtAccounting(j.profitShare)}</td>
+            <td key={j.jobRowId} className="xcell text-right">{`$${fmtAccounting(j.profitShare)}`}</td>
           ))}
         </tr>
         <tr>
@@ -189,7 +243,8 @@ function PsBlockView({ block, onEdit }: { block: PsBlock; onEdit: PayrollPreview
             </td>
           ))}
         </tr>
-        <tr>
+        {/* §5.6 — thin line between -½ Materials and Total Profit Share. */}
+        <tr className="border-b border-b-neutral-500">
           {label('-½ Materials')}
           {block.jobs.map((j) => (
             <td key={j.jobRowId} className="xcell text-right">
@@ -222,11 +277,17 @@ function PsBlockView({ block, onEdit }: { block: PsBlock; onEdit: PayrollPreview
             <NumCell value={block.mileageNew} onCommit={(n) => onEdit(`psb:${block.key}`, { mileageNew: n ?? 0 })} />
           </td>
         </tr>
-        <SummaryRow label="Hourly Pay" value={fmtAccounting(block.hourlyPay)} span={block.jobs.length} />
+        {/* §5.6 — Hourly Pay value cell highlighted yellow. */}
+        <tr className="font-semibold">
+          <td className="xcell w-44">Hourly Pay</td>
+          <td className="xcell text-right" colSpan={block.jobs.length} style={HOURLY_PAY_YELLOW}>
+            {fmtAccounting(block.hourlyPay)}
+          </td>
+        </tr>
         <tr>
           {label('Reimbursements')}
-          <td className="xcell text-right">
-            <NumCell value={block.reimbursements} onCommit={(n) => onEdit(`psb:${block.key}`, { reimbursements: n ?? 0 })} />
+          <td className="xcell text-right text-[#0070C0]">
+            <NumCell value={block.reimbursements} onCommit={(n) => onEdit(`psb:${block.key}`, { reimbursements: n ?? 0 })} className="text-[#0070C0]" />
           </td>
           {block.jobs.length > 1 && (
             <td className="xcell" colSpan={block.jobs.length - 1}>
@@ -234,10 +295,11 @@ function PsBlockView({ block, onEdit }: { block: PsBlock; onEdit: PayrollPreview
             </td>
           )}
         </tr>
-        <tr>
+        {/* §5.6 — double line between Deductions/Sundries and Total Pay. */}
+        <tr className="border-b-4 border-double border-b-neutral-600">
           {label('Deductions/Sundries')}
-          <td className="xcell text-right">
-            <NumCell value={block.deductions} onCommit={(n) => onEdit(`psb:${block.key}`, { deductions: n ?? 0 })} />
+          <td className="xcell text-right text-[#FF0000]">
+            <NumCell value={block.deductions} onCommit={(n) => onEdit(`psb:${block.key}`, { deductions: n ?? 0 })} className="text-[#FF0000]" />
           </td>
           {block.jobs.length > 1 && (
             <td className="xcell" colSpan={block.jobs.length - 1}>
@@ -245,7 +307,7 @@ function PsBlockView({ block, onEdit }: { block: PsBlock; onEdit: PayrollPreview
             </td>
           )}
         </tr>
-        <SummaryRow label="Total Pay" value={fmtAccounting(block.totalPay)} span={block.jobs.length} bold />
+        <SummaryRow label="Total Pay" value={`$${fmtAccounting(block.totalPay)}`} span={block.jobs.length} bold />
         <tr>
           <td className="xcell" colSpan={1 + block.jobs.length} />
         </tr>
@@ -323,11 +385,13 @@ function MemoCell({ value, onCommit }: { value: string; onCommit: (t: string) =>
 function SalaryBlockView({
   block,
   mileageRate,
+  weekRange,
   onEdit,
   headerStyle,
 }: {
   block: SalaryBlock;
   mileageRate: number;
+  weekRange: string;
   onEdit: PayrollPreviewProps['onEdit'];
   headerStyle: CSSProperties;
 }): JSX.Element {
@@ -343,8 +407,8 @@ function SalaryBlockView({
       </thead>
       <tbody>
         <tr>
-          <td className="xcell w-44">{block.role}</td>
-          <td className="xcell" />
+          <td className="xcell w-44 text-[10px]">{weekRange ? `(${weekRange})` : ''}</td>
+          <td className="xcell">{block.role}</td>
           <td className="xcell w-28 text-right">{fmtAccounting(block.amount)}</td>
         </tr>
         <tr>
@@ -373,7 +437,6 @@ function SectionHeader({ title }: { title: string }): JSX.Element {
 }
 
 export function PayrollPreview({ model, mileageRate, onEdit }: PayrollPreviewProps): JSX.Element {
-  const [showInactive, setShowInactive] = useState(false);
   if (!model) {
     return (
       <div className="flex h-full items-center justify-center">
@@ -382,35 +445,34 @@ export function PayrollPreview({ model, mileageRate, onEdit }: PayrollPreviewPro
           <h2 className="mb-1 text-base font-bold">Payroll Preview needs the P&amp;L</h2>
           <p className="text-xs leading-relaxed text-neutral-500">
             Upload slot 8 — the QuickBooks <b>Profit and Loss by Customer</b> export — to build the payroll blocks.
-            (Slot 9, the Employee Name List, is recommended too for crew-lead name resolution.)
+            (The Employee Name List is recommended too for crew-lead name resolution.)
           </p>
         </div>
       </div>
     );
   }
   return (
-    <div className="p-3">
-      <div className="mb-3 max-w-4xl px-2 py-1.5 text-sm font-bold" style={BLACK}>
+    <div className="p-3" style={GARAMOND}>
+      {/* §5.4 — title band: centered, bold white on black. */}
+      <div className="mb-3 max-w-4xl px-2 py-1.5 text-center text-sm font-bold" style={BLACK}>
         {model.title}
       </div>
 
-      {model.leads.map((b) => (
-        <div key={b.key}>
-          <PsBlockView block={b} onEdit={onEdit} />
-          {b.tsheets && (
-            <div className="mb-4 ml-4">
-              <div className="mb-1 max-w-4xl px-2 py-1 text-xs" style={NEARWHITE}>
-                {b.tsheets.employeeName.split(' ')[0]}&apos;s T-SHEETS BREAKDOWN
+      {/* §5.2 — one A→Z sequence: painters + crew-lead blocks; subs last. */}
+      {model.painterSequence.map((entry) =>
+        entry.kind === 'hourly' ? (
+          <HourlyBlockView key={entry.block.key} block={entry.block} onEdit={onEdit} />
+        ) : (
+          <div key={entry.block.key}>
+            <PsBlockView block={entry.block} onEdit={onEdit} />
+            {entry.block.tsheets && (
+              <div className="mb-4 ml-4 max-w-4xl">
+                <HourlyBlockView block={entry.block.tsheets} onEdit={onEdit} tsheets />
               </div>
-              <HourlyBlockView block={b.tsheets} onEdit={onEdit} headerStyle={NEARWHITE} />
-            </div>
-          )}
-        </div>
-      ))}
-
-      {model.painters.map((b) => (
-        <HourlyBlockView key={b.key} block={b} onEdit={onEdit} />
-      ))}
+            )}
+          </div>
+        ),
+      )}
 
       <SectionHeader title="OFFICE" />
       {model.office.map((b) => (
@@ -419,39 +481,18 @@ export function PayrollPreview({ model, mileageRate, onEdit }: PayrollPreviewPro
 
       <SectionHeader title="ADMIN" />
       {model.admin.map((b) => (
-        <SalaryBlockView key={b.key} block={b} mileageRate={mileageRate} onEdit={onEdit} headerStyle={TAN} />
+        <SalaryBlockView key={b.key} block={b} mileageRate={mileageRate} weekRange={model.weekRange} onEdit={onEdit} headerStyle={TAN} />
       ))}
 
       <SectionHeader title="ESTIMATORS" />
       {model.estimators.map((b) => (
-        <SalaryBlockView key={b.key} block={b} mileageRate={mileageRate} onEdit={onEdit} headerStyle={TAN} />
+        <SalaryBlockView key={b.key} block={b} mileageRate={mileageRate} weekRange={model.weekRange} onEdit={onEdit} headerStyle={TAN} />
       ))}
 
       <SectionHeader title="MANAGER SALARY" />
       {model.managers.map((b) => (
-        <SalaryBlockView key={b.key} block={b} mileageRate={mileageRate} onEdit={onEdit} headerStyle={MANAGER} />
+        <SalaryBlockView key={b.key} block={b} mileageRate={mileageRate} weekRange={model.weekRange} onEdit={onEdit} headerStyle={MANAGER} />
       ))}
-
-      <div className="mt-6 max-w-4xl rounded border border-neutral-300 bg-white">
-        <button
-          type="button"
-          className="flex w-full items-center justify-between px-3 py-2 text-left text-sm font-bold"
-          onClick={() => setShowInactive((v) => !v)}
-        >
-          Inactive Employees ({model.inactiveZeroHours.length})
-          <span>{showInactive ? '▾' : '▸'}</span>
-        </button>
-        {showInactive && (
-          <ul className="divide-y divide-neutral-100 border-t border-neutral-200">
-            {model.inactiveZeroHours.length === 0 && <li className="px-3 py-1.5 text-xs text-neutral-400">None.</li>}
-            {model.inactiveZeroHours.map((n) => (
-              <li key={n} className="px-3 py-1.5 text-xs">
-                {n}
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
     </div>
   );
 }

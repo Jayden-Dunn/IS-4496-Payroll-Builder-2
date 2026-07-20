@@ -7,6 +7,9 @@ exports.estimatorFromTitle = estimatorFromTitle;
 exports.reportRowId = reportRowId;
 exports.buildReportRows = buildReportRows;
 exports.sortReportRows = sortReportRows;
+exports.percentIsFlagged = percentIsFlagged;
+exports.duplicateInQboValues = duplicateInQboValues;
+exports.dollarDiffIsFlagged = dollarDiffIsFlagged;
 const apkey_1 = require("./apkey");
 Object.defineProperty(exports, "normalizeApInput", { enumerable: true, get: function () { return apkey_1.normalizeApInput; } });
 const format_1 = require("./format");
@@ -171,4 +174,33 @@ function sortReportRows(rows, estimatorOrder) {
         return a.i - b.i;
     })
         .map((x) => x.r);
+}
+// ---------------------------------------------------------------------------
+// Round 4 §1.1 — pink review flags (shared by the grid and the export)
+// ---------------------------------------------------------------------------
+/** `% Completion` gets the pink style on HOURLY text or a numeric > 100% / < 0%. */
+function percentIsFlagged(v) {
+    if (v === 'HOURLY')
+        return true;
+    return typeof v === 'number' && (v > 1 || v < 0);
+}
+/**
+ * `In QBO Time?` values shared by 2+ included rows (a duplicate timesheet job
+ * mapped to multiple events). NotClockedIn is flagged by its own rule.
+ */
+function duplicateInQboValues(rows) {
+    const counts = new Map();
+    for (const r of rows) {
+        if (!r.included)
+            continue;
+        const v = r.inQboTime.trim();
+        if (!v || v === 'NotClockedIn')
+            continue;
+        counts.set(v, (counts.get(v) ?? 0) + 1);
+    }
+    return new Set([...counts.entries()].filter(([, n]) => n >= 2).map(([v]) => v));
+}
+/** `$ Difference` gets the pink style on any nonzero value. */
+function dollarDiffIsFlagged(v) {
+    return typeof v === 'number' && v !== 0;
 }

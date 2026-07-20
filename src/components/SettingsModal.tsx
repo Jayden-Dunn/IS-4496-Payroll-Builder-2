@@ -1,7 +1,9 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import {
   DEFAULT_LEGEND,
   DEFAULT_PIVOT_COLUMNS,
+  DEFAULT_PREVAILING_MIN_RATE,
+  DEFAULT_PREVAILING_PATTERNS,
   DEFAULT_PROFIT_SHARE,
   DEFAULT_SALARIED,
   DEFAULT_SUBCONTRACTORS,
@@ -13,11 +15,17 @@ import type {
   ProfitShareEntry,
   SalariedEntry,
   SalarySection,
+  SavedDirectory,
   WageRateEntry,
 } from '../lib/types';
 
 interface SettingsModalProps {
   settings: AppSettings;
+  /** Round 4 §4.2 — the persisted employee directory (null = never saved). */
+  directory: SavedDirectory | null;
+  /** Parse + persist a replacement list; resolves to an error message or null. */
+  onDirectoryReplace: (file: File) => Promise<string | null>;
+  onDirectoryClear: () => void;
   onSave: (settings: AppSettings) => void;
   onClose: () => void;
 }
@@ -43,7 +51,14 @@ function SectionTitle({ children, sub }: { children: string; sub?: string }): JS
   );
 }
 
-export function SettingsModal({ settings, onSave, onClose }: SettingsModalProps): JSX.Element {
+export function SettingsModal({
+  settings,
+  directory,
+  onDirectoryReplace,
+  onDirectoryClear,
+  onSave,
+  onClose,
+}: SettingsModalProps): JSX.Element {
   const [entries, setEntries] = useState<LegendEntry[]>(settings.legend.map((l) => ({ ...l })));
   const [pivotCols, setPivotCols] = useState<string[]>([...settings.pivotColumnOrder]);
   const [newPivotCol, setNewPivotCol] = useState('');
@@ -54,6 +69,19 @@ export function SettingsModal({ settings, onSave, onClose }: SettingsModalProps)
   const [roster, setRoster] = useState<SalariedEntry[]>(settings.salariedRoster.map((e) => ({ ...e })));
   const [mileageRate, setMileageRate] = useState(String(settings.mileageRate));
   const [subs, setSubs] = useState<string[]>([...settings.subcontractors]);
+  const [pwPatterns, setPwPatterns] = useState<string[]>([...settings.prevailingWagePatterns]);
+  const [pwMin, setPwMin] = useState(String(settings.prevailingMinRate));
+  const [dirError, setDirError] = useState<string | null>(null);
+  const [dirBusy, setDirBusy] = useState(false);
+  const dirInputRef = useRef<HTMLInputElement>(null);
+
+  const replaceDirectory = async (file: File): Promise<void> => {
+    setDirBusy(true);
+    setDirError(null);
+    const err = await onDirectoryReplace(file);
+    setDirError(err);
+    setDirBusy(false);
+  };
 
   const updateEntry = (i: number, patch: Partial<LegendEntry>): void => {
     setEntries((prev) => prev.map((e, j) => (j === i ? { ...e, ...patch } : e)));
@@ -73,8 +101,12 @@ export function SettingsModal({ settings, onSave, onClose }: SettingsModalProps)
   const defaultPsNum = Number(defaultPs);
   const defaultWageNum = Number(defaultWage);
   const mileageNum = Number(mileageRate);
+  const pwMinNum = Number(pwMin);
   const numbersValid =
-    Number.isFinite(defaultPsNum) && Number.isFinite(defaultWageNum) && Number.isFinite(mileageNum);
+    Number.isFinite(defaultPsNum) &&
+    Number.isFinite(defaultWageNum) &&
+    Number.isFinite(mileageNum) &&
+    Number.isFinite(pwMinNum);
 
   const addPivotCol = (): void => {
     const t = newPivotCol.trim().toUpperCase();
@@ -93,6 +125,8 @@ export function SettingsModal({ settings, onSave, onClose }: SettingsModalProps)
       salariedRoster: roster.filter((e) => e.name.trim() !== ''),
       mileageRate: mileageNum,
       subcontractors: subs.map((s) => s.trim()).filter(Boolean),
+      prevailingWagePatterns: pwPatterns.map((s) => s.trim()).filter(Boolean),
+      prevailingMinRate: pwMinNum,
     });
   };
 
@@ -232,6 +266,65 @@ export function SettingsModal({ settings, onSave, onClose }: SettingsModalProps)
           <div className="mt-2 flex gap-2">
             <button type="button" className="btn text-xs" onClick={() => setSubs((prev) => [...prev, ''])}>+ Add subcontractor</button>
             <button type="button" className="btn text-xs" onClick={() => setSubs([...DEFAULT_SUBCONTRACTORS])}>Reset</button>
+          </div>
+
+          <SectionTitle sub="Round 4 §5.8 — jobs whose jobcode / event title contains one of these patterns pay max(default rate, prevailing minimum).">
+            Prevailing-wage (Davis-Bacon) jobs
+          </SectionTitle>
+          <div className="flex flex-col gap-1">
+            {pwPatterns.map((s, i) => (
+              <div key={i} className="flex items-center gap-1.5">
+                <input className="flex-1 rounded border border-neutral-300 px-1.5 py-1 text-xs" value={s} placeholder="Substring pattern, e.g. SNRHA *SS*" onChange={(ev) => setPwPatterns((prev) => prev.map((x, j) => (j === i ? ev.target.value : x)))} />
+                <button type="button" className="text-neutral-400 hover:text-red-600" onClick={() => setPwPatterns((prev) => prev.filter((_, j) => j !== i))} aria-label="Remove">🗑</button>
+              </div>
+            ))}
+          </div>
+          <div className="mt-2 flex items-center gap-2">
+            <button type="button" className="btn text-xs" onClick={() => setPwPatterns((prev) => [...prev, ''])}>+ Add pattern</button>
+            <button type="button" className="btn text-xs" onClick={() => { setPwPatterns([...DEFAULT_PREVAILING_PATTERNS]); setPwMin(String(DEFAULT_PREVAILING_MIN_RATE)); }}>Reset</button>
+            <span className="ml-auto text-xs">Prevailing minimum $/hr:</span>
+            <input className="w-16 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs" value={pwMin} onChange={(e) => setPwMin(e.target.value)} />
+          </div>
+
+          <SectionTitle sub="Round 4 §4.2 — the parsed Employee Name List persists in this browser. Replacing it re-runs crew-lead resolution and the related exceptions.">
+            Employee Directory
+          </SectionTitle>
+          {directory ? (
+            <div className="rounded border border-neutral-200 bg-neutral-50 p-2 text-xs">
+              <div className="font-semibold">
+                ✓ {directory.activeCount} active / {directory.inactiveCount} inactive
+              </div>
+              <div className="mt-0.5 text-neutral-500">
+                {directory.sourceFilename} · saved {new Date(directory.uploadedAt).toLocaleDateString()}
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-neutral-500">
+              No directory saved yet — upload the Employee Name List in slot 9 on the left rail (it will be saved
+              automatically), or use Replace list below.
+            </p>
+          )}
+          <div className="mt-2 flex items-center gap-2">
+            <input
+              ref={dirInputRef}
+              type="file"
+              accept=".xls,.xlsx,.csv"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) void replaceDirectory(file);
+                e.target.value = '';
+              }}
+            />
+            <button type="button" className="btn text-xs" disabled={dirBusy} onClick={() => dirInputRef.current?.click()}>
+              {dirBusy ? 'Parsing…' : directory ? 'Replace list…' : 'Upload list…'}
+            </button>
+            {directory && (
+              <button type="button" className="btn text-xs" onClick={onDirectoryClear}>
+                Clear
+              </button>
+            )}
+            {dirError && <span className="text-xs text-red-600">{dirError}</span>}
           </div>
         </div>
         <footer className="flex justify-end gap-2 border-t border-neutral-200 px-4 py-3">

@@ -9,17 +9,29 @@ import {
   extractLeadParenthetical,
   extractWoOverride,
   extractWoPct,
+  isPrevailingWageJob,
   jobDisplayName,
   profitSharePctFor,
   resolveCrewLead,
+  resolveLineRate,
   splitLeadCandidates,
   splitOvertime,
+  stripSingleLetterTokens,
+  titleCaseLeadName,
   tokensSubset,
   wageRateFor,
 } from './payroll';
 import { orderLeadFirst } from './pivot';
-import { estimatorFromTitle, extractTitleInitials, suggestPercent } from './timenavi';
-import type { DirectoryEmployee } from './types';
+import { applyPivotView, EMPTY_PIVOT_VIEW } from './pivotView';
+import {
+  dollarDiffIsFlagged,
+  duplicateInQboValues,
+  estimatorFromTitle,
+  extractTitleInitials,
+  percentIsFlagged,
+  suggestPercent,
+} from './timenavi';
+import type { DirectoryEmployee, PivotModel, ReportRow } from './types';
 
 interface TestResult {
   name: string;
@@ -288,6 +300,122 @@ export function runSelfTests(): boolean {
   check('wage: piece-rate job → default rate', wageRateFor('RAFAEL AGUILAR', rates, 18, false), { rate: 18, defaulted: false });
   check('wage: hourly job → hourly rate', wageRateFor('RAFAEL AGUILAR', rates, 18, true), { rate: 25, defaulted: false });
   check('wage: unknown employee → fallback + flag', wageRateFor('Nobody Known', rates, 18, false), { rate: 18, defaulted: true });
+
+  // --- Round 4 §1.1: pink review flags ---------------------------------------------------------
+  check('flag %: HOURLY text', percentIsFlagged('HOURLY'), true);
+  check('flag %: > 100%', percentIsFlagged(1.5), true);
+  check('flag %: < 0%', percentIsFlagged(-0.1), true);
+  check('flag %: 95% clean', percentIsFlagged(0.95), false);
+  check('flag %: blank clean', percentIsFlagged(null), false);
+  const flagRow = (id: string, inQboTime: string, included = true): ReportRow =>
+    ({ id, included, inQboTime } as unknown as ReportRow);
+  const dups = duplicateInQboValues([
+    flagRow('1', 'AP1 Job'),
+    flagRow('2', 'AP1 Job'),
+    flagRow('3', 'AP2 Other'),
+    flagRow('4', 'NotClockedIn'),
+    flagRow('5', 'NotClockedIn'),
+    flagRow('6', 'AP3 Excluded', false),
+    flagRow('7', 'AP3 Excluded', false),
+  ]);
+  check('flag M: duplicate included values only', [...dups], ['AP1 Job']);
+  check('flag $: nonzero pink', dollarDiffIsFlagged(-0.01), true);
+  check('flag $: zero clean', dollarDiffIsFlagged(0), false);
+  check('flag $: blank clean', dollarDiffIsFlagged(null), false);
+
+  // --- Round 4 §2: pivot view filters ---------------------------------------------------------
+  const pivotModel: PivotModel = {
+    title: 't',
+    estimators: ['MH', 'PG'],
+    crews: [
+      {
+        crew: "A's Crew",
+        employees: [
+          {
+            username: 'ana', fname: 'Ana', lname: 'A',
+            jobs: [{ customer: 'C', job: 'J', byEstimator: { MH: 10, PG: 5 }, total: 15 }],
+            byEstimator: { MH: 10, PG: 5 }, total: 15, overtime: false,
+          },
+        ],
+      },
+      {
+        crew: "B's Crew",
+        employees: [
+          {
+            username: 'bob', fname: 'Bob', lname: 'B',
+            jobs: [{ customer: 'C', job: 'J2', byEstimator: { PG: 8 }, total: 8 }],
+            byEstimator: { PG: 8 }, total: 8, overtime: false,
+          },
+        ],
+      },
+    ],
+    grandByEstimator: { MH: 10, PG: 13 },
+    grandTotal: 23,
+  };
+  check('pivotView: inactive view returns input untouched', applyPivotView(pivotModel, EMPTY_PIVOT_VIEW) === pivotModel, true);
+  const noPg = applyPivotView(pivotModel, { ...EMPTY_PIVOT_VIEW, hiddenEstimators: ['PG'] });
+  check('pivotView: hiding PG drops its hours from every total', [noPg.grandTotal, noPg.crews[0].employees[0].total], [10, 10]);
+  const oneCrew = applyPivotView(pivotModel, { ...EMPTY_PIVOT_VIEW, hiddenGroups: ["B's Crew"] });
+  check('pivotView: group filter removes the block + recomputes', [oneCrew.crews.length, oneCrew.grandTotal], [1, 15]);
+  const zToA = applyPivotView(pivotModel, { ...EMPTY_PIVOT_VIEW, columnSort: 'desc' });
+  check('pivotView: Z→A column sort', zToA.estimators, ['PG', 'MH']);
+  const noBob = applyPivotView(pivotModel, { ...EMPTY_PIVOT_VIEW, hiddenUsernames: ['bob'] });
+  check('pivotView: username filter drops empty crew', [noBob.crews.length, noBob.grandTotal], [1, 15]);
+
+  // --- Round 4 §3.2-2 / §5.3: display-name helpers ----------------------------------------------
+  check('nameStrip: trailing initial', stripSingleLetterTokens('Rene Salazar M'), 'Rene Salazar');
+  check('nameStrip: middle initial', stripSingleLetterTokens('Adriana G Lopez Barajas'), 'Adriana Lopez Barajas');
+  check('nameStrip: dotted initial', stripSingleLetterTokens('John Q. Public'), 'John Public');
+  check('nameStrip: untouched name', stripSingleLetterTokens('Carlos Ruiz Cruz'), 'Carlos Ruiz Cruz');
+  check(
+    'titleCase: directory casing wins + initial stripped',
+    titleCaseLeadName('RENE SALAZAR M', [{ fullName: 'Rene Salazar M', firstName: 'Rene', lastName: 'Salazar M', active: true }], []),
+    'Rene Salazar',
+  );
+  check(
+    'titleCase: split leads resolved independently',
+    titleCaseLeadName('TED FRANK/RAFAEL AGUILAR', dir.concat([]), []),
+    'Ted Frank/Rafael Aguilar',
+  );
+  check("titleCase: sub keeps its stored text", titleCaseLeadName("PEPE'S PAINTING LLC", [], ["Pepe's Painting LLC"]), "Pepe's Painting LLC");
+
+  // --- Round 4 §5.8: prevailing-wage rate chain --------------------------------------------------
+  const pwSettings = {
+    wageRates: [
+      { name: 'Antonio Zuniga', rate: 18, hourlyRate: 25 },
+      { name: 'Rafael Aguilar', rate: 25 },
+    ],
+    defaultWageRate: 18,
+    prevailingWagePatterns: ['SNRHA *SS*'],
+    prevailingMinRate: 19.18,
+  };
+  check('pw: pattern substring match', isPrevailingWageJob('AP24393 SNRHA *SS* 210 N 16th St', ['SNRHA *SS*']), true);
+  check('pw: no match', isPrevailingWageJob('AP24314 Ext', ['SNRHA *SS*']), false);
+  check(
+    'pw: default 18 lifted to 19.18 on SNRHA job',
+    resolveLineRate('ANTONIO ZUNIGA', 'AP24393 SNRHA *SS*', false, pwSettings),
+    { rate: 19.18, defaulted: false, prevailing: true },
+  );
+  check(
+    'pw: default 25 stays 25 on the same job',
+    resolveLineRate('RAFAEL AGUILAR', 'AP24393 SNRHA *SS*', false, pwSettings).rate,
+    25,
+  );
+  check(
+    'pw: hourly job uses the hourly-jobs rate',
+    resolveLineRate('ANTONIO ZUNIGA', 'AP24000 T&M repair', true, pwSettings),
+    { rate: 25, defaulted: false, prevailing: false },
+  );
+  check(
+    'pw: plain job → default rate',
+    resolveLineRate('ANTONIO ZUNIGA', 'AP24314 Ext', false, pwSettings).rate,
+    18,
+  );
+  check(
+    'pw: unknown employee on plain job → fallback + flag',
+    resolveLineRate('NOBODY', 'AP24314 Ext', false, pwSettings),
+    { rate: 18, defaulted: true, prevailing: false },
+  );
 
   const failed = results.filter((r) => !r.pass);
   const label = `[% of Completion Builder self-test] ${results.length - failed.length}/${results.length} passed`;

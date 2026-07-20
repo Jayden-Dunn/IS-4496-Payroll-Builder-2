@@ -599,9 +599,10 @@ const d24314 = daniel.jobs[0];
 check('PS chain: profitShare = income × WO%', d24314.profitShare, round2(650 * 0.38));
 check('PS chain: WO Override defaults to Profit Share', d24314.workOrderOverride, round2(650 * 0.38));
 check('PS chain: % Completion from Pivot by Job', d24314.percentCompletion, 0.3);
+// Round 4 §5.6 precision: the model stores full-precision values; compare rounded.
 check(
   'PS chain: Total Profit Share = WO×% − labor − mileage − ½mat',
-  d24314.totalProfitShare,
+  round2(d24314.totalProfitShare),
   round2(round2(650 * 0.38) * 0.3 - 113.04 - 0 - round2(35.74 / 2)),
 );
 const d24403 = daniel.jobs[1];
@@ -621,6 +622,17 @@ check('office block: single Office line', [preview.office.length, preview.office
 check('salary sections from the roster', [preview.admin.length, preview.estimators.length, preview.managers.length], [1, 5, 4]);
 check('inactive zero-hour employees parked', preview.inactiveZeroHours, ['Calixto Efrain Climaco']);
 
+// Round 4 §5.2 — one A→Z painter sequence interleaving painters and leads,
+// subs last (none here). §5.3 — lead bands in Title Case. §5.5 — office PO text.
+check(
+  'painter sequence interleaved A→Z by first name',
+  preview.painterSequence.map((e) => (e.kind === 'hourly' ? e.block.employeeName : e.block.displayName)),
+  ['Daniel Gonzales Bonilla', 'Juan Perez', 'Leonardo Martinez-Rincon', 'Rafael Aguilar', 'Ted Frank'],
+);
+check('week range on the model', preview.weekRange, '6/29 - 7/3');
+check('office PO cell text = "(week range)"', preview.office[0].lines[0].poText, '(6/29 - 7/3)');
+check('painter crew tag verbatim', preview.painters[0].crewTag, "Rene Salazar's Crew");
+
 // Live edit: entering net computes taxes; PS-cell edits recompute the chain.
 const previewEdited = buildPayrollPreview({
   pbj, enriched, reportRows: rows, pl, directory, settings, payDate,
@@ -633,8 +645,8 @@ const previewEdited = buildPayrollPreview({
 })!;
 check('net edit stored (taxes = total − net downstream)', previewEdited.painters[1].net, 600);
 const editedJob = previewEdited.leads[0].jobs[1];
-check('percent edit recomputes Total Profit Share', editedJob.totalProfitShare, round2(4715 - 2081.09 - round2(760.1 / 2)));
-check('reimbursement edit flows into Total Pay', previewEdited.leads[0].totalPay, round2(previewEdited.leads[0].total + 100));
+check('percent edit recomputes Total Profit Share', round2(editedJob.totalProfitShare), round2(4715 - 2081.09 - round2(760.1 / 2)));
+check('reimbursement edit flows into Total Pay', round2(previewEdited.leads[0].totalPay), round2(previewEdited.leads[0].total + 100));
 
 console.log('payroll exceptions…');
 const pGroups = buildPayrollExceptions({ pbj, preview, reportRows: rows, pl, hasDirectory: true });
@@ -667,10 +679,11 @@ async function testExport(): Promise<void> {
   const readBack = new ExcelJS.Workbook();
   await readBack.xlsx.load(buf);
 
+  // Round 4 §4.1/§6 — no Inactive Employees sheet.
   check(
-    'sheet names (Round 3 order + Inactive Employees when non-empty)',
+    'sheet names (Round 4: no Inactive Employees)',
     readBack.worksheets.map((w) => w.name),
-    ['TimeNavi Export', 'Pivot by Crew', 'Pivot by Job', 'Payroll Preview', 'Inactive Employees'],
+    ['TimeNavi Export', 'Pivot by Crew', 'Pivot by Job', 'Payroll Preview'],
   );
 
   const tn = readBack.getWorksheet('TimeNavi Export') as ExcelJS.Worksheet;
@@ -734,6 +747,22 @@ async function testExport(): Promise<void> {
   check('unmatched Apptivo blank', isBlank(tn.getCell('O6').value), true);
   check('unmatched $ Difference blank', isBlank(tn.getCell('P6').value), true);
   check('dash for missing last % paid (24388 row)', tn.getCell('K6').value, '-');
+
+  // Round 4 §1.2 — H/I/J/K and P centered (header + data).
+  check(
+    'TimeNavi centered columns (header)',
+    ['H1', 'I1', 'J1', 'K1', 'P1'].map((a) => tn.getCell(a).alignment?.horizontal),
+    ['center', 'center', 'center', 'center', 'center'],
+  );
+  check('TimeNavi centered data cell', tn.getCell('H2').alignment?.horizontal, 'center');
+  // Round 4 §1.1 — pink flags: NotClockedIn in M (row 2 = 24222) pink; a zero
+  // $ Difference stays unflagged (row 2 P = 0).
+  check(
+    'NotClockedIn cell pink fill + dark-red text',
+    [fillOf(tn.getCell('M2')), tn.getCell('M2').font?.color?.argb],
+    ['FFFFC7CE', 'FF9C0006'],
+  );
+  check('zero $ Difference NOT pink', [tn.getCell('P2').value, fillOf(tn.getCell('P2'))], [0, 'FFFABF8F']);
 
   // ---------- Pivot by Crew ----------
   const pv = readBack.getWorksheet('Pivot by Crew') as ExcelJS.Worksheet;
@@ -804,11 +833,20 @@ async function testExport(): Promise<void> {
     [pv.getCell(leoTotalRowNum, 2).font?.bold, pv.getCell(leoTotalRowNum, 5).font?.bold, pv.getCell(leoTotalRowNum, gtColNum).font?.bold],
     [true, true, true],
   );
+  // Round 4 §2.4: the separator sits on the TOP edge of the total row,
+  // spanning C → Grand Total (not A/B, not the bottom edge).
   check(
-    'total row thin bottom border across the table',
-    [pv.getCell(leoTotalRowNum, 1).border?.bottom?.style, pv.getCell(leoTotalRowNum, gtColNum).border?.bottom?.style],
-    ['thin', 'thin'],
+    'total row thin TOP border from C through Grand Total',
+    [
+      pv.getCell(leoTotalRowNum, 3).border?.top?.style,
+      pv.getCell(leoTotalRowNum, gtColNum).border?.top?.style,
+      pv.getCell(leoTotalRowNum, 1).border?.top?.style ?? null,
+      pv.getCell(leoTotalRowNum, 3).border?.bottom?.style ?? null,
+    ],
+    ['thin', 'thin', null, null],
   );
+  // Round 4 §2.4: hour values centered in the estimator columns.
+  check('hour value centered (estimator column)', pv.getCell('H7').alignment?.horizontal, 'center');
 
   // §2.5 + Round 2 §1: Grand Total row bold, gray/white on A + value columns,
   // B:D unfilled.
@@ -845,6 +883,30 @@ async function testExport(): Promise<void> {
   check('pbj job % of Completion 0% format', [pj.getCell('O6').value, pj.getCell('O6').numFmt], [0.3, '0%']);
   check('pbj hours 0.00 format', pj.getCell('G6').numFmt, '0.00');
   check('pbj widths (A, first date, Crew Lead)', [pj.getColumn(1).width, pj.getColumn(2).width, pj.getColumn(12).width], [40, 10, 43]);
+  // Round 4 §3.1 — analysis cells centered (AP# I6 … % of Completion O6), Notes left.
+  check(
+    'pbj analysis cells centered, Notes not',
+    [
+      pj.getCell('I6').alignment?.horizontal,
+      pj.getCell('M6').alignment?.horizontal,
+      pj.getCell('O6').alignment?.horizontal,
+      pj.getCell('P6').alignment?.horizontal ?? null,
+    ],
+    ['center', 'center', 'center', null],
+  );
+  // Round 4 §3.2-1 — WO Override in $-accounting (job with a WO value = 24403).
+  let woFmtOk = false;
+  pj.eachRow((row) => {
+    const cell = row.getCell(13); // WO Override column (M with 5 dates)
+    if (typeof cell.value === 'number' && String(cell.numFmt).includes('"$"')) woFmtOk = true;
+  });
+  check('pbj WO Override uses $-accounting somewhere', woFmtOk, true);
+  // Round 4 §3.2-4 — Grand Total row double top border.
+  let pjGrandRow = 0;
+  pj.eachRow((row, n) => {
+    if (row.getCell(1).value === 'Grand Total' && pjGrandRow === 0) pjGrandRow = n;
+  });
+  check('pbj Grand Total double top border', pj.getCell(pjGrandRow, 1).border?.top?.style, 'double');
   // BALANCES + UT sections rendered beneath at computed positions.
   const colA = pj.getColumn(1).values as (string | undefined)[];
   const balTitleRow = colA.findIndex((v) => typeof v === 'string' && v.startsWith('NV PAYROLL (BALANCES):'));
@@ -852,15 +914,78 @@ async function testExport(): Promise<void> {
   check('BALANCES section below the pivot', balTitleRow > 5, true);
   check('UT section below BALANCES', utTitleRow > balTitleRow, true);
   check('BALANCES title black band', fillOf(pj.getCell(balTitleRow, 1)), 'FF000000');
+  // Round 4 §3.2-3 — each carried entry is a customer-row + job-row pair with
+  // the estimator fill and a thin box border (first pair sits 4 rows below
+  // the section title, after the 4-row header block).
+  const balCustRow = balTitleRow + 4;
+  check(
+    'BALANCES pair: estimator fill on both rows (MH yellow, 21848-A5)',
+    [fillOf(pj.getCell(balCustRow, 1)), fillOf(pj.getCell(balCustRow + 1, 1))],
+    ['FFFFFF99', 'FFFFFF99'],
+  );
+  check(
+    'BALANCES pair: thin box border (top on customer, bottom on job, edges)',
+    [
+      pj.getCell(balCustRow, 1).border?.top?.style,
+      pj.getCell(balCustRow, 1).border?.left?.style,
+      pj.getCell(balCustRow + 1, 1).border?.bottom?.style,
+      pj.getCell(balCustRow + 1, lastColNum).border?.right?.style,
+    ],
+    ['thin', 'thin', 'thin', 'thin'],
+  );
 
   // ---------- Payroll Preview (Round 3) ----------
   const pp = readBack.getWorksheet('Payroll Preview') as ExcelJS.Worksheet;
   check('preview title', pp.getCell('A1').value, 'PAYROLL BREAKDOWN 7/10/2026 (6/29 - 7/3)');
   check('preview title black band', fillOf(pp.getCell('A1')), 'FF000000');
-  // Live formulas: find the DANIEL PS block and an hourly line.
+  // Round 4 §5.1/§5.4 — Garamond everywhere; title merged A1:H1, centered, 13 bold.
+  check(
+    'preview title Garamond 13 bold, merged + centered',
+    [pp.getCell('A1').font?.name, pp.getCell('A1').font?.size, pp.getCell('A1').font?.bold, pp.getCell('A1').isMerged, pp.getCell('A1').alignment?.horizontal],
+    ['Garamond', 13, true, true, 'center'],
+  );
+  // Live formulas: find the Daniel PS block (Round 4 §5.3 Title Case band).
   const ppColA = pp.getColumn(1).values as (string | undefined)[];
-  const danielRow = ppColA.findIndex((v) => v === 'DANIEL GONZALES BONILLA');
-  check('DANIEL block present with tan header', [danielRow > 0, fillOf(pp.getCell(danielRow, 1))], [true, 'FFD6D4CA']);
+  const danielRow = ppColA.findIndex((v) => v === 'Daniel Gonzales Bonilla');
+  check('Daniel block present with the DDD9C4 tan band', [danielRow > 0, fillOf(pp.getCell(danielRow, 1))], [true, 'FFDDD9C4']);
+  // Round 4 §5.5 — labeled `PO# | Job | hrs | rate | total` header rows.
+  let headerRowNum = 0;
+  pp.eachRow((row, n) => {
+    if (headerRowNum === 0 && row.getCell(1).value === 'PO#' && row.getCell(2).value === 'Job') headerRowNum = n;
+  });
+  check('PO#|Job|hrs|rate|total header row present', headerRowNum > 0, true);
+  check(
+    'header labels bold + underlined + centered',
+    [
+      pp.getCell(headerRowNum, 1).font?.bold,
+      pp.getCell(headerRowNum, 1).font?.underline,
+      pp.getCell(headerRowNum, 3).alignment?.horizontal,
+      pp.getCell(headerRowNum, 5).value,
+    ],
+    [true, true, 'center', 'total'],
+  );
+  // §5.5 — `(-) taxes` / `net` bold labels appear in F/G on a job line.
+  let taxesLabelOk = false;
+  pp.eachRow((row) => {
+    if (row.getCell(6).value === '(-) taxes' && row.getCell(7).value === 'net') taxesLabelOk = true;
+  });
+  check('(-) taxes / net labels present', taxesLabelOk, true);
+  // §5.4 — a painter name band is merged A–H with the DDD9C4 fill (rich text
+  // name + crew tag). Find Juan's band via the merged cell's rich text.
+  let bandOk = false;
+  pp.eachRow((row) => {
+    const v = row.getCell(1).value as { richText?: { text: string }[] } | string | null;
+    if (v && typeof v === 'object' && 'richText' in v && v.richText?.[0]?.text === 'Juan Perez') {
+      bandOk = row.getCell(1).isMerged && fillOf(row.getCell(1)) === 'FFDDD9C4' && v.richText[1]?.text === " (Rene Salazar's Crew)";
+    }
+  });
+  check('painter name band merged, tan, name + crew tag rich text', bandOk, true);
+  // §5.6 — Hourly Pay value cell highlighted yellow.
+  const hourlyPayRowNum = ppColA.findIndex((v) => v === 'Hourly Pay');
+  check('Hourly Pay value cell yellow', fillOf(pp.getCell(hourlyPayRowNum, 2)), 'FFFFFF99');
+  // §5.6 — double border under Deductions/Sundries.
+  const deductRowNum = ppColA.findIndex((v) => v === 'Deductions/Sundries');
+  check('double border under Deductions/Sundries', pp.getCell(deductRowNum, 2).border?.bottom?.style, 'double');
   const psFormulaCell = pp.getCell(danielRow + 3, 2); // Profit Share row
   check('Profit Share is a live formula (income × WO%)', typeof (psFormulaCell.value as { formula?: string })?.formula === 'string', true);
   const tpsRowNum = ppColA.findIndex((v) => v === 'Total Profit Share');
@@ -878,10 +1003,6 @@ async function testExport(): Promise<void> {
   const sectionRows = ['OFFICE', 'ADMIN', 'ESTIMATORS', 'MANAGER SALARY'].map((s) => ppColA.findIndex((v) => v === s));
   check('section headers in order', sectionRows.every((r, i) => r > 0 && (i === 0 || r > sectionRows[i - 1])), true);
   check('preview widths (A, B)', [pp.getColumn(1).width, pp.getColumn(2).width], [22, 41.4]);
-
-  // ---------- Inactive Employees ----------
-  const inact = readBack.getWorksheet('Inactive Employees') as ExcelJS.Worksheet;
-  check('inactive sheet lists parked names', inact.getCell('A2').value, 'Calixto Efrain Climaco');
 }
 
 testExport()

@@ -138,6 +138,26 @@ function buildPayrollExceptions(input) {
             items,
         });
     }
+    // 5b (Round 4 §5.8). Prevailing-wage job paid below the prevailing minimum.
+    {
+        const items = [];
+        const everyBlock = [...preview.painters, ...preview.office, ...preview.leads.flatMap((l) => (l.tsheets ? [l.tsheets] : []))];
+        for (const b of everyBlock) {
+            for (const l of b.lines) {
+                if (l.belowPrevailing) {
+                    items.push({
+                        message: `${b.employeeName} — "${l.jobLabel}" is a prevailing-wage job but pays ${l.rate.toFixed(2)}/hr (below the prevailing minimum)`,
+                    });
+                }
+            }
+        }
+        groups.push({
+            key: 'prevailingWage',
+            title: 'Prevailing-wage job paid at default rate',
+            note: 'The job matched a Prevailing-wage pattern in Settings but the rendered rate sits below the prevailing minimum.',
+            items,
+        });
+    }
     // 6. Job missing from P&L.
     groups.push({
         key: 'missingFromPl',

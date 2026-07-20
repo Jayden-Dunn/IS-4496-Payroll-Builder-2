@@ -472,6 +472,7 @@ export interface LastWeekPbjRow {
   customer: string; // best-effort (judgment sections are editable anyway)
   job: string;
   apKey: string;
+  estimator: string;
   crewLead: string;
   woOverride: number | null;
   woPct: number | null;
@@ -518,6 +519,7 @@ export function parseLastWeekPivotByJob(wbd: WorkbookData): LastWeekPbjRow[] {
   }
   if (!cols) return [];
   const apCol = cols.get('ap#') as number;
+  const estCol = cols.get('estimator');
   const leadCol = cols.get('crew lead');
   const woCol = cols.get('wo override') ?? cols.get('wo amt');
   const woPctCol = cols.get('wo%');
@@ -554,6 +556,7 @@ export function parseLastWeekPivotByJob(wbd: WorkbookData): LastWeekPbjRow[] {
       customer: prevNonApText,
       job: a,
       apKey,
+      estimator: asString(cellAt(row, estCol)),
       crewLead: asString(cellAt(row, leadCol)),
       woOverride: typeof wo === 'number' ? wo : null,
       woPct: typeof woPct === 'number' ? woPct : null,

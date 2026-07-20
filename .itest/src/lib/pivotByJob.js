@@ -282,13 +282,13 @@ function manualRowFromCarry(section, row, notes, colorByEstimator) {
         customer: row.customer,
         job: row.job,
         apKey: row.apKey,
-        estimator: '',
+        estimator: row.estimator,
         crewLead: row.crewLead,
         woOverride: row.woOverride,
         woPct: row.woPct,
         percent: row.percent,
         notes,
-        colorHex: colorByEstimator.get('') ?? null,
+        colorHex: colorByEstimator.get(row.estimator) ?? null,
     };
 }
 /** Merge seeds with user adds/deletes/edits (rows persist keyed by id). */

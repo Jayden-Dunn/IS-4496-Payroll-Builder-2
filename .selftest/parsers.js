@@ -550,6 +550,7 @@ function parseLastWeekPivotByJob(wbd) {
     if (!cols)
         return [];
     const apCol = cols.get('ap#');
+    const estCol = cols.get('estimator');
     const leadCol = cols.get('crew lead');
     const woCol = cols.get('wo override') ?? cols.get('wo amt');
     const woPctCol = cols.get('wo%');
@@ -588,6 +589,7 @@ function parseLastWeekPivotByJob(wbd) {
             customer: prevNonApText,
             job: a,
             apKey,
+            estimator: asString(cellAt(row, estCol)),
             crewLead: asString(cellAt(row, leadCol)),
             woOverride: typeof wo === 'number' ? wo : null,
             woPct: typeof woPct === 'number' ? woPct : null,

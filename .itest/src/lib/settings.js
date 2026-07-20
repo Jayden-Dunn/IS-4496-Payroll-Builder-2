@@ -1,10 +1,13 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.DEFAULT_SUBCONTRACTORS = exports.DEFAULT_MILEAGE_RATE = exports.DEFAULT_SALARIED = exports.DEFAULT_WAGE_RATE = exports.DEFAULT_WAGE_RATES = exports.DEFAULT_PROFIT_SHARE_PCT = exports.DEFAULT_PROFIT_SHARE = exports.DEFAULT_PIVOT_COLUMNS = exports.DEFAULT_LEGEND = void 0;
+exports.DEFAULT_PREVAILING_MIN_RATE = exports.DEFAULT_PREVAILING_PATTERNS = exports.DEFAULT_SUBCONTRACTORS = exports.DEFAULT_MILEAGE_RATE = exports.DEFAULT_SALARIED = exports.DEFAULT_WAGE_RATE = exports.DEFAULT_WAGE_RATES = exports.DEFAULT_PROFIT_SHARE_PCT = exports.DEFAULT_PROFIT_SHARE = exports.DEFAULT_PIVOT_COLUMNS = exports.DEFAULT_LEGEND = void 0;
 exports.ensureDefaultPivotColumns = ensureDefaultPivotColumns;
 exports.defaultSettings = defaultSettings;
 exports.loadSettings = loadSettings;
 exports.saveSettings = saveSettings;
+exports.loadSavedDirectory = loadSavedDirectory;
+exports.saveDirectory = saveDirectory;
+exports.clearSavedDirectory = clearSavedDirectory;
 exports.mergePivotColumnOrder = mergePivotColumnOrder;
 /**
  * Shared estimator palette — single source of truth for BOTH tabs (row fills
@@ -50,7 +53,7 @@ exports.DEFAULT_PROFIT_SHARE_PCT = 0.38;
 exports.DEFAULT_WAGE_RATES = [
     { name: 'Adriana Lopez Barajas', rate: 25, hourlyRate: 20 },
     { name: 'Ana Bedoya Melgar', rate: 20 },
-    { name: 'Antonio Zuniga', rate: 18 },
+    { name: 'Antonio Zuniga', rate: 18, hourlyRate: 25 },
     { name: 'Arlette Zuniga Lopez', rate: 19.18 },
     { name: 'Armando Alfonso Marin', rate: 15 },
     { name: 'Calixto Efrain Climaco', rate: 19.18 },
@@ -98,6 +101,9 @@ exports.DEFAULT_SUBCONTRACTORS = [
     'Color Enterprises LLC',
     'Merino Custom Painting',
 ];
+/** Round 4 §5.8 — prevailing-wage (Davis-Bacon) job patterns + minimum rate. */
+exports.DEFAULT_PREVAILING_PATTERNS = ['SNRHA *SS*'];
+exports.DEFAULT_PREVAILING_MIN_RATE = 19.18;
 // v4: Round 3 payroll settings added. v3 legend/pivot values are migrated;
 // missing payroll sections get the seeds.
 const STORAGE_KEY = 'pct-completion-builder.settings.v4';
@@ -143,6 +149,8 @@ function defaultSettings() {
         salariedRoster: exports.DEFAULT_SALARIED.map((e) => ({ ...e })),
         mileageRate: exports.DEFAULT_MILEAGE_RATE,
         subcontractors: [...exports.DEFAULT_SUBCONTRACTORS],
+        prevailingWagePatterns: [...exports.DEFAULT_PREVAILING_PATTERNS],
+        prevailingMinRate: exports.DEFAULT_PREVAILING_MIN_RATE,
     };
 }
 function parseLegend(raw) {
@@ -236,6 +244,14 @@ function parsePayroll(raw) {
         if (subs.length > 0)
             out.subcontractors = subs;
     }
+    if (Array.isArray(r.prevailingWagePatterns)) {
+        const pats = r.prevailingWagePatterns.filter((s) => typeof s === 'string' && s.trim() !== '');
+        if (pats.length > 0)
+            out.prevailingWagePatterns = pats;
+    }
+    if (typeof r.prevailingMinRate === 'number' && Number.isFinite(r.prevailingMinRate)) {
+        out.prevailingMinRate = r.prevailingMinRate;
+    }
     return out;
 }
 function loadSettings() {
@@ -262,6 +278,71 @@ function saveSettings(settings) {
     }
     catch {
         // localStorage unavailable — settings just won't persist.
+    }
+}
+// ---------------------------------------------------------------------------
+// Round 4 §4.2 — persisted employee directory (same pattern as the legend)
+// ---------------------------------------------------------------------------
+const DIRECTORY_KEY = 'pct-completion-builder.employee-directory.v1';
+function loadSavedDirectory() {
+    try {
+        const raw = localStorage.getItem(DIRECTORY_KEY);
+        if (!raw)
+            return null;
+        const parsed = JSON.parse(raw);
+        if (typeof parsed !== 'object' || parsed === null)
+            return null;
+        const p = parsed;
+        if (!Array.isArray(p.employees))
+            return null;
+        const employees = [];
+        for (const e of p.employees) {
+            const x = e;
+            if (typeof x.fullName !== 'string' || x.fullName.trim() === '')
+                continue;
+            employees.push({
+                fullName: x.fullName,
+                firstName: typeof x.firstName === 'string' ? x.firstName : '',
+                lastName: typeof x.lastName === 'string' ? x.lastName : '',
+                active: x.active !== false,
+            });
+        }
+        if (employees.length === 0)
+            return null;
+        return {
+            employees,
+            sourceFilename: typeof p.sourceFilename === 'string' ? p.sourceFilename : '',
+            uploadedAt: typeof p.uploadedAt === 'string' ? p.uploadedAt : '',
+            activeCount: employees.filter((e) => e.active).length,
+            inactiveCount: employees.filter((e) => !e.active).length,
+        };
+    }
+    catch {
+        return null;
+    }
+}
+function saveDirectory(employees, sourceFilename) {
+    const saved = {
+        employees,
+        sourceFilename,
+        uploadedAt: new Date().toISOString(),
+        activeCount: employees.filter((e) => e.active).length,
+        inactiveCount: employees.filter((e) => !e.active).length,
+    };
+    try {
+        localStorage.setItem(DIRECTORY_KEY, JSON.stringify(saved));
+    }
+    catch {
+        // localStorage unavailable — the directory just won't persist.
+    }
+    return saved;
+}
+function clearSavedDirectory() {
+    try {
+        localStorage.removeItem(DIRECTORY_KEY);
+    }
+    catch {
+        // ignore
     }
 }
 /**

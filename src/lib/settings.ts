@@ -1,8 +1,10 @@
 import type {
   AppSettings,
+  DirectoryEmployee,
   LegendEntry,
   ProfitShareEntry,
   SalariedEntry,
+  SavedDirectory,
   WageRateEntry,
 } from './types';
 
@@ -54,7 +56,7 @@ export const DEFAULT_PROFIT_SHARE_PCT = 0.38;
 export const DEFAULT_WAGE_RATES: WageRateEntry[] = [
   { name: 'Adriana Lopez Barajas', rate: 25, hourlyRate: 20 },
   { name: 'Ana Bedoya Melgar', rate: 20 },
-  { name: 'Antonio Zuniga', rate: 18 },
+  { name: 'Antonio Zuniga', rate: 18, hourlyRate: 25 },
   { name: 'Arlette Zuniga Lopez', rate: 19.18 },
   { name: 'Armando Alfonso Marin', rate: 15 },
   { name: 'Calixto Efrain Climaco', rate: 19.18 },
@@ -107,6 +109,10 @@ export const DEFAULT_SUBCONTRACTORS: string[] = [
   'Merino Custom Painting',
 ];
 
+/** Round 4 §5.8 — prevailing-wage (Davis-Bacon) job patterns + minimum rate. */
+export const DEFAULT_PREVAILING_PATTERNS: string[] = ['SNRHA *SS*'];
+export const DEFAULT_PREVAILING_MIN_RATE = 19.18;
+
 // v4: Round 3 payroll settings added. v3 legend/pivot values are migrated;
 // missing payroll sections get the seeds.
 const STORAGE_KEY = 'pct-completion-builder.settings.v4';
@@ -153,6 +159,8 @@ export function defaultSettings(): AppSettings {
     salariedRoster: DEFAULT_SALARIED.map((e) => ({ ...e })),
     mileageRate: DEFAULT_MILEAGE_RATE,
     subcontractors: [...DEFAULT_SUBCONTRACTORS],
+    prevailingWagePatterns: [...DEFAULT_PREVAILING_PATTERNS],
+    prevailingMinRate: DEFAULT_PREVAILING_MIN_RATE,
   };
 }
 
@@ -239,6 +247,13 @@ function parsePayroll(raw: unknown): Partial<AppSettings> {
     const subs = r.subcontractors.filter((s): s is string => typeof s === 'string' && s.trim() !== '');
     if (subs.length > 0) out.subcontractors = subs;
   }
+  if (Array.isArray(r.prevailingWagePatterns)) {
+    const pats = r.prevailingWagePatterns.filter((s): s is string => typeof s === 'string' && s.trim() !== '');
+    if (pats.length > 0) out.prevailingWagePatterns = pats;
+  }
+  if (typeof r.prevailingMinRate === 'number' && Number.isFinite(r.prevailingMinRate)) {
+    out.prevailingMinRate = r.prevailingMinRate;
+  }
   return out;
 }
 
@@ -267,6 +282,68 @@ export function saveSettings(settings: AppSettings): void {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
   } catch {
     // localStorage unavailable — settings just won't persist.
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Round 4 §4.2 — persisted employee directory (same pattern as the legend)
+// ---------------------------------------------------------------------------
+
+const DIRECTORY_KEY = 'pct-completion-builder.employee-directory.v1';
+
+export function loadSavedDirectory(): SavedDirectory | null {
+  try {
+    const raw = localStorage.getItem(DIRECTORY_KEY);
+    if (!raw) return null;
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null) return null;
+    const p = parsed as Record<string, unknown>;
+    if (!Array.isArray(p.employees)) return null;
+    const employees: DirectoryEmployee[] = [];
+    for (const e of p.employees) {
+      const x = e as { fullName?: unknown; firstName?: unknown; lastName?: unknown; active?: unknown };
+      if (typeof x.fullName !== 'string' || x.fullName.trim() === '') continue;
+      employees.push({
+        fullName: x.fullName,
+        firstName: typeof x.firstName === 'string' ? x.firstName : '',
+        lastName: typeof x.lastName === 'string' ? x.lastName : '',
+        active: x.active !== false,
+      });
+    }
+    if (employees.length === 0) return null;
+    return {
+      employees,
+      sourceFilename: typeof p.sourceFilename === 'string' ? p.sourceFilename : '',
+      uploadedAt: typeof p.uploadedAt === 'string' ? p.uploadedAt : '',
+      activeCount: employees.filter((e) => e.active).length,
+      inactiveCount: employees.filter((e) => !e.active).length,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function saveDirectory(employees: DirectoryEmployee[], sourceFilename: string): SavedDirectory {
+  const saved: SavedDirectory = {
+    employees,
+    sourceFilename,
+    uploadedAt: new Date().toISOString(),
+    activeCount: employees.filter((e) => e.active).length,
+    inactiveCount: employees.filter((e) => !e.active).length,
+  };
+  try {
+    localStorage.setItem(DIRECTORY_KEY, JSON.stringify(saved));
+  } catch {
+    // localStorage unavailable — the directory just won't persist.
+  }
+  return saved;
+}
+
+export function clearSavedDirectory(): void {
+  try {
+    localStorage.removeItem(DIRECTORY_KEY);
+  } catch {
+    // ignore
   }
 }
 
