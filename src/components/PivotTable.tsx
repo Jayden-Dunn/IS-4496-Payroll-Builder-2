@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import { useEffect, useRef, useState, type CSSProperties, type Dispatch, type SetStateAction } from 'react';
 import { fmtHoursFixed, isDarkColor } from '../lib/format';
 import { isPivotViewActive, EMPTY_PIVOT_VIEW, type PivotViewState, type RowField, type SortDir } from '../lib/pivotView';
 import type { PivotModel } from '../lib/types';
@@ -24,12 +24,47 @@ function bandStyle(hex: string | undefined): CSSProperties | undefined {
   return { backgroundColor: `#${hex}`, color: isDarkColor(hex) ? '#fff' : '#000' };
 }
 
+function CollapseToggle({
+  open,
+  onClick,
+  label,
+  light,
+}: {
+  open: boolean;
+  onClick: () => void;
+  label: string;
+  /** White chrome on the black crew band. */
+  light?: boolean;
+}): JSX.Element {
+  return (
+    <button
+      type="button"
+      className={`mr-1 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-xs border text-[10px] leading-none ${
+        light
+          ? 'border-neutral-300 bg-neutral-800 text-white hover:bg-neutral-700'
+          : 'border-neutral-500 bg-white text-neutral-800 hover:bg-neutral-100'
+      }`}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+      title={open ? `Collapse ${label}` : `Expand ${label}`}
+      aria-label={open ? `Collapse ${label}` : `Expand ${label}`}
+      aria-expanded={open}
+    >
+      {open ? '−' : '+'}
+    </button>
+  );
+}
+
 // ---------------------------------------------------------------------------
-// §2.1/§2.2 — the Excel-style filter popover
+// §2.1/§2.2 — the Excel-style filter popover (Column Labels / Row Labels)
 // ---------------------------------------------------------------------------
 
 interface FilterPopoverProps {
-  items: string[]; // all candidate values (unfiltered)
+  items: string[];
+  /** Optional display labels (e.g. painter "Fname Lname" for a username key). */
+  labels?: ReadonlyMap<string, string>;
   hidden: ReadonlySet<string>;
   sort: SortDir;
   onSort: (dir: SortDir) => void;
@@ -37,13 +72,12 @@ interface FilterPopoverProps {
   onSetAll: (checked: boolean) => void;
   onClear: () => void;
   onClose: () => void;
-  /** Row Labels variant: the "Select field" dropdown. */
   field?: RowField;
   onFieldChange?: (f: RowField) => void;
 }
 
 function FilterPopover(props: FilterPopoverProps): JSX.Element {
-  const { items, hidden, onToggle, onSetAll, onClear, onClose } = props;
+  const { items, labels, hidden, onToggle, onSetAll, onClear, onClose } = props;
   const [search, setSearch] = useState('');
   const ref = useRef<HTMLDivElement>(null);
 
@@ -55,13 +89,14 @@ function FilterPopover(props: FilterPopoverProps): JSX.Element {
     return () => document.removeEventListener('mousedown', onDown);
   }, [onClose]);
 
-  const visibleItems = items.filter((i) => i.toLowerCase().includes(search.trim().toLowerCase()));
-  const allChecked = items.every((i) => !hidden.has(i));
+  const labelOf = (item: string): string => labels?.get(item) ?? item;
+  const visibleItems = items.filter((i) => labelOf(i).toLowerCase().includes(search.trim().toLowerCase()));
+  const allChecked = items.length > 0 && items.every((i) => !hidden.has(i));
 
   return (
     <div
       ref={ref}
-      className="absolute left-0 top-full z-30 mt-1 w-64 rounded border border-neutral-300 bg-white p-2 text-left text-xs font-normal text-neutral-900 shadow-lg"
+      className="absolute left-0 top-full z-40 mt-1 w-72 rounded border border-neutral-300 bg-white p-2 text-left text-xs font-normal text-neutral-900 shadow-lg"
       onClick={(e) => e.stopPropagation()}
     >
       {props.field !== undefined && props.onFieldChange && (
@@ -73,7 +108,7 @@ function FilterPopover(props: FilterPopoverProps): JSX.Element {
             onChange={(e) => props.onFieldChange?.(e.target.value as RowField)}
           >
             <option value="group">group</option>
-            <option value="username">username</option>
+            <option value="username">painter</option>
           </select>
         </label>
       )}
@@ -100,7 +135,9 @@ function FilterPopover(props: FilterPopoverProps): JSX.Element {
         {visibleItems.map((item) => (
           <label key={item} className="flex items-center gap-1.5 px-1 py-0.5 hover:bg-neutral-50">
             <input type="checkbox" checked={!hidden.has(item)} onChange={(e) => onToggle(item, e.target.checked)} />
-            <span className="truncate">{item}</span>
+            <span className="truncate" title={labelOf(item)}>
+              {labelOf(item)}
+            </span>
           </label>
         ))}
         {visibleItems.length === 0 && <div className="px-1 py-1 text-neutral-400">No matches.</div>}
@@ -109,7 +146,7 @@ function FilterPopover(props: FilterPopoverProps): JSX.Element {
   );
 }
 
-/** The small ▼ filter button that sits on the Column/Row Labels cells. */
+/** The small ▼ filter button on Column Labels (E3) / Row Labels (A4). */
 function FilterButton({ active, onClick }: { active: boolean; onClick: () => void }): JSX.Element {
   return (
     <button
@@ -131,10 +168,25 @@ function FilterButton({ active, onClick }: { active: boolean; onClick: () => voi
 
 export function PivotTable({ pivot, fullPivot, colorByEstimator, view, onViewChange }: PivotTableProps): JSX.Element {
   const [openPopover, setOpenPopover] = useState<'col' | 'row' | null>(null);
+  // View-only collapse — never affects totals, export, or other tabs.
+  const [collapsedCrew, setCollapsedCrew] = useState<ReadonlySet<string>>(new Set());
+  const [collapsedEmp, setCollapsedEmp] = useState<ReadonlySet<string>>(new Set());
+  const [collapsedJob, setCollapsedJob] = useState<ReadonlySet<string>>(new Set());
+
+  const toggleKey = (
+    setter: Dispatch<SetStateAction<ReadonlySet<string>>>,
+    key: string,
+  ): void => {
+    setter((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
 
   const estCols = pivot.estimators;
   const totalCols = 4 + estCols.length + 1;
-  // "Hours" sits over the middle of the estimator block (no merge).
   const hoursIdx = Math.floor((estCols.length - 1) / 2);
 
   const allEstimators = fullPivot.estimators;
@@ -142,6 +194,15 @@ export function PivotTable({ pivot, fullPivot, colorByEstimator, view, onViewCha
   const allUsernames = [
     ...new Set(fullPivot.crews.flatMap((c) => c.employees.map((e) => e.username))),
   ].sort((a, b) => a.localeCompare(b, 'en', { sensitivity: 'base' }));
+  const painterLabels = new Map<string, string>();
+  for (const c of fullPivot.crews) {
+    for (const e of c.employees) {
+      if (!painterLabels.has(e.username)) {
+        const name = `${e.fname} ${e.lname}`.trim();
+        painterLabels.set(e.username, name || e.username);
+      }
+    }
+  }
 
   const toggleList = (list: string[], item: string, checked: boolean): string[] =>
     checked ? list.filter((x) => x !== item) : list.includes(item) ? list : [...list, item];
@@ -172,7 +233,6 @@ export function PivotTable({ pivot, fullPivot, colorByEstimator, view, onViewCha
       )}
       <table className="w-max min-w-full border-collapse bg-white text-xs">
         <thead>
-          {/* Black title block (rows 1–3), mirroring the exported sheet. */}
           <tr>
             <th className="xcell2 text-left text-base font-bold" style={BLACK_BAND} colSpan={totalCols}>
               {pivot.title}
@@ -201,7 +261,7 @@ export function PivotTable({ pivot, fullPivot, colorByEstimator, view, onViewCha
             <th className="xcell2" style={BLACK_BAND} />
             <th className="xcell2" style={BLACK_BAND} />
             <th className="xcell2" style={BLACK_BAND} />
-            {/* §2.1 — Column Labels filter button (E3 position). */}
+            {/* Estimator column filter — Excel E3 "Column Labels". */}
             <th className="xcell2 relative text-left" style={BLACK_BAND} colSpan={estCols.length + 1}>
               Column Labels
               <FilterButton
@@ -226,12 +286,11 @@ export function PivotTable({ pivot, fullPivot, colorByEstimator, view, onViewCha
               )}
             </th>
           </tr>
-          {/* Row 4: gray labels + palette-colored estimator headers. */}
           <tr>
+            {/* Painter / crew row filter — Excel A4 "Row Labels". */}
             <th className="xcell2 sticky top-0 z-10 min-w-[220px] text-left" style={HEADER_GRAY}>
               <span className="relative inline-flex items-center">
                 Row Labels
-                {/* §2.2 — Row Labels filter button (A4 position). */}
                 <FilterButton
                   active={view.hiddenGroups.length > 0 || view.hiddenUsernames.length > 0 || view.rowSort !== 'none'}
                   onClick={() => setOpenPopover(openPopover === 'row' ? null : 'row')}
@@ -239,6 +298,7 @@ export function PivotTable({ pivot, fullPivot, colorByEstimator, view, onViewCha
                 {openPopover === 'row' && (
                   <FilterPopover
                     items={view.rowField === 'group' ? allGroups : allUsernames}
+                    labels={view.rowField === 'username' ? painterLabels : undefined}
                     hidden={new Set(view.rowField === 'group' ? view.hiddenGroups : view.hiddenUsernames)}
                     sort={view.rowSort}
                     field={view.rowField}
@@ -286,16 +346,25 @@ export function PivotTable({ pivot, fullPivot, colorByEstimator, view, onViewCha
           </tr>
         </thead>
         <tbody>
-          {pivot.crews.map((crew) => (
-            <CrewRows
-              key={crew.crew}
-              crew={crew}
-              estCols={estCols}
-              totalCols={totalCols}
-              colorByEstimator={colorByEstimator}
-              hoursCells={hoursCells}
-            />
-          ))}
+          {pivot.crews.map((crew) => {
+            const crewOpen = !collapsedCrew.has(crew.crew);
+            return (
+              <CrewRows
+                key={crew.crew}
+                crew={crew}
+                crewOpen={crewOpen}
+                onToggleCrew={() => toggleKey(setCollapsedCrew, crew.crew)}
+                collapsedEmp={collapsedEmp}
+                onToggleEmp={(key) => toggleKey(setCollapsedEmp, key)}
+                collapsedJob={collapsedJob}
+                onToggleJob={(key) => toggleKey(setCollapsedJob, key)}
+                estCols={estCols}
+                totalCols={totalCols}
+                colorByEstimator={colorByEstimator}
+                hoursCells={hoursCells}
+              />
+            );
+          })}
           <tr>
             <td className="xcell font-bold" style={GRAND_GRAY}>
               Grand Total
@@ -320,12 +389,24 @@ export function PivotTable({ pivot, fullPivot, colorByEstimator, view, onViewCha
 
 function CrewRows({
   crew,
+  crewOpen,
+  onToggleCrew,
+  collapsedEmp,
+  onToggleEmp,
+  collapsedJob,
+  onToggleJob,
   estCols,
   totalCols,
   colorByEstimator,
   hoursCells,
 }: {
   crew: PivotModel['crews'][number];
+  crewOpen: boolean;
+  onToggleCrew: () => void;
+  collapsedEmp: ReadonlySet<string>;
+  onToggleEmp: (key: string) => void;
+  collapsedJob: ReadonlySet<string>;
+  onToggleJob: (key: string) => void;
   estCols: string[];
   totalCols: number;
   colorByEstimator: ReadonlyMap<string, string>;
@@ -333,32 +414,54 @@ function CrewRows({
 }): JSX.Element {
   return (
     <>
-      {/* Crew-lead row: full-width black band, overrides the column bands. */}
       <tr>
         <td className="xcell" style={BLACK_BAND} colSpan={totalCols}>
-          {crew.crew}
+          <span className="inline-flex items-center">
+            <CollapseToggle open={crewOpen} onClick={onToggleCrew} label={crew.crew} light />
+            {crew.crew}
+          </span>
         </td>
       </tr>
-      {crew.employees.map((emp) => (
-        <EmployeeRows
-          key={`${crew.crew}-${emp.username}-${emp.lname}`}
-          emp={emp}
-          estCols={estCols}
-          colorByEstimator={colorByEstimator}
-          hoursCells={hoursCells}
-        />
-      ))}
+      {crewOpen &&
+        crew.employees.map((emp) => {
+          const empKey = `${crew.crew}\u0000${emp.username}`;
+          const empOpen = !collapsedEmp.has(empKey);
+          return (
+            <EmployeeRows
+              key={empKey}
+              emp={emp}
+              empKey={empKey}
+              empOpen={empOpen}
+              onToggleEmp={() => onToggleEmp(empKey)}
+              collapsedJob={collapsedJob}
+              onToggleJob={onToggleJob}
+              estCols={estCols}
+              colorByEstimator={colorByEstimator}
+              hoursCells={hoursCells}
+            />
+          );
+        })}
     </>
   );
 }
 
 function EmployeeRows({
   emp,
+  empKey,
+  empOpen,
+  onToggleEmp,
+  collapsedJob,
+  onToggleJob,
   estCols,
   colorByEstimator,
   hoursCells,
 }: {
   emp: PivotModel['crews'][number]['employees'][number];
+  empKey: string;
+  empOpen: boolean;
+  onToggleEmp: () => void;
+  collapsedJob: ReadonlySet<string>;
+  onToggleJob: (key: string) => void;
   estCols: string[];
   colorByEstimator: ReadonlyMap<string, string>;
   hoursCells: (byEstimator: Record<string, number>, cls?: string) => JSX.Element[];
@@ -366,47 +469,100 @@ function EmployeeRows({
   const emptyBand = estCols.map((e) => (
     <td key={e} className="xcell" style={bandStyle(colorByEstimator.get(e))} />
   ));
-  // §2.4 — the thin separator sits on the TOP edge of the "X Total" row (the
-  // line between the last job row and the total), from C through Grand Total.
   const totalCls = 'xcell font-bold';
   const totalBorderCls = 'xcell border-t-2 border-t-neutral-400 font-bold';
   return (
     <>
       <tr>
-        <td className="xcell font-bold">{emp.username}</td>
-        <td className="xcell font-bold">{emp.fname}</td>
-        <td className="xcell font-bold">{emp.lname}</td>
+        <td className="xcell font-bold">
+          <span className="inline-flex items-center">
+            <CollapseToggle open={empOpen} onClick={onToggleEmp} label={emp.username} />
+            {emp.username}
+          </span>
+        </td>
+        <td className="xcell font-bold">
+          <span className="inline-flex items-center">
+            <CollapseToggle open={empOpen} onClick={onToggleEmp} label={emp.fname || 'fname'} />
+            {emp.fname}
+          </span>
+        </td>
+        <td className="xcell font-bold">
+          <span className="inline-flex items-center">
+            <CollapseToggle open={empOpen} onClick={onToggleEmp} label={emp.lname || 'lname'} />
+            {emp.lname}
+          </span>
+        </td>
         <td className="xcell" />
         {emptyBand}
         <td className="xcell" style={GT_BAND} />
       </tr>
-      {emp.jobs.map((job) => (
-        <tr key={`${job.customer}\u0000${job.job}`}>
-          <td className="xcell" />
-          <td className="xcell" />
-          <td className="xcell font-bold">{job.customer}</td>
-          <td className="xcell">{job.job}</td>
-          {hoursCells(job.byEstimator)}
-          <td className="xcell text-right" style={GT_BAND}>
-            {fmtHoursFixed(job.total)}
+      {empOpen &&
+        emp.jobs.map((job) => {
+          const jobKey = `${empKey}\u0000${job.customer}\u0000${job.job}`;
+          const jobOpen = !collapsedJob.has(jobKey);
+          if (!jobOpen) {
+            return (
+              <tr key={jobKey}>
+                <td className="xcell" />
+                <td className="xcell" />
+                <td className="xcell font-bold">
+                  <span className="inline-flex items-center">
+                    <CollapseToggle open={false} onClick={() => onToggleJob(jobKey)} label={job.customer} />
+                    {job.customer}
+                  </span>
+                </td>
+                <td className="xcell">
+                  <span className="inline-flex items-center">
+                    <CollapseToggle open={false} onClick={() => onToggleJob(jobKey)} label={job.job} />
+                    {job.job}
+                  </span>
+                </td>
+                {estCols.map((e) => (
+                  <td key={e} className="xcell" style={bandStyle(colorByEstimator.get(e))} />
+                ))}
+                <td className="xcell" style={GT_BAND} />
+              </tr>
+            );
+          }
+          return (
+            <tr key={jobKey}>
+              <td className="xcell" />
+              <td className="xcell" />
+              <td className="xcell font-bold">
+                <span className="inline-flex items-center">
+                  <CollapseToggle open={jobOpen} onClick={() => onToggleJob(jobKey)} label={job.customer} />
+                  {job.customer}
+                </span>
+              </td>
+              <td className="xcell">
+                <span className="inline-flex items-center">
+                  <CollapseToggle open={jobOpen} onClick={() => onToggleJob(jobKey)} label={job.job} />
+                  {job.job}
+                </span>
+              </td>
+              {hoursCells(job.byEstimator)}
+              <td className="xcell text-right" style={GT_BAND}>
+                {fmtHoursFixed(job.total)}
+              </td>
+            </tr>
+          );
+        })}
+      {empOpen && (
+        <tr>
+          <td className={totalCls} />
+          <td className={totalCls}>{emp.fname} Total</td>
+          <td className={totalBorderCls} />
+          <td className={totalBorderCls} />
+          {hoursCells(emp.byEstimator, totalBorderCls)}
+          <td
+            className={`${totalBorderCls} text-right`}
+            style={emp.overtime ? { ...GT_BAND, backgroundColor: OVERTIME_BG } : GT_BAND}
+            title={emp.overtime ? 'Overtime: grand total exceeds 40 hours (on-screen flag only)' : undefined}
+          >
+            {fmtHoursFixed(emp.total)}
           </td>
         </tr>
-      ))}
-      <tr>
-        <td className={totalCls} />
-        <td className={totalCls}>{emp.fname} Total</td>
-        <td className={totalBorderCls} />
-        <td className={totalBorderCls} />
-        {hoursCells(emp.byEstimator, totalBorderCls)}
-        <td
-          className={`${totalBorderCls} text-right`}
-          // On-screen review aid only (not exported): flag >40h weeks.
-          style={emp.overtime ? { ...GT_BAND, backgroundColor: OVERTIME_BG } : GT_BAND}
-          title={emp.overtime ? 'Overtime: grand total exceeds 40 hours (on-screen flag only)' : undefined}
-        >
-          {fmtHoursFixed(emp.total)}
-        </td>
-      </tr>
+      )}
     </>
   );
 }

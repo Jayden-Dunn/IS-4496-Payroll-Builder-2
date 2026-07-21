@@ -295,31 +295,18 @@ export function loadSavedDirectory(): SavedDirectory | null {
   try {
     const raw = localStorage.getItem(DIRECTORY_KEY);
     if (!raw) return null;
-    const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== 'object' || parsed === null) return null;
-    const p = parsed as Record<string, unknown>;
-    if (!Array.isArray(p.employees)) return null;
-    const employees: DirectoryEmployee[] = [];
-    for (const e of p.employees) {
-      const x = e as { fullName?: unknown; firstName?: unknown; lastName?: unknown; active?: unknown };
-      if (typeof x.fullName !== 'string' || x.fullName.trim() === '') continue;
-      employees.push({
-        fullName: x.fullName,
-        firstName: typeof x.firstName === 'string' ? x.firstName : '',
-        lastName: typeof x.lastName === 'string' ? x.lastName : '',
-        active: x.active !== false,
-      });
-    }
-    if (employees.length === 0) return null;
-    return {
-      employees,
-      sourceFilename: typeof p.sourceFilename === 'string' ? p.sourceFilename : '',
-      uploadedAt: typeof p.uploadedAt === 'string' ? p.uploadedAt : '',
-      activeCount: employees.filter((e) => e.active).length,
-      inactiveCount: employees.filter((e) => !e.active).length,
-    };
+    return parseSavedDirectory(JSON.parse(raw));
   } catch {
     return null;
+  }
+}
+
+/** Write an already-built SavedDirectory into this browser's localStorage (keeps uploadedAt). */
+export function cacheDirectoryLocally(saved: SavedDirectory): void {
+  try {
+    localStorage.setItem(DIRECTORY_KEY, JSON.stringify(saved));
+  } catch {
+    // localStorage unavailable
   }
 }
 
@@ -331,17 +318,82 @@ export function saveDirectory(employees: DirectoryEmployee[], sourceFilename: st
     activeCount: employees.filter((e) => e.active).length,
     inactiveCount: employees.filter((e) => !e.active).length,
   };
-  try {
-    localStorage.setItem(DIRECTORY_KEY, JSON.stringify(saved));
-  } catch {
-    // localStorage unavailable — the directory just won't persist.
-  }
+  cacheDirectoryLocally(saved);
   return saved;
 }
 
 export function clearSavedDirectory(): void {
   try {
     localStorage.removeItem(DIRECTORY_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+/** Parse/validate a SavedDirectory payload (localStorage or app file). */
+export function parseSavedDirectory(raw: unknown): SavedDirectory | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const p = raw as Record<string, unknown>;
+  if (!Array.isArray(p.employees)) return null;
+  const employees: DirectoryEmployee[] = [];
+  for (const e of p.employees) {
+    const x = e as { fullName?: unknown; firstName?: unknown; lastName?: unknown; active?: unknown };
+    if (typeof x.fullName !== 'string' || x.fullName.trim() === '') continue;
+    employees.push({
+      fullName: x.fullName,
+      firstName: typeof x.firstName === 'string' ? x.firstName : '',
+      lastName: typeof x.lastName === 'string' ? x.lastName : '',
+      active: x.active !== false,
+    });
+  }
+  if (employees.length === 0) return null;
+  return {
+    employees,
+    sourceFilename: typeof p.sourceFilename === 'string' ? p.sourceFilename : '',
+    uploadedAt: typeof p.uploadedAt === 'string' ? p.uploadedAt : '',
+    activeCount: employees.filter((e) => e.active).length,
+    inactiveCount: employees.filter((e) => !e.active).length,
+  };
+}
+
+/** Prefer the newer of two saved directories by `uploadedAt`. */
+export function newerDirectory(a: SavedDirectory | null, b: SavedDirectory | null): SavedDirectory | null {
+  if (!a) return b;
+  if (!b) return a;
+  return (a.uploadedAt || '') >= (b.uploadedAt || '') ? a : b;
+}
+
+/**
+ * Load the app-permanent employee list from `public/employee-directory.json`
+ * (same file every device sees when hitting this server / built dist).
+ */
+export async function fetchAppDirectory(): Promise<SavedDirectory | null> {
+  try {
+    const res = await fetch('/employee-directory.json', { cache: 'no-store' });
+    if (!res.ok) return null;
+    return parseSavedDirectory(await res.json());
+  } catch {
+    return null;
+  }
+}
+
+/** Write the current list into the app file (dev server API). Falls back silently offline. */
+export async function persistAppDirectory(saved: SavedDirectory): Promise<boolean> {
+  try {
+    const res = await fetch('/api/employee-directory', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(saved),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function clearAppDirectory(): Promise<void> {
+  try {
+    await fetch('/api/employee-directory', { method: 'DELETE' });
   } catch {
     // ignore
   }

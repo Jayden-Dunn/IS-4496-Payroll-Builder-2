@@ -286,7 +286,7 @@ export function SettingsModal({
             <input className="w-16 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs" value={pwMin} onChange={(e) => setPwMin(e.target.value)} />
           </div>
 
-          <SectionTitle sub="Round 4 §4.2 — the parsed Employee Name List persists in this browser. Replacing it re-runs crew-lead resolution and the related exceptions.">
+          <SectionTitle sub="The current Employee Name List is saved into the app (shared by every device on this server) and kept in this browser. Replacing it updates the saved date and re-runs crew-lead resolution.">
             Employee Directory
           </SectionTitle>
           {directory ? (
@@ -295,7 +295,10 @@ export function SettingsModal({
                 ✓ {directory.activeCount} active / {directory.inactiveCount} inactive
               </div>
               <div className="mt-0.5 text-neutral-500">
-                {directory.sourceFilename} · saved {new Date(directory.uploadedAt).toLocaleDateString()}
+                {directory.sourceFilename} · updated{' '}
+                {directory.uploadedAt
+                  ? new Date(directory.uploadedAt).toLocaleString()
+                  : '—'}
               </div>
             </div>
           ) : (

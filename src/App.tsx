@@ -31,10 +31,15 @@ import { buildPivot } from './lib/pivot';
 import { buildPivotByJob, EMPTY_MANUAL_STATE, type ManualSectionState } from './lib/pivotByJob';
 import { applyPivotView, EMPTY_PIVOT_VIEW, isPivotViewActive, type PivotViewState } from './lib/pivotView';
 import {
+  cacheDirectoryLocally,
+  clearAppDirectory,
   clearSavedDirectory,
   ensureDefaultPivotColumns,
+  fetchAppDirectory,
   loadSavedDirectory,
   loadSettings,
+  newerDirectory,
+  persistAppDirectory,
   saveDirectory,
   saveSettings,
 } from './lib/settings';
@@ -80,10 +85,21 @@ const SLOT_DEFS: SlotDef[] = [
   { id: 'nvSummary', label: '4 · NV Sales by Customer Summary', hint: 'Job totals (Nevada)' },
   { id: 'utSales', label: '5 · UT Transaction List by Date', hint: 'AllPro Painters LLC (Utah)' },
   { id: 'utSummary', label: '6 · UT Sales by Customer Summary', hint: 'Job totals (Utah)' },
-  { id: 'lastWeek', label: '7 · Last week\u2019s % of Completion', hint: 'Last % Paid + Balances/UT carry-forward', optional: true },
-  { id: 'pl', label: '8 · P&L by Customer (QBO)', hint: 'Required for the payroll tabs', optional: true },
+  { id: 'lastWeek', label: '7 · Last week\u2019s % of Completion', hint: 'Last % Paid + Balances/UT carry-forward' },
+  { id: 'pl', label: '8 · P&L by Customer (QBO)', hint: 'Required for the payroll tabs' },
   // Round 5 §1 — Employee Name List lives in Settings only (never in the rail).
 ];
+
+const SLOT_LABELS: Record<Exclude<SlotId, 'employees'>, string> = {
+  timesheet: '1 · QuickBooks Time timesheet',
+  timenavi: '2 · TimeNavi calendar export',
+  nvSales: '3 · NV Sales by Rep Detail',
+  nvSummary: '4 · NV Sales by Customer Summary',
+  utSales: '5 · UT Transaction List by Date',
+  utSummary: '6 · UT Sales by Customer Summary',
+  lastWeek: '7 · Last week\u2019s % of Completion',
+  pl: '8 · P&L by Customer (QBO)',
+};
 
 /** Slots shown in the left rail (1–8). `employees` is Settings-only. */
 const RAIL_SLOTS = SLOT_DEFS;
@@ -145,8 +161,27 @@ export default function App(): JSX.Element {
   // Round 4 §2 — Pivot by Crew view-level filters (start cleared each session).
   const [pivotView, setPivotView] = useState<PivotViewState>({ ...EMPTY_PIVOT_VIEW });
   const [exportFiltered, setExportFiltered] = useState(false);
-  // Round 4 §4.2 — the persisted employee directory.
+  // Round 4 §4.2 / Round 6 — employee directory (localStorage + app file).
   const [savedDirectory, setSavedDirectory] = useState<SavedDirectory | null>(() => loadSavedDirectory());
+  const [missingInputWarning, setMissingInputWarning] = useState<string[] | null>(null);
+
+  // Prefer the newer of browser localStorage vs the app-permanent JSON file so
+  // phone + desktop hitting the same server share one current list + date.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const remote = await fetchAppDirectory();
+      if (cancelled) return;
+      const local = loadSavedDirectory();
+      const best = newerDirectory(local, remote);
+      if (!best) return;
+      setSavedDirectory(best);
+      cacheDirectoryLocally(best);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // ------------------------------------------------------------------ uploads
 
@@ -224,7 +259,9 @@ export default function App(): JSX.Element {
           const directory = parseEmployeeList(wbd);
           const active = directory.filter((d) => d.active).length;
           ok(`✓ ${active} active / ${directory.length - active} inactive`, { directory });
-          setSavedDirectory(saveDirectory(directory, file.name));
+          const saved = saveDirectory(directory, file.name);
+          setSavedDirectory(saved);
+          void persistAppDirectory(saved);
           break;
         }
       }
@@ -233,13 +270,22 @@ export default function App(): JSX.Element {
     }
   }, []);
 
-  const ready =
-    parsed.timesheet !== null &&
-    parsed.events !== null &&
-    parsed.nvSales !== null &&
-    parsed.nvTotals !== null &&
-    parsed.utSales !== null &&
-    parsed.utTotals !== null;
+  const missingInputs = useMemo((): string[] => {
+    const checks: [Exclude<SlotId, 'employees'>, boolean][] = [
+      ['timesheet', parsed.timesheet !== null],
+      ['timenavi', parsed.events !== null],
+      ['nvSales', parsed.nvSales !== null],
+      ['nvSummary', parsed.nvTotals !== null],
+      ['utSales', parsed.utSales !== null],
+      ['utSummary', parsed.utTotals !== null],
+      ['lastWeek', parsed.lastWeek !== null],
+      ['pl', parsed.pl !== null],
+    ];
+    return checks.filter(([, ok]) => !ok).map(([id]) => SLOT_LABELS[id]);
+  }, [parsed]);
+
+  /** All eight weekly inputs present — required before Create Report proceeds. */
+  const ready = missingInputs.length === 0;
 
   // ------------------------------------------------------------------ derived
 
@@ -542,12 +588,14 @@ export default function App(): JSX.Element {
     setSettingsOpen(false);
   }, []);
 
-  // §4.2 — replace / clear the persisted employee directory from Settings.
+  // §4.2 — replace / clear the employee directory (localStorage + app file).
   const onDirectoryReplace = useCallback(async (file: File): Promise<string | null> => {
     try {
       const wbd = readWorkbook(await file.arrayBuffer());
       const directory = parseEmployeeList(wbd);
-      setSavedDirectory(saveDirectory(directory, file.name));
+      const saved = saveDirectory(directory, file.name);
+      setSavedDirectory(saved);
+      await persistAppDirectory(saved);
       setParsed((p) => ({ ...p, directory }));
       const active = directory.filter((d) => d.active).length;
       setChips((c) => ({
@@ -562,10 +610,21 @@ export default function App(): JSX.Element {
 
   const onDirectoryClear = useCallback((): void => {
     clearSavedDirectory();
+    void clearAppDirectory();
     setSavedDirectory(null);
     setParsed((p) => ({ ...p, directory: null }));
     setChips((c) => ({ ...c, employees: EMPTY_CHIP }));
   }, []);
+
+  const onCreateReport = useCallback((): void => {
+    if (missingInputs.length > 0) {
+      setMissingInputWarning(missingInputs);
+      return;
+    }
+    setMissingInputWarning(null);
+    setCreated(true);
+    setTab('timenavi');
+  }, [missingInputs]);
 
   // ------------------------------------------------------------------ render
 
@@ -614,8 +673,10 @@ export default function App(): JSX.Element {
               <>
                 <span className="font-semibold">Employee list:</span>
                 <span>
-                  ✓ {savedDirectory.activeCount} active / {savedDirectory.inactiveCount} inactive · saved{' '}
-                  {new Date(savedDirectory.uploadedAt).toLocaleDateString()}
+                  ✓ {savedDirectory.activeCount} active / {savedDirectory.inactiveCount} inactive · updated{' '}
+                  {savedDirectory.uploadedAt
+                    ? new Date(savedDirectory.uploadedAt).toLocaleString()
+                    : '—'}
                 </span>
               </>
             ) : (
@@ -639,16 +700,40 @@ export default function App(): JSX.Element {
           <button
             type="button"
             className="btn-primary mt-1 py-2.5 text-base"
-            disabled={!ready}
-            title={ready ? 'Build both output tables' : 'Upload files 1–6 first'}
-            onClick={() => {
-              setCreated(true);
-              setTab('timenavi');
-            }}
+            title={ready ? 'Build the report tables' : 'Upload all inputs 1–8 first'}
+            onClick={onCreateReport}
           >
             Create Report
           </button>
         </aside>
+
+        {missingInputWarning && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="missing-inputs-title"
+          >
+            <div className="w-full max-w-md rounded-lg border border-neutral-300 bg-white p-5 shadow-xl">
+              <h2 id="missing-inputs-title" className="mb-2 text-base font-bold text-neutral-900">
+                Missing inputs
+              </h2>
+              <p className="mb-3 text-xs text-neutral-600">
+                Upload every file below before creating the report. Slots 1–8 are all required.
+              </p>
+              <ul className="mb-4 list-inside list-disc space-y-1 text-xs text-red-700">
+                {missingInputWarning.map((label) => (
+                  <li key={label}>{label}</li>
+                ))}
+              </ul>
+              <div className="flex justify-end">
+                <button type="button" className="btn-primary px-4 py-1.5 text-sm" onClick={() => setMissingInputWarning(null)}>
+                  OK
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Main area — tabs */}
         <main className="flex min-w-0 flex-1 flex-col">
@@ -760,8 +845,8 @@ function Placeholder({ ready }: { ready: boolean }): JSX.Element {
         <h2 className="mb-1 text-base font-bold">Build the weekly % of Completion report</h2>
         <p className="text-xs leading-relaxed text-neutral-500">
           {ready
-            ? 'All required files parsed. Press Create Report to build the TimeNavi Export and Pivot by Crew tables.'
-            : 'Upload files 1–6 on the left (file 7 is optional), check the pay date, then press Create Report. You can edit AP#, % Completion, Estimator, Apptivo $ and include/exclude rows afterwards — both tables and the exceptions list recompute live.'}
+            ? 'Press "Create Report" to build the tables for each item listed in the navigation menu above'
+            : 'Upload files 1–8 on the left, check the pay date, then press Create Report. You can edit AP#, % Completion, Estimator, Apptivo $ and include/exclude rows afterwards — both tables and the exceptions list recompute live.'}
         </p>
       </div>
     </div>

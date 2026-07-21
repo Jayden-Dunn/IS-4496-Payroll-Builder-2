@@ -1,6 +1,6 @@
 import { useState, type CSSProperties } from 'react';
-import { fmtAccounting, fmtDate, fmtHoursFixed, fmtPercent, isDarkColor, parseMoneyInput, parsePercentInput } from '../lib/format';
-import { weekdayShort } from '../lib/pivotByJob';
+import { fmtAccounting, fmtHoursFixed, fmtPercent, isDarkColor, parseMoneyInput, parsePercentInput } from '../lib/format';
+import { fmtMonthDay, weekdayShort } from '../lib/pivotByJob';
 import type { ManualSectionRow, PbjJobEdit, PivotByJobModel } from '../lib/types';
 
 interface PivotByJobTableProps {
@@ -120,7 +120,7 @@ export function PivotByJobTable(props: PivotByJobTableProps): JSX.Element {
     return (
       <>
         <th className={`xcell2 ${stickyCls} min-w-[76px] text-center`} style={BLACK}>AP#</th>
-        <th className={`xcell2 ${stickyCls} min-w-[72px] text-center`} style={BLACK}>On Calendar?</th>
+        <th className={`xcell2 ${stickyCls} min-w-[136px] text-center`} style={BLACK}>On Calendar?</th>
         <th className={`xcell2 ${stickyCls} min-w-[64px] text-center`} style={BLACK}>Estimator</th>
         <th className={`xcell2 ${stickyCls} min-w-[220px] text-center`} style={BLACK}>Crew Lead</th>
         <th className={`xcell2 ${stickyCls} min-w-[110px] text-center`} style={BLACK}>WO Override</th>
@@ -139,14 +139,14 @@ export function PivotByJobTable(props: PivotByJobTableProps): JSX.Element {
     <div className="p-2">
       <table className="w-max min-w-full border-collapse bg-white text-xs">
         <thead>
-          {/* Round 5 §3.1 — row 1 only: title, m/d/yyyy dates, Total hrs, analysis. */}
+          {/* Round 5 §3.1 / Round 6 — row 1: title, short m/d dates, Total hrs, analysis. */}
           <tr>
             <th className="xcell2 sticky top-0 z-10 min-w-[260px] text-left text-base font-bold" style={BLACK}>
               {model.title}
             </th>
             {model.dates.map((d) => (
               <th key={d.getTime()} className="xcell2 sticky top-0 z-10 min-w-[72px] text-center font-bold" style={BLACK}>
-                {fmtDate(d)}
+                {fmtMonthDay(d)}
               </th>
             ))}
             {model.dateIsos.length > model.dates.length && (
@@ -450,7 +450,7 @@ function ManualSection({
           </th>
           {model.dates.map((d) => (
             <th key={d.getTime()} className="xcell2 text-center font-bold" style={BLACK}>
-              {fmtDate(d)}
+              {fmtMonthDay(d)}
             </th>
           ))}
           {model.dateIsos.length > model.dates.length && <th className="xcell2" style={BLACK} />}

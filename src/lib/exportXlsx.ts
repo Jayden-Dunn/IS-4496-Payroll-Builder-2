@@ -377,13 +377,15 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
   const analysisStart = 1 + dateCount + 2 + 1; // first analysis col (AP#)
   const lastCol = analysisStart + 7;
   const pctComplCol = lastCol - 1;
+  // Columns: A · dates · Total · QB Hrs · AP# · On Calendar? · Est · Lead · …
+  // With a 7-date week, L = On Calendar? → width 16.90 (Calibri 12).
   ws.columns = [
     { width: 40 },
     ...model.dateIsos.map(() => ({ width: 10 })),
     { width: 11 },
     { width: 7.6 },
     { width: 10.5 },
-    { width: 12 },
+    { width: 16.9 }, // On Calendar? (column L on a 7-date week)
     { width: 9.4 },
     { width: 43 },
     { width: 23 },
@@ -440,7 +442,8 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
       paint(r1.getCell(c), { fill: BLACK, color, bold: true });
       if (c === 1) paint(r1.getCell(1), { fill: BLACK, color: WHITE, bold: true, size: withDays ? 17 : 16 });
       if (c > 1 && c <= 1 + dateCount && r1.getCell(c).value instanceof Date) {
-        r1.getCell(c).numFmt = 'm/d/yyyy';
+        // Round 6 — short date in B1–H1 (no year), e.g. 6/27.
+        r1.getCell(c).numFmt = 'm/d';
         r1.getCell(c).alignment = { horizontal: 'center' };
       }
     }
