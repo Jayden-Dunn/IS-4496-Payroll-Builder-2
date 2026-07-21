@@ -4,13 +4,22 @@
  * the %'s Exceptions panel.
  */
 import { fmtHours } from './format';
+import {
+  carryDisplayMap,
+  jobDisplayPair,
+  salesDisplayMap,
+  timesheetDisplayMap,
+} from './jobNames';
+import type { LastWeekPbjRow } from './parsers';
 import type {
+  EnrichedTimesheetRow,
   ExceptionGroup,
   ExceptionItem,
   PayrollPreviewModel,
   PivotByJobModel,
   PlParseResult,
   ReportRow,
+  SalesRow,
 } from './types';
 
 export interface PayrollExceptionsInput {
@@ -22,6 +31,11 @@ export interface PayrollExceptionsInput {
   hasDirectory: boolean;
   /** Threshold under which Total Profit Share raises a review item (§6.7). */
   psThreshold?: number;
+  /** Round 5 §4 — naming-chain inputs for the informational AP#/unresolved flags. */
+  enriched?: EnrichedTimesheetRow[];
+  nvSales?: readonly SalesRow[] | null;
+  utSales?: readonly SalesRow[] | null;
+  lastWeekPbj?: LastWeekPbjRow[] | null;
 }
 
 const PS_THRESHOLD_DEFAULT = 25;
@@ -65,7 +79,7 @@ export function buildPayrollExceptions(input: PayrollExceptionsInput): Exception
       title: 'Crew-lead resolution',
       note: input.hasDirectory
         ? 'Raw parenthetical shown; fix the Crew Lead cell on Pivot by Job.'
-        : 'Employee Name List (slot 9) not uploaded — resolution used timesheet names only.',
+        : 'Employee Name List not saved in Settings — resolution used timesheet names only.',
       items,
     });
   }
@@ -271,6 +285,52 @@ export function buildPayrollExceptions(input: PayrollExceptionsInput): Exception
       title: 'Balances / UT carry-forward attention',
       note: 'Rows carried from last week that look fully paid or matched nothing this week.',
       items,
+    });
+  }
+
+  // 12 (Round 5 §4). Naming-chain informational flags.
+  {
+    const baseKeyItems: ExceptionItem[] = [];
+    const unresolvedItems: ExceptionItem[] = [];
+    const sources = {
+      timesheetByAp: timesheetDisplayMap(input.enriched ?? []),
+      carryByAp: carryDisplayMap(input.lastWeekPbj),
+      salesByAp: salesDisplayMap(input.nvSales, input.utSales),
+      pl,
+    };
+    const seen = new Set<string>();
+    const consider = (apKey: string | null | undefined, eventTitle?: string): void => {
+      if (!apKey || apKey === 'OFFICE' || seen.has(apKey)) return;
+      seen.add(apKey);
+      const pair = jobDisplayPair(apKey, { ...sources, eventTitle });
+      if (pair.usedBaseKey) {
+        baseKeyItems.push({
+          message: `AP ${apKey} — suffix not found in QBO; names derived from base AP# (${pair.poLabel} / ${pair.customerName || '—'})`,
+        });
+      }
+      if (pair.unresolved) {
+        unresolvedItems.push({ message: `AP ${apKey} — job name unresolved` });
+      }
+    };
+    for (const { job } of jobs) consider(job.analysis.apKey);
+    for (const r of [...pbj.balances, ...pbj.utPayroll]) consider(r.apKey);
+    for (const r of included) {
+      if (r.apKey && !seen.has(r.apKey)) consider(r.apKey, r.event);
+    }
+    for (const lead of preview.leads) {
+      for (const j of lead.jobs) consider(j.apKey);
+    }
+    groups.push({
+      key: 'apSuffixBaseKey',
+      title: 'AP# suffix not found in QBO; names derived from base AP#',
+      note: 'A suffixed calendar AP# missed the sales lookup; display names came from the base number. Edit the AP# cell if the suffix is wrong.',
+      items: baseKeyItems,
+    });
+    groups.push({
+      key: 'jobNameUnresolved',
+      title: 'Job name unresolved',
+      note: 'No timesheet, carry-forward, QBO, or P&L name was found — the PO shows AP{key} with a blank customer.',
+      items: unresolvedItems,
     });
   }
 

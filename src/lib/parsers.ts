@@ -602,13 +602,19 @@ export function parsePl(wbd: WorkbookData): PlParseResult {
   const headerRow = sheet.rows[incomeRow - 1];
 
   // Job columns: header matches the AP regex; "Total …" and customer columns
-  // without an AP are skipped (they roll up jobs anyway).
-  const jobCols: { col: number; apKey: string; header: string }[] = [];
+  // without an AP are skipped (they roll up jobs anyway). Track the nearest
+  // preceding customer header for Round 5 §4 step 5 naming.
+  const jobCols: { col: number; apKey: string; header: string; customerName: string }[] = [];
+  let lastCustomer = '';
   for (let c = 1; c < headerRow.length; c++) {
     const h = asString(headerRow[c]);
     if (!h || /^total\b/i.test(h)) continue;
     const apKey = extractApKey(h);
-    if (apKey) jobCols.push({ col: c, apKey, header: h });
+    if (apKey) {
+      jobCols.push({ col: c, apKey, header: h, customerName: lastCustomer });
+    } else {
+      lastCustomer = h;
+    }
   }
   if (jobCols.length === 0) {
     throw new Error('No job columns (headers containing an AP number) found on the P&L header row.');
@@ -642,6 +648,7 @@ export function parsePl(wbd: WorkbookData): PlParseResult {
       mileage: valueAt('mileage expense', jc.col),
       sundries: valueAt('sundries -', jc.col),
       plJobHeader: jc.header,
+      customerName: jc.customerName,
     };
     const existing = byJob.get(jc.apKey);
     if (existing) {
@@ -654,6 +661,7 @@ export function parsePl(wbd: WorkbookData): PlParseResult {
         mileage: existing.mileage + metrics.mileage,
         sundries: existing.sundries + metrics.sundries,
         plJobHeader: existing.plJobHeader,
+        customerName: existing.customerName || metrics.customerName,
       });
     } else {
       byJob.set(jc.apKey, metrics);

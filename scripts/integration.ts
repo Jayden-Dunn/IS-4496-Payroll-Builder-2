@@ -519,6 +519,11 @@ const pbj = buildPivotByJob({
   lastWeekPbj,
   balancesState: EMPTY_MANUAL_STATE,
   utState: EMPTY_MANUAL_STATE,
+  pl,
+  nvTotals,
+  utTotals,
+  nvSales,
+  utSales,
 });
 check('pbj title', pbj.title, 'NV PAYROLL: 7/10/2026');
 check('pbj distinct dates ascending (5, not assumed 7)', pbj.dates.map((d) => d.getDate()), [29, 30, 1, 2, 3]);
@@ -531,13 +536,15 @@ check(
 const pbjJob = (ap: string) => pbj.customers.flatMap((c) => c.jobs).find((j) => j.analysis.apKey === ap)!;
 const j24314 = pbjJob('24314');
 check('AP# autofilled from jobcode_2', j24314.analysis.apKey, '24314');
-check('On Calendar? = TimeNavi row reference', j24314.analysis.onCalendar, 'TimeNavi row 3');
+check('On Calendar? = bare TimeNavi row number', j24314.analysis.onCalendar, '3');
 check('% of Completion mirrors the grid (pay-date 30%)', j24314.analysis.percent, 0.3);
 check('crew lead resolved from "(Daniel)"', j24314.analysis.crewLead, 'DANIEL GONZALES BONILLA');
 check('WO% defaults from the profit-share map (38%)', j24314.analysis.woPct, 0.38);
+// Round 5 §3.7 — WO Override = income × WO% (650 × 0.38 = 247).
+check('WO Override computed default = income × WO%', j24314.analysis.woOverride, 247);
 check('block colored by estimator (MH yellow)', j24314.colorHex, 'FFFF99');
 const j24403 = pbjJob('24403');
-check('WO Override pre-filled from "PER JODI $4,715.00 … work order"', [j24403.analysis.woOverride, j24403.analysis.woOverrideSource?.includes('PER JODI')], [4715, true]);
+check('WO Override description-$ still wins over computed', [j24403.analysis.woOverride, j24403.analysis.woOverrideSource?.includes('PER JODI')], [4715, true]);
 check('WO% overridden by "@ 40% PS"', j24403.analysis.woPct, 0.4);
 const jOffice = pbjJob('OFFICE');
 check('OFFICE row: -, HOURLY lead, ND dark blue', [jOffice.analysis.onCalendar, jOffice.analysis.estimator, jOffice.analysis.crewLead, jOffice.colorHex, jOffice.analysis.hourly], ['-', '-', 'HOURLY', '4472C4', true]);
@@ -568,8 +575,9 @@ const pbj2 = buildPivotByJob({
   lastWeekPbj,
   balancesState: { added: [], deleted: ['balances:20000'], edits: { 'balances:21848-A5': { notes: 'edited note' } } },
   utState: { added: [{ id: 'manual:ut:1', customer: 'X', job: 'New UT row', apKey: '24999', estimator: '', crewLead: '', woOverride: null, woPct: null, percent: null, notes: '', colorHex: null }], deleted: [], edits: {} },
+  pl, nvTotals, utTotals, nvSales, utSales,
 });
-check('editing an AP# re-runs On Calendar?/%Compl live', [pbj2.customers[0].jobs[0].analysis.onCalendar, pbj2.customers[0].jobs[0].analysis.percent], ['TimeNavi row 5', 0.5]);
+check('editing an AP# re-runs On Calendar?/%Compl live', [pbj2.customers[0].jobs[0].analysis.onCalendar, pbj2.customers[0].jobs[0].analysis.percent], ['5', 0.5]);
 check('QB Hrs override stored on the employee row', pbj2.customers[0].jobs[0].employees[0].qbHours, 42.5);
 check('manual delete removes the seed', pbj2.balances.map((r) => r.apKey), ['21848-A5']);
 check('manual edit applied to a seed', pbj2.balances[0].notes, 'edited note');
@@ -579,6 +587,7 @@ console.log('payroll preview…');
 const preview = buildPayrollPreview({
   pbj, enriched, reportRows: rows, pl, directory, settings, payDate,
   edits: {}, qbHours: {}, knownEstimators, leadCtx,
+  nvSales, utSales, lastWeekPbj,
 })!;
 check('title with week range', preview.title, 'PAYROLL BREAKDOWN 7/10/2026 (6/29 - 7/3)');
 check('painter blocks alphabetical by first name', preview.painters.map((b) => b.employeeName), ['Juan Perez', 'Leonardo Martinez-Rincon']);
@@ -642,6 +651,7 @@ const previewEdited = buildPayrollPreview({
     [`psb:${daniel.key}`]: { reimbursements: 100 },
   },
   qbHours: {}, knownEstimators, leadCtx,
+  nvSales, utSales, lastWeekPbj,
 })!;
 check('net edit stored (taxes = total − net downstream)', previewEdited.painters[1].net, 600);
 const editedJob = previewEdited.leads[0].jobs[1];
@@ -649,7 +659,10 @@ check('percent edit recomputes Total Profit Share', round2(editedJob.totalProfit
 check('reimbursement edit flows into Total Pay', round2(previewEdited.leads[0].totalPay), round2(previewEdited.leads[0].total + 100));
 
 console.log('payroll exceptions…');
-const pGroups = buildPayrollExceptions({ pbj, preview, reportRows: rows, pl, hasDirectory: true });
+const pGroups = buildPayrollExceptions({
+  pbj, preview, reportRows: rows, pl, hasDirectory: true,
+  enriched, nvSales, utSales, lastWeekPbj,
+});
 const pg = (key: string) => pGroups.find((x) => x.key === key)!;
 check('lead resolution flags (not-a-crew-lead ×4 + missing lead on 24500)', pg('leadResolution').items.length, 5);
 check('hours on a job not on the calendar (99999)', pg('hoursNotOnCalendar').items.length, 1);
@@ -675,15 +688,17 @@ async function testExport(): Promise<void> {
     payDate,
     pivotByJob: pbj,
     payrollPreview: preview,
+    percentExceptions: groups,
+    payrollExceptions: pGroups,
   });
   const readBack = new ExcelJS.Workbook();
   await readBack.xlsx.load(buf);
 
-  // Round 4 §4.1/§6 — no Inactive Employees sheet.
+  // Round 5 §6 — six sheets including both exceptions panels.
   check(
-    'sheet names (Round 4: no Inactive Employees)',
+    'sheet names (Round 5: + exceptions sheets)',
     readBack.worksheets.map((w) => w.name),
-    ['TimeNavi Export', 'Pivot by Crew', 'Pivot by Job', 'Payroll Preview'],
+    ['TimeNavi Export', 'Pivot by Crew', 'Pivot by Job', 'Payroll Preview', "%'s Exceptions", 'Payroll Exceptions'],
   );
 
   const tn = readBack.getWorksheet('TimeNavi Export') as ExcelJS.Worksheet;
@@ -708,11 +723,11 @@ async function testExport(): Promise<void> {
   );
   check('hidden column data intact (Description)', String(tn.getCell('G3').value).includes('30% COMPLETE'), true);
   check('other columns not hidden', [1, 8, 14].map((c) => tn.getColumn(c).hidden === true), [false, false, false]);
-  // C-3: reference column widths.
+  // C-3: reference column widths; Round 5 §2.1 — AP# (H) best-fit ≥ 8.
   check(
     'column widths (A, B, G, H, L)',
     [1, 2, 7, 8, 12].map((c) => tn.getColumn(c).width),
-    [60, 11, 13, 6.5, 39],
+    [60, 11, 13, 8, 39],
   );
 
   // Only the 6 included rows are exported; row 2 = JS (24222) after sorting.
@@ -859,9 +874,9 @@ async function testExport(): Promise<void> {
   check('hours cells 0.00', pv.getCell('H7').numFmt, '0.00');
   check('pivot widths (A, D, first est col, GT)', [pv.getColumn(1).width, pv.getColumn(4).width, pv.getColumn(5).width, pv.getColumn(gtColNum).width], [35, 39, 8, 8]);
 
-  // ---------- Pivot by Job (Round 3) ----------
+  // ---------- Pivot by Job (Round 5: two-row header, outline, bare On Calendar?) ----------
   const pj = readBack.getWorksheet('Pivot by Job') as ExcelJS.Worksheet;
-  check('pbj frozen at A5', [pj.views[0].state, (pj.views[0] as { ySplit?: number }).ySplit], ['frozen', 4]);
+  check('pbj frozen at A3', [pj.views[0].state, (pj.views[0] as { ySplit?: number }).ySplit], ['frozen', 2]);
   check('pbj A1 title', pj.getCell('A1').value, 'NV PAYROLL: 7/10/2026');
   check(
     'pbj title black/white 17 bold, height 31.5',
@@ -873,31 +888,48 @@ async function testExport(): Promise<void> {
   const lastColNum = 1 + 5 + 2 + 8;
   check('pbj % of Completion header red', pj.getCell(1, lastColNum - 1).font?.color?.argb, 'FFFF0000');
   check('pbj Notes header dark red', pj.getCell(1, lastColNum).font?.color?.argb, 'FFC00000');
+  check('pbj % of Completion column width', pj.getColumn(lastColNum - 1).width, 15.78);
   // Row 2: computed weekday names (Sunday would be present on an 8-date week).
   check('pbj computed day names', [pj.getCell('B2').value, pj.getCell('F2').value], ['Mon', 'Fri']);
-  check('pbj row 3 chrome', [pj.getCell('A3').value, pj.getCell('B3').value], ['Sum of hours', 'Column Labels']);
-  check('pbj row 4 labels', [pj.getCell('A4').value, pj.getCell('G4').value], ['Row Labels', 'Grand Total']);
-  // Row 5 = Aaron Ward customer row (MH yellow), then the job + employee rows.
-  check('pbj first customer row + MH fill', [pj.getCell('A5').value, fillOf(pj.getCell('A5'))], ['Aaron Ward', 'FFFFFF99']);
-  check('pbj job row analysis: AP#, On Calendar?, lead', [pj.getCell('I6').value, pj.getCell('J6').value, pj.getCell('L6').value], ['24314', 'TimeNavi row 3', 'DANIEL GONZALES BONILLA']);
-  check('pbj job % of Completion 0% format', [pj.getCell('O6').value, pj.getCell('O6').numFmt], [0.3, '0%']);
-  check('pbj hours 0.00 format', pj.getCell('G6').numFmt, '0.00');
+  // Round 5 §3.1 — data begins at row 3; no Sum of hours / Row Labels rows.
+  check('pbj first customer row at row 3 + MH fill', [pj.getCell('A3').value, fillOf(pj.getCell('A3'))], ['Aaron Ward', 'FFFFFF99']);
+  check('pbj no Sum of hours / Column Labels artifact', typeof pj.getCell('A3').value === 'string' && !String(pj.getCell('A3').value).includes('Sum of hours'), true);
+  check('pbj job row analysis: AP#, bare On Calendar?, lead', [pj.getCell('I4').value, pj.getCell('J4').value, pj.getCell('L4').value], ['24314', '3', 'DANIEL GONZALES BONILLA']);
+  check('pbj WO Override computed default exported', pj.getCell('M4').value, 247);
+  check('pbj job % of Completion 0% format', [pj.getCell('O4').value, pj.getCell('O4').numFmt], [0.3, '0%']);
+  check('pbj hours 0.00 format', pj.getCell('G4').numFmt, '0.00');
   check('pbj widths (A, first date, Crew Lead)', [pj.getColumn(1).width, pj.getColumn(2).width, pj.getColumn(12).width], [40, 10, 43]);
-  // Round 4 §3.1 — analysis cells centered (AP# I6 … % of Completion O6), Notes left.
+  // Outline levels: customer 0, job 1, employee 2; summaryAbove.
+  check(
+    'pbj outline levels (customer/job/employee)',
+    [pj.getRow(3).outlineLevel, pj.getRow(4).outlineLevel, pj.getRow(5).outlineLevel],
+    [0, 1, 2],
+  );
+  check('pbj summaryBelow false (summary above)', (pj.properties.outlineProperties as { summaryBelow?: boolean } | undefined)?.summaryBelow, false);
+  // Round 5 §3.5 — thin top+bottom on A through QB Hrs; not on analysis.
+  check(
+    'pbj customer/job hours-band borders',
+    [
+      pj.getCell('A3').border?.top?.style,
+      pj.getCell('H3').border?.bottom?.style,
+      pj.getCell('I3').border?.top?.style ?? null,
+    ],
+    ['thin', 'thin', null],
+  );
   check(
     'pbj analysis cells centered, Notes not',
     [
-      pj.getCell('I6').alignment?.horizontal,
-      pj.getCell('M6').alignment?.horizontal,
-      pj.getCell('O6').alignment?.horizontal,
-      pj.getCell('P6').alignment?.horizontal ?? null,
+      pj.getCell('I4').alignment?.horizontal,
+      pj.getCell('M4').alignment?.horizontal,
+      pj.getCell('O4').alignment?.horizontal,
+      pj.getCell('P4').alignment?.horizontal ?? null,
     ],
     ['center', 'center', 'center', null],
   );
-  // Round 4 §3.2-1 — WO Override in $-accounting (job with a WO value = 24403).
+  // Round 4 §3.2-1 — WO Override in $-accounting.
   let woFmtOk = false;
   pj.eachRow((row) => {
-    const cell = row.getCell(13); // WO Override column (M with 5 dates)
+    const cell = row.getCell(13);
     if (typeof cell.value === 'number' && String(cell.numFmt).includes('"$"')) woFmtOk = true;
   });
   check('pbj WO Override uses $-accounting somewhere', woFmtOk, true);
@@ -914,10 +946,8 @@ async function testExport(): Promise<void> {
   check('BALANCES section below the pivot', balTitleRow > 5, true);
   check('UT section below BALANCES', utTitleRow > balTitleRow, true);
   check('BALANCES title black band', fillOf(pj.getCell(balTitleRow, 1)), 'FF000000');
-  // Round 4 §3.2-3 — each carried entry is a customer-row + job-row pair with
-  // the estimator fill and a thin box border (first pair sits 4 rows below
-  // the section title, after the 4-row header block).
-  const balCustRow = balTitleRow + 4;
+  // Round 5 §3.2 — single black header row; customer+job pairs follow immediately.
+  const balCustRow = balTitleRow + 1;
   check(
     'BALANCES pair: estimator fill on both rows (MH yellow, 21848-A5)',
     [fillOf(pj.getCell(balCustRow, 1)), fillOf(pj.getCell(balCustRow + 1, 1))],
@@ -932,6 +962,11 @@ async function testExport(): Promise<void> {
       pj.getCell(balCustRow + 1, lastColNum).border?.right?.style,
     ],
     ['thin', 'thin', 'thin', 'thin'],
+  );
+  check(
+    'BALANCES outline levels (customer 0 / job 1)',
+    [pj.getRow(balCustRow).outlineLevel, pj.getRow(balCustRow + 1).outlineLevel],
+    [0, 1],
   );
 
   // ---------- Payroll Preview (Round 3) ----------
@@ -948,6 +983,12 @@ async function testExport(): Promise<void> {
   const ppColA = pp.getColumn(1).values as (string | undefined)[];
   const danielRow = ppColA.findIndex((v) => v === 'Daniel Gonzales Bonilla');
   check('Daniel block present with the DDD9C4 tan band', [danielRow > 0, fillOf(pp.getCell(danielRow, 1))], [true, 'FFDDD9C4']);
+  // Round 5 §5 — crew-lead band fills A through H regardless of job count.
+  check(
+    'Daniel crew-lead band fills A–H',
+    [1, 2, 3, 4, 5, 6, 7, 8].map((c) => fillOf(pp.getCell(danielRow, c))),
+    Array(8).fill('FFDDD9C4'),
+  );
   // Round 4 §5.5 — labeled `PO# | Job | hrs | rate | total` header rows.
   let headerRowNum = 0;
   pp.eachRow((row, n) => {
@@ -1003,6 +1044,25 @@ async function testExport(): Promise<void> {
   const sectionRows = ['OFFICE', 'ADMIN', 'ESTIMATORS', 'MANAGER SALARY'].map((s) => ppColA.findIndex((v) => v === s));
   check('section headers in order', sectionRows.every((r, i) => r > 0 && (i === 0 || r > sectionRows[i - 1])), true);
   check('preview widths (A, B)', [pp.getColumn(1).width, pp.getColumn(2).width], [22, 41.4]);
+
+  // ---------- Exceptions sheets (Round 5 §6) ----------
+  const pctEx = readBack.getWorksheet("%'s Exceptions") as ExcelJS.Worksheet;
+  const payEx = readBack.getWorksheet('Payroll Exceptions') as ExcelJS.Worksheet;
+  check("%'s Exceptions title band", fillOf(pctEx.getCell('A1')), 'FF000000');
+  check('Payroll Exceptions title band', fillOf(payEx.getCell('A1')), 'FF000000');
+  check("%'s Exceptions frozen at row 1", [pctEx.views[0].state, (pctEx.views[0] as { ySplit?: number }).ySplit], ['frozen', 1]);
+  const pctItemCount = groups.filter((g) => g.items.length > 0).reduce((n, g) => n + g.items.length, 0);
+  check(
+    "%'s Exceptions title carries item count",
+    String(pctEx.getCell('A1').value).includes(`(${pctItemCount} items)`),
+    true,
+  );
+  const payItemCount = pGroups.filter((g) => g.items.length > 0).reduce((n, g) => n + g.items.length, 0);
+  check(
+    'Payroll Exceptions title carries item count',
+    String(payEx.getCell('A1').value).includes(`(${payItemCount} items)`),
+    true,
+  );
 }
 
 testExport()

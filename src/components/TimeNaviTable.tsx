@@ -130,7 +130,7 @@ export function TimeNaviTable({ rows, colorByEstimator, estimatorOptions, onEdit
                   {r.description}
                 </div>
               </td>
-              <td className="xcell w-20 text-center font-mono">
+              <td className="xcell min-w-[5.5rem] text-center font-mono">
                 <EditableCell
                   display={r.apKey ?? ''}
                   onCommit={(text) => onEdit(r.id, { apKey: normalizeApInput(text) })}

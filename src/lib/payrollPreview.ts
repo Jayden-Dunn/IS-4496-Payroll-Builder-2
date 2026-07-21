@@ -6,6 +6,12 @@
  */
 import { fmtDate, round2 } from './format';
 import {
+  carryDisplayMap,
+  jobDisplayPair,
+  salesDisplayMap,
+  timesheetDisplayMap,
+} from './jobNames';
+import {
   directoryFromTimesheet,
   extractLeadParenthetical,
   extractWoOverride,
@@ -39,7 +45,9 @@ import type {
   QbHoursMap,
   ReportRow,
   SalaryBlock,
+  SalesRow,
 } from './types';
+import type { LastWeekPbjRow } from './parsers';
 
 export interface PayrollPreviewInput {
   pbj: PivotByJobModel;
@@ -53,6 +61,10 @@ export interface PayrollPreviewInput {
   qbHours: QbHoursMap;
   knownEstimators: ReadonlySet<string>;
   leadCtx: LeadResolverContext;
+  /** Round 5 §4 — naming chain inputs. */
+  nvSales?: readonly SalesRow[] | null;
+  utSales?: readonly SalesRow[] | null;
+  lastWeekPbj?: LastWeekPbjRow[] | null;
 }
 
 const byText = (a: string, b: string): number => a.localeCompare(b, 'en', { sensitivity: 'base' });
@@ -66,6 +78,13 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
   const { pbj, enriched, reportRows, pl, settings, payDate, edits, qbHours } = input;
   const directory = input.directory ?? directoryFromTimesheet(enriched);
   const colorByEstimator = new Map(settings.legend.map((l) => [l.estimator, l.color]));
+
+  const nameSources = {
+    timesheetByAp: timesheetDisplayMap(enriched),
+    carryByAp: carryDisplayMap(input.lastWeekPbj),
+    salesByAp: salesDisplayMap(input.nvSales, input.utSales),
+    pl,
+  };
 
   // ----- week range --------------------------------------------------------
   let weekStart: Date | null = null;
@@ -397,13 +416,19 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
             : [];
       if (!names.some((n) => n.toUpperCase() === leadUpper)) continue;
       const pctNum = typeof job.analysis.percent === 'number' ? job.analysis.percent : 0;
+      // Timesheet jobs already have clean jobcode_1/jobcode_2; still run the
+      // chain so a missing timesheet entry (shouldn't happen) falls through.
+      const display = jobDisplayPair(job.analysis.apKey, {
+        ...nameSources,
+        eventTitle: eventByApKey.get(job.analysis.apKey ?? '')?.event,
+      });
       jobs.push(
         buildPsJob(
           blockKey,
           job.id,
           job.analysis.apKey,
-          job.jobcode2,
-          job.id.split('\u0000')[0],
+          display.poLabel || job.jobcode2,
+          display.customerName || job.id.split('\u0000')[0],
           job.analysis.woPct,
           job.analysis.woOverride,
           pctNum,
@@ -415,13 +440,14 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     for (const cj of calOnlyJobs) {
       if (!cj.lead.some((n) => n.toUpperCase() === leadUpper)) continue;
       const pctNum = typeof cj.row.percent === 'number' ? cj.row.percent : 0;
+      const display = jobDisplayPair(cj.row.apKey, { ...nameSources, eventTitle: cj.row.event });
       jobs.push(
         buildPsJob(
           blockKey,
           `cal:${cj.row.id}`,
           cj.row.apKey,
-          cj.row.qboJobName || cj.row.event,
-          cj.row.qboJobName,
+          display.poLabel,
+          display.customerName,
           cj.woPct,
           cj.woOverride,
           pctNum,

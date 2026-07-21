@@ -24,6 +24,12 @@ import {
 import { orderLeadFirst } from './pivot';
 import { applyPivotView, EMPTY_PIVOT_VIEW } from './pivotView';
 import {
+  baseApKey,
+  cleanEventTitle,
+  jobDisplayPair,
+  type JobDisplaySources,
+} from './jobNames';
+import {
   dollarDiffIsFlagged,
   duplicateInQboValues,
   estimatorFromTitle,
@@ -415,6 +421,59 @@ export function runSelfTests(): boolean {
     'pw: unknown employee on plain job → fallback + flag',
     resolveLineRate('NOBODY', 'AP24314 Ext', false, pwSettings),
     { rate: 18, defaulted: true, prevailing: false },
+  );
+
+  // --- Round 5 §4: job-naming chain --------------------------------------------------------------
+  check('baseApKey: suffixed', baseApKey('24180-A'), '24180');
+  check('baseApKey: multi-suffix', baseApKey('21848-A5'), '21848');
+  check('baseApKey: bare → null', baseApKey('24314'), null);
+  const emptySrc: JobDisplaySources = {
+    timesheetByAp: new Map(),
+    carryByAp: new Map(),
+    salesByAp: new Map(),
+    pl: null,
+  };
+  check(
+    'jobNames: timesheet wins',
+    jobDisplayPair('24314', {
+      ...emptySrc,
+      timesheetByAp: new Map([['24314', { customer: 'Aaron Ward', job: 'AP24314 Ext' }]]),
+    }),
+    { poLabel: 'AP24314 Ext', customerName: 'Aaron Ward', usedBaseKey: false, unresolved: false },
+  );
+  check(
+    'jobNames: QBO exact',
+    jobDisplayPair('24180', {
+      ...emptySrc,
+      salesByAp: new Map([['24180', { name1: 'Regina Conrad', name2: 'AP24180 Int' }]]),
+    }),
+    { poLabel: 'AP24180 Int', customerName: 'Regina Conrad', usedBaseKey: false, unresolved: false },
+  );
+  check(
+    'jobNames: base-key retry',
+    jobDisplayPair('24180-A', {
+      ...emptySrc,
+      salesByAp: new Map([['24180', { name1: 'Regina Conrad', name2: 'AP24180 Int' }]]),
+    }),
+    { poLabel: 'AP24180 Int', customerName: 'Regina Conrad', usedBaseKey: true, unresolved: false },
+  );
+  check(
+    'jobNames: carry-forward before QBO',
+    jobDisplayPair('21848-A5', {
+      ...emptySrc,
+      carryByAp: new Map([['21848-A5', { customer: 'Old Customer', job: 'AP21848-A5 Somewhere Int' }]]),
+      salesByAp: new Map([['21848', { name1: 'Wrong', name2: 'Wrong' }]]),
+    }),
+    { poLabel: 'AP21848-A5 Somewhere Int', customerName: 'Old Customer', usedBaseKey: false, unresolved: false },
+  );
+  const cleaned = cleanEventTitle('♦Int 13k (XC) Regina Conrad Ph1, AP24180-A *PAID* (Daniel)', '24180-A');
+  check('jobNames: cleaned title — no ♦ / no raw dump', cleaned?.poLabel.includes('♦') ?? true, false);
+  check('jobNames: cleaned title customer', cleaned?.customerName, 'Regina Conrad');
+  check('jobNames: cleaned title PO has Int', cleaned?.poLabel.includes('Int'), true);
+  check(
+    'jobNames: unresolved → AP{key} + blank',
+    jobDisplayPair('99999', emptySrc),
+    { poLabel: 'AP99999', customerName: '', usedBaseKey: false, unresolved: true },
   );
 
   const failed = results.filter((r) => !r.pass);

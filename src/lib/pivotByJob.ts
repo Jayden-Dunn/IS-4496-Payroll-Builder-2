@@ -5,7 +5,14 @@
  * workaround).
  */
 import { timesheetApKey } from './apkey';
-import { dateToIso, fmtDate, fmtPercent, round2 } from './format';
+import { dateToIso, fmtDate, round2 } from './format';
+import {
+  carryDisplayMap,
+  jobDisplayPair,
+  salesDisplayMap,
+  timesheetDisplayMap,
+  type JobDisplaySources,
+} from './jobNames';
 import type { LastWeekPbjRow } from './parsers';
 import {
   extractLeadParenthetical,
@@ -25,8 +32,10 @@ import type {
   PbjEmployeeRow,
   PbjJobRow,
   PivotByJobModel,
+  PlParseResult,
   QbHoursMap,
   ReportRow,
+  SalesRow,
 } from './types';
 
 export interface ManualSectionState {
@@ -49,6 +58,13 @@ export interface PivotByJobInput {
   lastWeekPbj: LastWeekPbjRow[] | null;
   balancesState: ManualSectionState;
   utState: ManualSectionState;
+  /** Round 5 §3.7 — P&L income for the WO Override default. */
+  pl: PlParseResult | null;
+  /** Round 5 §3.7 / §4 — customer-summary totals + sales for naming/WO$. */
+  nvTotals: ReadonlyMap<string, number> | null;
+  utTotals: ReadonlyMap<string, number> | null;
+  nvSales: readonly SalesRow[] | null;
+  utSales: readonly SalesRow[] | null;
 }
 
 export function pbjJobId(customer: string, jobcode2: string): string {
@@ -81,6 +97,31 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
   for (const r of input.lastWeekPbj ?? []) {
     if (!lastWeekByAp.has(r.apKey)) lastWeekByAp.set(r.apKey, r);
   }
+
+  const nameSources: JobDisplaySources = {
+    timesheetByAp: timesheetDisplayMap(enriched),
+    carryByAp: carryDisplayMap(input.lastWeekPbj),
+    salesByAp: salesDisplayMap(input.nvSales, input.utSales),
+    pl: input.pl,
+  };
+
+  /** Round 5 §3.7 — computed WO Override default (income × WO% or Job Total × WO%). */
+  const computedWoOverride = (
+    apKey: string | null,
+    woPct: number | null,
+    hourly: boolean,
+    utJob: boolean,
+  ): number | null => {
+    if (hourly || woPct === null || !apKey) return null;
+    if (utJob) {
+      const total = input.utTotals?.get(apKey) ?? input.nvTotals?.get(apKey);
+      if (total === undefined) return null;
+      return total * woPct;
+    }
+    const income = input.pl?.byJob.get(apKey)?.income;
+    if (income === undefined) return null;
+    return income * woPct;
+  };
 
   // ----- dates -----------------------------------------------------------
   const dateMs = new Set<number>();
@@ -162,7 +203,8 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
           const isOffice = apKey === 'OFFICE';
           const match = apKey && !isOffice ? eventByApKey.get(apKey) : undefined;
 
-          const onCalendar = isOffice ? '-' : match ? `TimeNavi row ${match.sheetRow}` : 'NOT ON CALENDAR';
+          // Round 5 §3.8 — bare TimeNavi row number (MATCH semantics).
+          const onCalendar = isOffice ? '-' : match ? String(match.sheetRow) : 'NOT ON CALENDAR';
           // An edited AP# re-resolves the estimator from the matched event
           // (acceptance §10.3); otherwise the enriched-timesheet value rules.
           const baseEstimator = job.rows[0]?.estimator ?? '#N/A';
@@ -182,11 +224,7 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
 
           const hourly = isHourlyJob(percent, crewLead, `${job.jobcode2} ${match?.row.event ?? ''}`);
 
-          // WO Override — explicit $ in the description only.
-          const woSrc = match ? extractWoOverride(match.row.description) : null;
-          const woOverride = edit.woOverride !== undefined ? edit.woOverride : (woSrc?.amount ?? null);
-
-          // WO% — "@ NN% PS" line beats the Settings map default.
+          // WO% — "@ NN% PS" line beats the Settings map default (needed before WO$).
           const pctSrc = match ? extractWoPct(match.row.description) : null;
           const defaultWoPct = hourly
             ? null
@@ -196,6 +234,13 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
                 ? profitSharePctFor(crewLead.split('/')[0], settings.profitShare, settings.defaultProfitSharePct)
                 : settings.defaultProfitSharePct;
           const woPct = edit.woPct !== undefined ? edit.woPct : defaultWoPct;
+
+          // Round 5 §3.7 — WO Override precedence: edit → description-$ → computed.
+          const woSrc = match ? extractWoOverride(match.row.description) : null;
+          const woOverride =
+            edit.woOverride !== undefined
+              ? edit.woOverride
+              : (woSrc?.amount ?? computedWoOverride(apKey, woPct, hourly, false));
 
           const carried = apKey ? lastWeekByAp.get(apKey) : undefined;
           const notes = edit.notes !== undefined ? edit.notes : (carried?.notes ?? '');
@@ -296,20 +341,23 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
     const woSrc = extractWoOverride(r.description);
     const pctSrc = extractWoPct(r.description);
     const hourly = isHourlyJob(r.percent, resolution.display, r.event);
+    const woPct = hourly
+      ? null
+      : (pctSrc?.pct ??
+        (resolution.display
+          ? profitSharePctFor(resolution.display.split('/')[0], settings.profitShare, settings.defaultProfitSharePct)
+          : settings.defaultProfitSharePct));
+    // Round 5 §4 — never dump the raw event title into customer/job labels.
+    const names = jobDisplayPair(apKey, { ...nameSources, eventTitle: r.event });
     utSeeds.push({
       id: `ut:${apKey}`,
-      customer: r.qboJobName || '',
-      job: r.event,
+      customer: names.customerName,
+      job: names.poLabel,
       apKey,
       estimator: r.estimator,
       crewLead: resolution.display,
-      woOverride: woSrc?.amount ?? null,
-      woPct: hourly
-        ? null
-        : (pctSrc?.pct ??
-          (resolution.display
-            ? profitSharePctFor(resolution.display.split('/')[0], settings.profitShare, settings.defaultProfitSharePct)
-            : settings.defaultProfitSharePct)),
+      woOverride: woSrc?.amount ?? computedWoOverride(apKey, woPct, hourly, true),
+      woPct,
       percent: r.percent,
       notes: '',
       colorHex: colorByEstimator.get(r.estimator) ?? null,
@@ -384,5 +432,3 @@ export function weekdayShort(d: Date): string {
 export function fmtMonthDay(d: Date): string {
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
-
-export { fmtPercent };

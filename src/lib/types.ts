@@ -144,6 +144,8 @@ export interface PlJobMetrics {
   mileage: number; // Mileage Expense
   sundries: number; // the 'Sundries -' row alone (double-count hint, §6.8)
   plJobHeader: string; // the raw column header text
+  /** Round 5 §4 step 5 — nearest preceding non-Total, non-AP customer header. */
+  customerName: string;
 }
 
 export interface PlParseResult {

@@ -82,8 +82,11 @@ const SLOT_DEFS: SlotDef[] = [
   { id: 'utSummary', label: '6 · UT Sales by Customer Summary', hint: 'Job totals (Utah)' },
   { id: 'lastWeek', label: '7 · Last week\u2019s % of Completion', hint: 'Last % Paid + Balances/UT carry-forward', optional: true },
   { id: 'pl', label: '8 · P&L by Customer (QBO)', hint: 'Required for the payroll tabs', optional: true },
-  { id: 'employees', label: '9 · Employee Name List (QB Time)', hint: 'Crew-lead name resolution', optional: true },
+  // Round 5 §1 — Employee Name List lives in Settings only (never in the rail).
 ];
+
+/** Slots shown in the left rail (1–8). `employees` is Settings-only. */
+const RAIL_SLOTS = SLOT_DEFS;
 
 interface ParsedData {
   timesheet: TimesheetParseResult | null;
@@ -216,10 +219,11 @@ export default function App(): JSX.Element {
           break;
         }
         case 'employees': {
+          // Round 5 §1 — rail no longer hosts this slot; Settings Replace still
+          // routes through handleFile when needed. Prefer onDirectoryReplace.
           const directory = parseEmployeeList(wbd);
           const active = directory.filter((d) => d.active).length;
           ok(`✓ ${active} active / ${directory.length - active} inactive`, { directory });
-          // §4.2 — persist the parsed directory on first successful parse.
           setSavedDirectory(saveDirectory(directory, file.name));
           break;
         }
@@ -369,8 +373,13 @@ export default function App(): JSX.Element {
         lastWeekPbj: parsed.lastWeekPbj,
         balancesState,
         utState,
+        pl: parsed.pl,
+        nvTotals: parsed.nvTotals,
+        utTotals: parsed.utTotals,
+        nvSales: parsed.nvSales,
+        utSales: parsed.utSales,
       }),
-    [enriched, reportRows, settings, leadCtx, knownEstimators, payDate, pbjEdits, qbHours, parsed.lastWeekPbj, balancesState, utState],
+    [enriched, reportRows, settings, leadCtx, knownEstimators, payDate, pbjEdits, qbHours, parsed.lastWeekPbj, parsed.pl, parsed.nvTotals, parsed.utTotals, parsed.nvSales, parsed.utSales, balancesState, utState],
   );
 
   const payrollPreview = useMemo(() => {
@@ -387,8 +396,11 @@ export default function App(): JSX.Element {
       qbHours,
       knownEstimators,
       leadCtx,
+      nvSales: parsed.nvSales,
+      utSales: parsed.utSales,
+      lastWeekPbj: parsed.lastWeekPbj,
     });
-  }, [created, parsed.pl, effectiveDirectory, pivotByJob, enriched, reportRows, settings, payDate, payrollEdits, qbHours, knownEstimators, leadCtx]);
+  }, [created, parsed.pl, parsed.nvSales, parsed.utSales, parsed.lastWeekPbj, effectiveDirectory, pivotByJob, enriched, reportRows, settings, payDate, payrollEdits, qbHours, knownEstimators, leadCtx]);
 
   const payrollExceptions = useMemo(() => {
     if (!created) return [];
@@ -410,8 +422,12 @@ export default function App(): JSX.Element {
       reportRows,
       pl: parsed.pl,
       hasDirectory: effectiveDirectory !== null,
+      enriched,
+      nvSales: parsed.nvSales,
+      utSales: parsed.utSales,
+      lastWeekPbj: parsed.lastWeekPbj,
     });
-  }, [created, pivotByJob, payrollPreview, reportRows, parsed.pl, effectiveDirectory]);
+  }, [created, pivotByJob, payrollPreview, reportRows, parsed.pl, parsed.nvSales, parsed.utSales, parsed.lastWeekPbj, effectiveDirectory, enriched]);
   const payrollExceptionCount = useMemo(() => countExceptions(payrollExceptions), [payrollExceptions]);
 
   const estimatorOptions = useMemo(() => {
@@ -515,8 +531,10 @@ export default function App(): JSX.Element {
       payDate,
       pivotByJob,
       payrollPreview,
+      percentExceptions: exceptions,
+      payrollExceptions,
     });
-  }, [reportRows, pivot, viewPivot, exportFiltered, filtersActive, settings.legend, payDate, pivotByJob, payrollPreview]);
+  }, [reportRows, pivot, viewPivot, exportFiltered, filtersActive, settings.legend, payDate, pivotByJob, payrollPreview, exceptions, payrollExceptions]);
 
   const onSaveSettings = useCallback((next: AppSettings): void => {
     setSettings(next);
@@ -571,34 +589,41 @@ export default function App(): JSX.Element {
             Upload the weekly reports (<b>.xlsx</b> or <b>.csv</b>). Everything is parsed locally in your browser — no
             data leaves this computer.
           </p>
-          {SLOT_DEFS.map((def) =>
-            // §4.2 — once a directory is saved, the employee slot collapses
-            // to a compact status chip linking to Settings.
-            def.id === 'employees' && savedDirectory ? (
-              <button
-                key={def.id}
-                type="button"
-                className="flex items-center gap-1.5 rounded border border-emerald-300 bg-emerald-50 px-2 py-1.5 text-left text-[11px] text-emerald-800 hover:bg-emerald-100"
-                onClick={() => setSettingsOpen(true)}
-                title="Manage the saved directory in Settings → Employee Directory"
-              >
+          {RAIL_SLOTS.map((def) => (
+            <UploadSlot
+              key={def.id}
+              label={def.label}
+              hint={def.hint}
+              optional={def.optional}
+              chip={chips[def.id]}
+              onFile={(file) => void handleFile(def.id, file)}
+            />
+          ))}
+          {/* Round 5 §1 — Employee Directory status (Settings is the only upload home). */}
+          <button
+            type="button"
+            className={`flex items-center gap-1.5 rounded border px-2 py-1.5 text-left text-[11px] ${
+              savedDirectory
+                ? 'border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
+                : 'border-neutral-300 bg-white text-neutral-600 hover:bg-neutral-50'
+            }`}
+            onClick={() => setSettingsOpen(true)}
+            title="Manage the employee directory in Settings → Employee Directory"
+          >
+            {savedDirectory ? (
+              <>
                 <span className="font-semibold">Employee list:</span>
                 <span>
                   ✓ {savedDirectory.activeCount} active / {savedDirectory.inactiveCount} inactive · saved{' '}
                   {new Date(savedDirectory.uploadedAt).toLocaleDateString()}
                 </span>
-              </button>
+              </>
             ) : (
-              <UploadSlot
-                key={def.id}
-                label={def.label}
-                hint={def.hint}
-                optional={def.optional}
-                chip={chips[def.id]}
-                onFile={(file) => void handleFile(def.id, file)}
-              />
-            ),
-          )}
+              <span>
+                Employee list: not saved — upload in <span className="font-semibold">Settings</span>
+              </span>
+            )}
+          </button>
           <label className="mt-1 flex flex-col gap-1 text-xs font-semibold">
             Pay date
             <input

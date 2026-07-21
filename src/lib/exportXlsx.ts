@@ -4,6 +4,7 @@ import { isDarkColor } from './format';
 import { weekdayShort } from './pivotByJob';
 import { dollarDiffIsFlagged, duplicateInQboValues, percentIsFlagged } from './timenavi';
 import type {
+  ExceptionGroup,
   HourlyBlock,
   LegendEntry,
   ManualSectionRow,
@@ -59,6 +60,9 @@ export interface ExportInput {
   /** Round 3 sheets — optional so %-only exports still work. */
   pivotByJob?: PivotByJobModel | null;
   payrollPreview?: PayrollPreviewModel | null;
+  /** Round 5 §6 — on-screen exception panels, snapshotted at download time. */
+  percentExceptions?: ExceptionGroup[] | null;
+  payrollExceptions?: ExceptionGroup[] | null;
 }
 
 export function exportFilename(payDate: Date | null): string {
@@ -77,6 +81,9 @@ export async function buildWorkbookBuffer(input: ExportInput): Promise<ArrayBuff
   buildPivotSheet(wb, input.pivot, palette);
   if (input.pivotByJob) buildPivotByJobSheet(wb, input.pivotByJob);
   if (input.payrollPreview) buildPayrollPreviewSheet(wb, input.payrollPreview);
+  // Round 5 §6 — exceptions sheets always written (empty panel → "No exceptions").
+  buildExceptionsSheet(wb, "%'s Exceptions", input.percentExceptions ?? [], input.payDate);
+  buildExceptionsSheet(wb, 'Payroll Exceptions', input.payrollExceptions ?? [], input.payDate);
   return (await wb.xlsx.writeBuffer()) as ArrayBuffer;
 }
 
@@ -120,7 +127,15 @@ function buildTimeNaviSheet(wb: ExcelJS.Workbook, input: ExportInput, palette: R
   const ws = wb.addWorksheet('TimeNavi Export', {
     views: [{ state: 'frozen', ySplit: 1 }], // freeze at A2
   });
-  ws.columns = TN_WIDTHS.map((width) => ({ width }));
+  // Round 5 §2.1 — AP# best-fit: max(8, longest rendered AP# + 1).
+  const apIdx = TN_HEADERS.indexOf('AP#');
+  const included = input.rows.filter((row) => row.included);
+  let apWidth = 8;
+  for (const r of included) {
+    const len = (r.apKey ?? '').length + 1;
+    if (len > apWidth) apWidth = len;
+  }
+  ws.columns = TN_WIDTHS.map((width, i) => ({ width: i === apIdx ? apWidth : width }));
 
   const centeredCols = TN_CENTERED_HEADERS.map(tnCol);
 
@@ -151,7 +166,7 @@ function buildTimeNaviSheet(wb: ExcelJS.Workbook, input: ExportInput, palette: R
   const inQboCol = tnCol('In QBO Time?');
   const diffCol = tnCol('$ Difference');
 
-  for (const r of input.rows.filter((row) => row.included)) {
+  for (const r of included) {
     const percentCell = r.percent === null ? '' : r.percent;
     const row = ws.addRow([
       r.event,
@@ -344,7 +359,7 @@ function buildPivotSheet(wb: ExcelJS.Workbook, pivot: PivotModel, palette: Reado
 }
 
 // ---------------------------------------------------------------------------
-// Sheet 3 — Pivot by Job (Round 3 §4/§8 + Round 4 §3)
+// Sheet 3 — Pivot by Job (Round 5 §3: two-row header, outline, borders)
 // ---------------------------------------------------------------------------
 
 const RED = 'FFFF0000';
@@ -354,24 +369,26 @@ const MONEY_FMT = '_("$"* #,##0.00_);_("$"* \\(#,##0.00\\);_("$"* "-"??_);_(@_)'
 
 function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): void {
   const ws = wb.addWorksheet('Pivot by Job', {
-    views: [{ state: 'frozen', ySplit: 4 }], // freeze at A5
+    views: [{ state: 'frozen', ySplit: 2 }], // Round 5 §3.1 — freeze at A3
+    properties: { outlineProperties: { summaryBelow: false, summaryRight: true } },
   });
   const dateCount = model.dateIsos.length;
-  // A · dates · Total · QB Hrs(K) · AP# · OnCal · Est · Lead · WO$ · WO% · % · Notes
+  // A · dates · Total · QB Hrs · AP# · OnCal · Est · Lead · WO$ · WO% · % · Notes
   const analysisStart = 1 + dateCount + 2 + 1; // first analysis col (AP#)
   const lastCol = analysisStart + 7;
+  const pctComplCol = lastCol - 1;
   ws.columns = [
     { width: 40 },
     ...model.dateIsos.map(() => ({ width: 10 })),
     { width: 11 },
     { width: 7.6 },
     { width: 10.5 },
-    { width: 17.8 },
+    { width: 12 },
     { width: 9.4 },
     { width: 43 },
     { width: 23 },
     { width: 12 },
-    { width: 11 },
+    { width: 15.78 }, // Round 5 §3.4 — % of Completion fits its header
     { width: 18.5 },
   ];
 
@@ -392,59 +409,51 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
   const totalCol = 1 + dateCount + 1;
   const qbCol = totalCol + 1;
 
-  // §3.1 — every analysis column centered except Notes (the last column).
   const centerAnalysis = (row: ExcelJS.Row): void => {
     for (let c = analysisStart; c < lastCol; c++) {
       row.getCell(c).alignment = { horizontal: 'center' };
     }
   };
 
-  const headerBlock = (title: string, withDates: boolean): void => {
-    // Row 1 — black: title, dates, Total hrs, analysis headers.
+  /** Round 5 §3.5 — thin top+bottom on A through QB Hrs only. */
+  const hoursBandBorder = (row: ExcelJS.Row): void => {
+    for (let c = 1; c <= qbCol; c++) {
+      const prev = row.getCell(c).border ?? {};
+      row.getCell(c).border = { ...prev, top: { style: 'thin' }, bottom: { style: 'thin' } };
+    }
+  };
+
+  /**
+   * Round 5 §3.1 / §3.2 — two-row header when `withDays`, else a single black
+   * section header (BALANCES / UT) mirroring row 1 only.
+   */
+  const headerBlock = (title: string, withDays: boolean): void => {
     const r1Vals: (string | Date)[] = [title];
     for (let i = 0; i < dateCount; i++) {
-      r1Vals.push(withDates && i < model.dates.length ? excelDate(model.dates[i]) : '');
+      r1Vals.push(i < model.dates.length ? excelDate(model.dates[i]) : '');
     }
     r1Vals.push('Total hrs', '', 'AP#', 'On Calendar?', 'Estimator', 'Crew Lead', 'WO Override', 'WO%', '% of Completion', 'Notes');
     const r1 = ws.addRow(r1Vals);
     r1.height = 31.5;
     for (let c = 1; c <= lastCol; c++) {
-      const color = c === lastCol ? DARK_RED : c === lastCol - 1 ? RED : WHITE;
-      paint(r1.getCell(c), { fill: BLACK, color, bold: c === 1 });
-      if (c === 1) paint(r1.getCell(1), { fill: BLACK, color: WHITE, bold: true, size: 17 });
-      if (c > 1 && c <= 1 + dateCount && r1.getCell(c).value instanceof Date) r1.getCell(c).numFmt = 'm/d';
+      const color = c === lastCol ? DARK_RED : c === pctComplCol ? RED : WHITE;
+      paint(r1.getCell(c), { fill: BLACK, color, bold: true });
+      if (c === 1) paint(r1.getCell(1), { fill: BLACK, color: WHITE, bold: true, size: withDays ? 17 : 16 });
+      if (c > 1 && c <= 1 + dateCount && r1.getCell(c).value instanceof Date) {
+        r1.getCell(c).numFmt = 'm/d/yyyy';
+        r1.getCell(c).alignment = { horizontal: 'center' };
+      }
     }
     centerAnalysis(r1);
-    // Row 2 — black: computed weekday names (Sunday included).
+    if (!withDays) return;
+    // Row 2 — computed weekday names (Sunday included).
     const r2 = ws.addRow(['']);
     for (let c = 1; c <= lastCol; c++) paint(r2.getCell(c), { fill: BLACK, color: WHITE });
-    if (withDates) {
-      model.dates.forEach((d, i) => {
-        r2.getCell(2 + i).value = weekdayShort(d);
-      });
-    }
-    // Row 3 — black: Sum of hours / Column Labels + repeated analysis labels.
-    const r3 = ws.addRow(['Sum of hours', 'Column Labels']);
-    for (let c = 1; c <= lastCol; c++) paint(r3.getCell(c), { fill: BLACK, color: WHITE });
-    ['AP#', 'Estimator', 'Crew Lead', 'WO Amt', 'WO%', '% of Completion', 'Notes'].forEach((label, i) => {
-      const c = analysisStart + (i === 0 ? 0 : i + 1); // skip On Calendar? on this row
-      r3.getCell(c).value = label;
+    model.dates.forEach((d, i) => {
+      const cell = r2.getCell(2 + i);
+      cell.value = weekdayShort(d);
+      cell.alignment = { horizontal: 'center' };
     });
-    centerAnalysis(r3);
-    // Row 4 — Row Labels + dates + Grand Total.
-    const r4 = ws.addRow(['Row Labels']);
-    paint(r4.getCell(1), { bold: true });
-    if (withDates) {
-      model.dates.forEach((d, i) => {
-        const cell = r4.getCell(2 + i);
-        cell.value = excelDate(d);
-        cell.numFmt = 'm/d';
-        paint(cell, { bold: true });
-      });
-    }
-    const gt = r4.getCell(totalCol);
-    gt.value = 'Grand Total';
-    paint(gt, { bold: true });
   };
 
   headerBlock(model.title, true);
@@ -460,7 +469,6 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
     }
   };
 
-  /** Analysis-cell number formats (§4.5 + Round 4 §3.2-1 $-accounting). */
   const analysisFormats = (row: ExcelJS.Row): void => {
     const woCell = row.getCell(analysisStart + 4);
     if (typeof woCell.value === 'number') woCell.numFmt = MONEY_FMT;
@@ -472,14 +480,16 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
 
   for (const cust of model.customers) {
     const cRow = ws.addRow([cust.customer, ...hourVals(cust.byDate), cust.total]);
+    cRow.outlineLevel = 0;
     fillRow(cRow, cust.colorHex, true);
+    hoursBandBorder(cRow);
     for (const job of cust.jobs) {
       const a = job.analysis;
       const jRow = ws.addRow([
         job.jobcode2,
         ...hourVals(job.byDate),
         job.total,
-        '', // QB Hrs (job level blank)
+        '',
         a.apKey ?? '',
         a.onCalendar,
         a.estimator,
@@ -489,8 +499,10 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
         a.percent === null ? '' : a.percent,
         a.notes,
       ]);
+      jRow.outlineLevel = 1;
       fillRow(jRow, job.colorHex);
-      // Job-row analysis cells bold (§4.4) + formats (§4.5).
+      // Round 5 §3.6 — bold the job label in A (and analysis cells as before).
+      paint(jRow.getCell(1), { ...(job.colorHex ? { fill: 'FF' + job.colorHex, color: textOn(job.colorHex) } : {}), bold: true });
       for (let c = analysisStart; c <= lastCol; c++) {
         const cell = jRow.getCell(c);
         const color =
@@ -505,9 +517,11 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
       }
       analysisFormats(jRow);
       centerAnalysis(jRow);
+      hoursBandBorder(jRow);
 
       for (const emp of job.employees) {
         const eRow = ws.addRow([emp.username, ...hourVals(emp.byDate), emp.total, emp.qbHours ?? '']);
+        eRow.outlineLevel = 2;
         fillRow(eRow, job.colorHex);
         const qb = eRow.getCell(qbCol);
         if (typeof qb.value === 'number') {
@@ -518,12 +532,13 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
     }
   }
 
-  // Grand Total row — gray, white text, double top border (§3.2-4).
+  // Grand Total row — gray, white text, double top border.
   const gRow = ws.addRow([
     'Grand Total',
     ...model.dateIsos.map((iso) => model.grandByDate[iso] ?? ('' as const)),
     model.grandTotal,
   ]);
+  gRow.outlineLevel = 0;
   for (let c = 1; c <= lastCol; c++) {
     const cell = gRow.getCell(c);
     paint(cell, { fill: HEADER_GRAY, color: WHITE, bold: true });
@@ -531,16 +546,16 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
     cell.border = { top: { style: 'double' } };
   }
 
-  // §4.6 / Round 4 §3.2-3 — BALANCES and UT sections auto-position below the
-  // pivot; each entry is a customer-row + job-row PAIR with estimator fills
-  // and a thin box border around the pair.
+  // Round 5 §3.2 — single black header row per manual section; pair box-borders kept.
   const manualSection = (title: string, rows: ManualSectionRow[]): void => {
     ws.addRow([]);
     headerBlock(title, false);
     for (const r of rows) {
       const cRow = ws.addRow([r.customer]);
+      cRow.outlineLevel = 0;
       fillRow(cRow, r.colorHex, true);
       const jRow = ws.addRow([r.job]);
+      jRow.outlineLevel = 1;
       const cells: (string | number)[] = [
         r.apKey ?? '',
         '',
@@ -555,7 +570,7 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
         jRow.getCell(analysisStart + i).value = v;
       });
       fillRow(jRow, r.colorHex);
-      // Notes text dark red (readable variant on dark fills).
+      paint(jRow.getCell(1), { ...(r.colorHex ? { fill: 'FF' + r.colorHex, color: textOn(r.colorHex) } : {}), bold: true });
       const notesCell = jRow.getCell(lastCol);
       paint(notesCell, {
         ...(r.colorHex ? { fill: 'FF' + r.colorHex } : {}),
@@ -563,8 +578,6 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
       });
       analysisFormats(jRow);
       centerAnalysis(jRow);
-      // Thin box border around the pair: top on the customer row, bottom on
-      // the job row, left/right edges on both.
       for (let c = 1; c <= lastCol; c++) {
         cRow.getCell(c).border = {
           top: { style: 'thin' },
@@ -742,14 +755,14 @@ function buildPayrollPreviewSheet(wb: ExcelJS.Workbook, model: PayrollPreviewMod
 
   const psBlock = (block: PsBlock): void => {
     const jobCount = block.jobs.length;
-    // §5.4 — crew-lead band keeps the name in A (Title Case, left, bold);
-    // columns B+ hold the per-job WO% values; TAN across the used width.
+    // Round 5 §5 — crew-lead band fills A through H with DDD9C4 regardless of
+    // how many job columns the block uses; WO% values still render on B+.
     const hdr = band(
       [block.displayName, ...block.jobs.map((j) => (j.woPct !== null ? j.woPct : '-'))],
       TAN,
       BLACK,
       true,
-      1 + jobCount,
+      8,
     );
     for (let i = 0; i < jobCount; i++) {
       const cell = hdr.getCell(2 + i);
@@ -914,4 +927,58 @@ function buildPayrollPreviewSheet(wb: ExcelJS.Workbook, model: PayrollPreviewMod
       if (!cell.font || !cell.font.name) cell.font = { ...baseFont, ...(cell.font ?? {}) };
     });
   });
+}
+
+// ---------------------------------------------------------------------------
+// Sheets 5–6 — Exceptions panels (Round 5 §6)
+// ---------------------------------------------------------------------------
+
+function buildExceptionsSheet(
+  wb: ExcelJS.Workbook,
+  sheetName: string,
+  groups: readonly ExceptionGroup[],
+  payDate: Date | null,
+): void {
+  const ws = wb.addWorksheet(sheetName, {
+    views: [{ state: 'frozen', ySplit: 1 }],
+  });
+  ws.columns = [{ width: 22 }, { width: 70 }, { width: 24 }];
+  const nonEmpty = groups.filter((g) => g.items.length > 0);
+  const totalItems = nonEmpty.reduce((n, g) => n + g.items.length, 0);
+  const title = `${sheetName} — ${payDate ? `${payDate.getMonth() + 1}/${payDate.getDate()}/${payDate.getFullYear()}` : ''} (${totalItems} items)`.replace(
+    /\s+/g,
+    ' ',
+  ).trim();
+  const titleRow = ws.addRow([title]);
+  for (let c = 1; c <= 3; c++) {
+    titleRow.getCell(c).fill = solidFill(BLACK);
+    titleRow.getCell(c).font = { name: FONT, size: 14, bold: true, color: { argb: WHITE } };
+  }
+  ws.mergeCells(1, 1, 1, 3);
+
+  if (nonEmpty.length === 0) {
+    const row = ws.addRow(['No exceptions this week']);
+    row.getCell(1).font = { name: FONT, size: 12, italic: true };
+    return;
+  }
+
+  for (const g of nonEmpty) {
+    const hdr = ws.addRow([`${g.title} (${g.items.length})`]);
+    for (let c = 1; c <= 3; c++) {
+      hdr.getCell(c).fill = solidFill(HEADER_GRAY);
+      hdr.getCell(c).font = { name: FONT, size: 12, bold: true, color: { argb: WHITE } };
+    }
+    ws.mergeCells(hdr.number, 1, hdr.number, 3);
+    for (const item of g.items) {
+      // Best-effort split: leading "AP NNN — …" / "Name — …" → key | rest.
+      const m = /^(.+?)\s+[—–-]\s+(.+)$/.exec(item.message);
+      const key = m ? m[1] : '';
+      const detail = m ? m[2] : item.message;
+      const row = ws.addRow([key, detail, '']);
+      for (let c = 1; c <= 3; c++) {
+        row.getCell(c).font = { name: FONT, size: 11 };
+        row.getCell(c).alignment = { wrapText: true, vertical: 'top' };
+      }
+    }
+  }
 }

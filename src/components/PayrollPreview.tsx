@@ -182,7 +182,7 @@ function PsBlockView({ block, onEdit }: { block: PsBlock; onEdit: PayrollPreview
     <table className="mb-4 w-max min-w-[560px] border-collapse bg-white text-xs" id={`pp-${block.key}`}>
       <thead>
         <tr>
-          {/* §5.4 — Title Case name in column A; B+ hold the WO% values. */}
+          {/* Round 5 §5 — band fills A through H regardless of job count. */}
           <th className="xcell text-left" style={TAN}>
             {block.displayName}
             {block.sub && <span className="ml-2 rounded bg-blue-100 px-1 text-[10px] font-normal text-blue-700">sub</span>}
@@ -191,6 +191,9 @@ function PsBlockView({ block, onEdit }: { block: PsBlock; onEdit: PayrollPreview
             <th key={j.jobRowId} className="xcell min-w-[130px] text-right" style={TAN}>
               {j.woPct !== null ? `${Math.round(j.woPct * 100)}%` : '-'}
             </th>
+          ))}
+          {Array.from({ length: Math.max(0, 7 - block.jobs.length) }, (_, i) => (
+            <th key={`pad-${i}`} className="xcell min-w-[40px]" style={TAN} />
           ))}
         </tr>
       </thead>

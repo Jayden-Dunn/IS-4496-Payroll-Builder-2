@@ -300,8 +300,7 @@ export function SettingsModal({
             </div>
           ) : (
             <p className="text-xs text-neutral-500">
-              No directory saved yet — upload the Employee Name List in slot 9 on the left rail (it will be saved
-              automatically), or use Replace list below.
+              No employee list saved yet — upload one here. The left rail no longer hosts this upload.
             </p>
           )}
           <div className="mt-2 flex items-center gap-2">
