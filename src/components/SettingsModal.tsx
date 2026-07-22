@@ -8,9 +8,11 @@ import {
   DEFAULT_SALARIED,
   DEFAULT_SUBCONTRACTORS,
   DEFAULT_WAGE_RATES,
+  type DirectoryStoreStatus,
 } from '../lib/settings';
 import type {
   AppSettings,
+  JobRateRule,
   LegendEntry,
   ProfitShareEntry,
   SalariedEntry,
@@ -21,8 +23,12 @@ import type {
 
 interface SettingsModalProps {
   settings: AppSettings;
-  /** Round 4 §4.2 — the persisted employee directory (null = never saved). */
+  /** Persisted employee directory (null = never saved). */
   directory: SavedDirectory | null;
+  /** Shared store probe (Vercel Blob API) — null while loading. */
+  directoryStoreStatus?: DirectoryStoreStatus | null;
+  /** Set when local save worked but cross-device sync failed. */
+  directorySyncWarning?: string | null;
   /** Parse + persist a replacement list; resolves to an error message or null. */
   onDirectoryReplace: (file: File) => Promise<string | null>;
   onDirectoryClear: () => void;
@@ -54,6 +60,8 @@ function SectionTitle({ children, sub }: { children: string; sub?: string }): JS
 export function SettingsModal({
   settings,
   directory,
+  directoryStoreStatus: _directoryStoreStatus = null,
+  directorySyncWarning = null,
   onDirectoryReplace,
   onDirectoryClear,
   onSave,
@@ -71,6 +79,8 @@ export function SettingsModal({
   const [subs, setSubs] = useState<string[]>([...settings.subcontractors]);
   const [pwPatterns, setPwPatterns] = useState<string[]>([...settings.prevailingWagePatterns]);
   const [pwMin, setPwMin] = useState(String(settings.prevailingMinRate));
+  const [officeMileage, setOfficeMileage] = useState(String(settings.officeMileageRate));
+  const [jobRules, setJobRules] = useState<JobRateRule[]>(settings.jobRateRules.map((r) => ({ ...r, employeeNames: [...r.employeeNames] })));
   const [dirError, setDirError] = useState<string | null>(null);
   const [dirBusy, setDirBusy] = useState(false);
   const dirInputRef = useRef<HTMLInputElement>(null);
@@ -101,11 +111,13 @@ export function SettingsModal({
   const defaultPsNum = Number(defaultPs);
   const defaultWageNum = Number(defaultWage);
   const mileageNum = Number(mileageRate);
+  const officeMileageNum = Number(officeMileage);
   const pwMinNum = Number(pwMin);
   const numbersValid =
     Number.isFinite(defaultPsNum) &&
     Number.isFinite(defaultWageNum) &&
     Number.isFinite(mileageNum) &&
+    Number.isFinite(officeMileageNum) &&
     Number.isFinite(pwMinNum);
 
   const addPivotCol = (): void => {
@@ -124,9 +136,18 @@ export function SettingsModal({
       defaultWageRate: defaultWageNum,
       salariedRoster: roster.filter((e) => e.name.trim() !== ''),
       mileageRate: mileageNum,
+      officeMileageRate: officeMileageNum,
       subcontractors: subs.map((s) => s.trim()).filter(Boolean),
       prevailingWagePatterns: pwPatterns.map((s) => s.trim()).filter(Boolean),
       prevailingMinRate: pwMinNum,
+      jobRateRules: jobRules
+        .map((r) => ({
+          ...r,
+          apKey: r.apKey.trim(),
+          note: r.note.trim(),
+          employeeNames: r.employeeNames.map((n) => n.trim()).filter(Boolean),
+        }))
+        .filter((r) => r.apKey !== '' && Number.isFinite(r.rate)),
     });
   };
 
@@ -252,6 +273,8 @@ export function SettingsModal({
             <button type="button" className="btn text-xs" onClick={() => setRoster(DEFAULT_SALARIED.map((e) => ({ ...e })))}>Reset</button>
             <span className="ml-auto text-xs">Mileage reimb $/mile:</span>
             <input className="w-16 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs" value={mileageRate} onChange={(e) => setMileageRate(e.target.value)} />
+            <span className="text-xs">Office mileage $/mile:</span>
+            <input className="w-16 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs" value={officeMileage} onChange={(e) => setOfficeMileage(e.target.value)} />
           </div>
 
           <SectionTitle sub="Business names treated as valid crew leads without an employee-directory match.">Subcontractors</SectionTitle>
@@ -268,8 +291,8 @@ export function SettingsModal({
             <button type="button" className="btn text-xs" onClick={() => setSubs([...DEFAULT_SUBCONTRACTORS])}>Reset</button>
           </div>
 
-          <SectionTitle sub="Round 4 §5.8 — jobs whose jobcode / event title contains one of these patterns pay max(default rate, prevailing minimum).">
-            Prevailing-wage (Davis-Bacon) jobs
+          <SectionTitle sub="Jobs whose jobcode / event title contains one of these patterns are Davis-Bacon (DB) jobs. Hourly lines pay max(resolved rate, Davis-Bacon rate); crew-lead work-order pay is floored at hours × Davis-Bacon rate.">
+            Davis-Bacon job patterns
           </SectionTitle>
           <div className="flex flex-col gap-1">
             {pwPatterns.map((s, i) => (
@@ -282,13 +305,126 @@ export function SettingsModal({
           <div className="mt-2 flex items-center gap-2">
             <button type="button" className="btn text-xs" onClick={() => setPwPatterns((prev) => [...prev, ''])}>+ Add pattern</button>
             <button type="button" className="btn text-xs" onClick={() => { setPwPatterns([...DEFAULT_PREVAILING_PATTERNS]); setPwMin(String(DEFAULT_PREVAILING_MIN_RATE)); }}>Reset</button>
-            <span className="ml-auto text-xs">Prevailing minimum $/hr:</span>
+            <span className="ml-auto text-xs">Davis-Bacon rate $/hr:</span>
             <input className="w-16 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs" value={pwMin} onChange={(e) => setPwMin(e.target.value)} />
           </div>
 
-          <SectionTitle sub="The current Employee Name List is saved into the app (shared by every device on this server) and kept in this browser. Replacing it updates the saved date and re-runs crew-lead resolution.">
+          <SectionTitle sub="Negotiated $/hr for a specific AP# (optionally including change-order suffixes). Exact AP# + named employee beats all-painters; base-key matches are lower priority. Davis-Bacon still floors up when higher.">
+            Job-specific pay rules
+          </SectionTitle>
+          <div className="flex flex-col gap-2">
+            {jobRules.map((r, i) => (
+              <div key={r.id} className="rounded border border-neutral-200 p-2">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-[11px] text-neutral-500">AP#</span>
+                  <input
+                    className="w-24 rounded border border-neutral-300 px-1.5 py-1 text-xs"
+                    value={r.apKey}
+                    placeholder="24314"
+                    onChange={(ev) =>
+                      setJobRules((prev) => prev.map((x, j) => (j === i ? { ...x, apKey: ev.target.value } : x)))
+                    }
+                  />
+                  <span className="text-[11px] text-neutral-500">$/hr</span>
+                  <input
+                    className="w-16 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs"
+                    value={r.rate}
+                    onChange={(ev) => {
+                      const n = Number(ev.target.value);
+                      if (Number.isFinite(n)) setJobRules((prev) => prev.map((x, j) => (j === i ? { ...x, rate: n } : x)));
+                    }}
+                  />
+                  <label className="ml-1 flex items-center gap-1 text-[11px] text-neutral-600">
+                    <input
+                      type="checkbox"
+                      checked={r.includeSuffixes}
+                      onChange={(ev) =>
+                        setJobRules((prev) =>
+                          prev.map((x, j) => (j === i ? { ...x, includeSuffixes: ev.target.checked } : x)),
+                        )
+                      }
+                    />
+                    include suffixes
+                  </label>
+                  <button
+                    type="button"
+                    className="ml-auto text-neutral-400 hover:text-red-600"
+                    onClick={() => setJobRules((prev) => prev.filter((_, j) => j !== i))}
+                    aria-label="Delete rule"
+                  >
+                    🗑
+                  </button>
+                </div>
+                <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                  <span className="text-[11px] text-neutral-500">Applies to</span>
+                  <input
+                    className="min-w-[12rem] flex-1 rounded border border-neutral-300 px-1.5 py-1 text-xs"
+                    value={r.employeeNames.length === 0 ? '' : r.employeeNames.join(', ')}
+                    placeholder="All painters (or comma-separated names)"
+                    onChange={(ev) => {
+                      const raw = ev.target.value;
+                      const names = raw
+                        .split(',')
+                        .map((s) => s.trim())
+                        .filter(Boolean);
+                      setJobRules((prev) => prev.map((x, j) => (j === i ? { ...x, employeeNames: names } : x)));
+                    }}
+                  />
+                </div>
+                <div className="mt-1.5 flex items-center gap-1.5">
+                  <span className="text-[11px] text-neutral-500">Note</span>
+                  <input
+                    className="flex-1 rounded border border-neutral-300 px-1.5 py-1 text-xs"
+                    value={r.note}
+                    placeholder="Optional note"
+                    onChange={(ev) =>
+                      setJobRules((prev) => prev.map((x, j) => (j === i ? { ...x, note: ev.target.value } : x)))
+                    }
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="mt-2 flex gap-2">
+            <button
+              type="button"
+              className="btn text-xs"
+              onClick={() =>
+                setJobRules((prev) => [
+                  ...prev,
+                  {
+                    id: `rule-${Date.now()}-${prev.length}`,
+                    apKey: '',
+                    rate: 0,
+                    employeeNames: [],
+                    includeSuffixes: true,
+                    note: '',
+                  },
+                ])
+              }
+            >
+              + Add rule
+            </button>
+            <button
+              type="button"
+              className="btn text-xs"
+              onClick={() => {
+                if (jobRules.length === 0) return;
+                if (window.confirm('Clear all job-specific pay rules?')) setJobRules([]);
+              }}
+            >
+              Clear all
+            </button>
+          </div>
+
+          <SectionTitle sub="The employee list persists in this browser (localStorage) long-term — upload once until you need to replace it. Cross-device sync on the hosted URL is optional/advanced when Blob is configured.">
             Employee Directory
           </SectionTitle>
+          {directorySyncWarning && (
+            <div className="mb-2 rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-900">
+              {directorySyncWarning}
+            </div>
+          )}
           {directory ? (
             <div className="rounded border border-neutral-200 bg-neutral-50 p-2 text-xs">
               <div className="font-semibold">

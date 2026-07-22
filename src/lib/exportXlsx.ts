@@ -1,16 +1,39 @@
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
 import { isDarkColor } from './format';
+import type { JobsByCrewModel } from './jobsByCrew';
+import type {
+  SalesByCustMirrorRow,
+  SalesByRepMirrorRow,
+  TimesheetMirrorRow,
+} from './mirrorTabs';
+import {
+  buildFinalPayrollSheet,
+  buildInactiveEmployeesSheet,
+  buildInputNumbersSheet,
+  buildJobsByCrewSheet,
+  buildJobsSheet,
+  buildJournalEntrySheet,
+  buildManagementReportSheet,
+  buildNotesSheet,
+  buildPlImportSheet,
+  buildProfitshareOutputSheet,
+  buildSalesByCustMirrorSheet,
+  buildSalesByRepMirrorSheet,
+  buildTimesheetMirrorSheet,
+} from './exportRound6Sheets';
 import { weekdayShort } from './pivotByJob';
 import { dollarDiffIsFlagged, duplicateInQboValues, percentIsFlagged } from './timenavi';
 import type {
   ExceptionGroup,
   HourlyBlock,
+  InactiveEmployeeBlock,
   LegendEntry,
   ManualSectionRow,
   PayrollPreviewModel,
   PivotByJobModel,
   PivotModel,
+  PlParseResult,
   PsBlock,
   ReportRow,
   SalaryBlock,
@@ -52,47 +75,153 @@ function excelDate(d: Date): Date {
   return new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
 }
 
-export interface ExportInput {
+/** Round 6 §9 — %'s workbook export input. */
+export interface PercentsExportInput {
   rows: ReportRow[]; // already sorted; only included rows are exported
   pivot: PivotModel;
   legend: LegendEntry[];
   payDate: Date | null;
-  /** Round 3 sheets — optional so %-only exports still work. */
   pivotByJob?: PivotByJobModel | null;
-  payrollPreview?: PayrollPreviewModel | null;
-  /** Round 5 §6 — on-screen exception panels, snapshotted at download time. */
   percentExceptions?: ExceptionGroup[] | null;
-  payrollExceptions?: ExceptionGroup[] | null;
+  /** §3.1–§3.5 mirrors (pre-built via mirrorTabs.ts). */
+  salesByRep?: { headers: string[]; rows: SalesByRepMirrorRow[] } | null;
+  salesByCust?: SalesByCustMirrorRow[] | null;
+  utSalesByRep?: { headers: string[]; rows: SalesByRepMirrorRow[] } | null;
+  utSalesByCust?: SalesByCustMirrorRow[] | null;
+  timesheetMirror?: TimesheetMirrorRow[] | null;
+  jobsByCrew?: JobsByCrewModel | null;
 }
 
-export function exportFilename(payDate: Date | null): string {
+/** Round 6 §9 — payroll workbook export input. */
+export interface PayrollExportInput {
+  payDate: Date | null;
+  weekStart: Date | null;
+  weekEnd: Date | null;
+  pl?: PlParseResult | null;
+  payrollPreview?: PayrollPreviewModel | null;
+  payrollExceptions?: ExceptionGroup[] | null;
+  /**
+   * Canonical Jobs sheet rows (`PO#` + display name). When omitted, derived
+   * from `payrollPreview` lead/painter AP keys.
+   */
+  jobs?: { poLabel: string; jobLabel: string }[] | null;
+  /** Inactive Employees tab rows; falls back to `payrollPreview.inactiveEmployees`. */
+  inactiveEmployees?: InactiveEmployeeBlock[] | null;
+  mileageRate?: number;
+  defaultProfitSharePct?: number;
+}
+
+/** @deprecated Prefer PercentsExportInput — kept for Round 1–5 call sites. */
+export type ExportInput = PercentsExportInput & {
+  payrollPreview?: PayrollPreviewModel | null;
+  payrollExceptions?: ExceptionGroup[] | null;
+};
+
+export function percentsExportFilename(payDate: Date | null): string {
   const d = payDate ?? new Date();
   const mm = String(d.getMonth() + 1).padStart(2, '0');
   const dd = String(d.getDate()).padStart(2, '0');
   return `% ${mm}-${dd}-${d.getFullYear()} % of Completion.xlsx`;
 }
 
-/** Pure workbook construction — testable in Node without a DOM. */
-export async function buildWorkbookBuffer(input: ExportInput): Promise<ArrayBuffer> {
-  const wb = new ExcelJS.Workbook();
-  wb.created = new Date();
-  const palette = new Map(input.legend.map((l) => [l.estimator, l.color.toUpperCase()]));
-  buildTimeNaviSheet(wb, input, palette);
-  buildPivotSheet(wb, input.pivot, palette);
-  if (input.pivotByJob) buildPivotByJobSheet(wb, input.pivotByJob);
-  if (input.payrollPreview) buildPayrollPreviewSheet(wb, input.payrollPreview);
-  // Round 5 §6 — exceptions sheets always written (empty panel → "No exceptions").
-  buildExceptionsSheet(wb, "%'s Exceptions", input.percentExceptions ?? [], input.payDate);
-  buildExceptionsSheet(wb, 'Payroll Exceptions', input.payrollExceptions ?? [], input.payDate);
-  return (await wb.xlsx.writeBuffer()) as ArrayBuffer;
+/** Alias — same as percentsExportFilename. */
+export function exportFilename(payDate: Date | null): string {
+  return percentsExportFilename(payDate);
 }
 
-export async function exportWorkbook(input: ExportInput): Promise<void> {
-  const buf = await buildWorkbookBuffer(input);
+/** `MM-DD-YYYY payroll preview (M-D to M-D).xlsx` */
+export function payrollExportFilename(
+  payDate: Date | null,
+  weekStart: Date | null,
+  weekEnd: Date | null,
+): string {
+  const d = payDate ?? new Date();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const pay = `${mm}-${dd}-${d.getFullYear()}`;
+  const range =
+    weekStart && weekEnd
+      ? `${weekStart.getMonth() + 1}-${weekStart.getDate()} to ${weekEnd.getMonth() + 1}-${weekEnd.getDate()}`
+      : 'week';
+  return `${pay} payroll preview (${range}).xlsx`;
+}
+
+function downloadBuffer(buf: ArrayBuffer, filename: string): void {
   const blob = new Blob([buf], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   });
-  saveAs(blob, exportFilename(input.payDate));
+  saveAs(blob, filename);
+}
+
+/**
+ * Round 6 §9 — %'s workbook sheet order:
+ * Sales by Rep | Sales by Cust | UT SalesbyRep | UT SalesbyCust | timesheets |
+ * TimeNavi Export | Pivot by Crew | Jobs by Crew | Pivot by Job | %'s Exceptions
+ */
+export async function buildPercentsWorkbookBuffer(input: PercentsExportInput): Promise<ArrayBuffer> {
+  const wb = new ExcelJS.Workbook();
+  wb.created = new Date();
+  const palette = new Map(input.legend.map((l) => [l.estimator, l.color.toUpperCase()]));
+
+  buildSalesByRepMirrorSheet(wb, 'Sales by Rep', input.salesByRep);
+  buildSalesByCustMirrorSheet(wb, 'Sales by Cust', input.salesByCust);
+  buildSalesByRepMirrorSheet(wb, 'UT SalesbyRep', input.utSalesByRep);
+  buildSalesByCustMirrorSheet(wb, 'UT SalesbyCust', input.utSalesByCust);
+  buildTimesheetMirrorSheet(wb, input.timesheetMirror);
+  buildTimeNaviSheet(wb, input, palette);
+  buildPivotSheet(wb, input.pivot, palette);
+  buildJobsByCrewSheet(wb, input.jobsByCrew);
+  if (input.pivotByJob) buildPivotByJobSheet(wb, input.pivotByJob);
+  buildExceptionsSheet(wb, "%'s Exceptions", input.percentExceptions ?? [], input.payDate);
+
+  return (await wb.xlsx.writeBuffer()) as ArrayBuffer;
+}
+
+/**
+ * Round 6 §9 — payroll workbook sheet order:
+ * P&L by Job Import | Management Report Export | Payroll Preview | Profitshare Output |
+ * Input #'s | Notes | Final Payroll Breakdown | Journal Entry | Jobs |
+ * Inactive Employees | Payroll Exceptions
+ */
+export async function buildPayrollWorkbookBuffer(input: PayrollExportInput): Promise<ArrayBuffer> {
+  const wb = new ExcelJS.Workbook();
+  wb.created = new Date();
+
+  buildPlImportSheet(wb, input.pl ?? null);
+  buildManagementReportSheet(wb, input.payrollPreview ?? null, input.defaultProfitSharePct ?? 0.38);
+  if (input.payrollPreview) buildPayrollPreviewSheet(wb, input.payrollPreview);
+  else wb.addWorksheet('Payroll Preview');
+  buildProfitshareOutputSheet(wb, input.payrollPreview ?? null, input.defaultProfitSharePct ?? 0.38);
+  buildInputNumbersSheet(wb, input.payrollPreview ?? null);
+  buildNotesSheet(wb, input);
+  buildFinalPayrollSheet(wb, input);
+  buildJournalEntrySheet(wb, input.payrollPreview ?? null);
+  buildJobsSheet(wb, input);
+  buildInactiveEmployeesSheet(wb, input);
+  buildExceptionsSheet(wb, 'Payroll Exceptions', input.payrollExceptions ?? [], input.payDate);
+
+  return (await wb.xlsx.writeBuffer()) as ArrayBuffer;
+}
+
+/** @deprecated Prefer buildPercentsWorkbookBuffer. */
+export async function buildWorkbookBuffer(input: ExportInput): Promise<ArrayBuffer> {
+  return buildPercentsWorkbookBuffer(input);
+}
+
+export async function exportPercentsWorkbook(input: PercentsExportInput): Promise<void> {
+  downloadBuffer(await buildPercentsWorkbookBuffer(input), percentsExportFilename(input.payDate));
+}
+
+export async function exportPayrollWorkbook(input: PayrollExportInput): Promise<void> {
+  downloadBuffer(
+    await buildPayrollWorkbookBuffer(input),
+    payrollExportFilename(input.payDate, input.weekStart, input.weekEnd),
+  );
+}
+
+/** @deprecated Prefer exportPercentsWorkbook. */
+export async function exportWorkbook(input: ExportInput): Promise<void> {
+  return exportPercentsWorkbook(input);
 }
 
 // ---------------------------------------------------------------------------
@@ -474,7 +603,8 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
 
   const analysisFormats = (row: ExcelJS.Row): void => {
     const woCell = row.getCell(analysisStart + 4);
-    if (typeof woCell.value === 'number') woCell.numFmt = MONEY_FMT;
+    // Always apply $-accounting so blank cells format when the user types.
+    if (woCell.value !== '-') woCell.numFmt = MONEY_FMT;
     for (const c of [analysisStart + 5, analysisStart + 6]) {
       const cell = row.getCell(c);
       if (typeof cell.value === 'number') cell.numFmt = PCT_FMT;
@@ -704,11 +834,12 @@ function buildPayrollPreviewSheet(wb: ExcelJS.Workbook, model: PayrollPreviewMod
         po.font = { ...baseFont };
       }
       if (l.ot) r.getCell(3).fill = solidFill('FFFFFF00');
-      // §5.5 — bold `(-) taxes` / `net` labels in F/G on the LAST job line.
+      // Round 6 §6.1 — bold `(-) taxes` / `NEST [IRA]` / `net` labels on the LAST job line.
       if (isLast) {
         r.getCell(6).value = '(-) taxes';
-        r.getCell(7).value = 'net';
-        for (const c of [6, 7]) {
+        r.getCell(7).value = 'NEST [IRA]';
+        r.getCell(8).value = 'net';
+        for (const c of [6, 7, 8]) {
           r.getCell(c).font = { ...baseFont, bold: true };
           r.getCell(c).alignment = center;
         }
@@ -727,12 +858,13 @@ function buildPayrollPreviewSheet(wb: ExcelJS.Workbook, model: PayrollPreviewMod
     }
     const lastLineRow = ws.rowCount;
     const sums = ws.addRow(['', '']);
-    const n = sums.number;
     sums.getCell(3).value = { formula: `SUM(C${firstLineRow}:C${lastLineRow})` };
     sums.getCell(5).value = { formula: `SUM(E${firstLineRow}:E${lastLineRow})` };
-    sums.getCell(6).value = block.net !== null ? { formula: `E${n}-G${n}` } : '';
-    sums.getCell(7).value = block.net ?? '';
-    for (const c of [3, 5, 6, 7]) {
+    // Round 6 §6.1 — taxes / NEST / net blank by default (independent manual cells).
+    sums.getCell(6).value = block.taxes ?? '';
+    sums.getCell(7).value = block.nest ?? '';
+    sums.getCell(8).value = block.net ?? '';
+    for (const c of [3, 5, 6, 7, 8]) {
       sums.getCell(c).numFmt = HOURS_FMT;
       sums.getCell(c).alignment = center;
     }
@@ -792,7 +924,10 @@ function buildPayrollPreviewSheet(wb: ExcelJS.Workbook, model: PayrollPreviewMod
 
     // Value rows first (the formula chain references them).
     const psRow = ws.addRow(['Profit Share']).number;
-    const woRow = ws.addRow(['Work Order Override', ...block.jobs.map((j) => j.workOrderOverride)]).number;
+    const woRow = ws.addRow([
+      'Work Order Override',
+      ...block.jobs.map((j) => (j.workOrderOverride !== null && j.workOrderOverride !== undefined ? j.workOrderOverride : '')),
+    ]).number;
     const pctRow = ws.addRow(['% Completion', ...block.jobs.map((j) => j.percentCompletion)]).number;
     const laborRow = ws.addRow(['- Labor + Wages', ...block.jobs.map((j) => j.laborWages)]).number;
     const milesRow = ws.addRow(['-Mileage', ...block.jobs.map((j) => j.mileage)]).number;
@@ -820,8 +955,10 @@ function buildPayrollPreviewSheet(wb: ExcelJS.Workbook, model: PayrollPreviewMod
       const L = colLetter(1 + i); // B, C, …
       ws.getCell(`${L}${psRow}`).value = { formula: `${L}${incomeRow}*${L}${hdrRow}` };
       const tps = ws.getCell(`${L}${tpsRow}`);
+      // Round 6 §6.2 — (WO Override if set else Profit Share) − Labor − ½ Materials.
+      // % Completion and Mileage are display-only (not in the chain).
       tps.value = {
-        formula: `${L}${woRow}*${L}${pctRow}-${L}${laborRow}-${L}${milesRow}-${L}${halfRow}`,
+        formula: `IF(${L}${woRow}="",${L}${psRow},${L}${woRow})-${L}${laborRow}-${L}${halfRow}`,
       };
       tps.font = { ...baseFont, bold: true };
       ws.getCell(`${L}${pctMatRow}`).value = {

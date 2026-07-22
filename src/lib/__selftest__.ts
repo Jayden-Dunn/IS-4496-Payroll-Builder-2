@@ -4,8 +4,14 @@
  */
 import { extractApKey, normalizeApInput, timesheetApKey } from './apkey';
 import { dateDiffDays, isDarkColor, parsePercentInput } from './format';
+import {
+  findPbjHeaderRow,
+  parseCompletedPercentsWorkbook,
+} from './completedPercents';
 import { parseDate, parseNumberLoose } from './parsers';
 import {
+  applyDavisBaconLeadFloor,
+  computeTotalProfitShare,
   extractLeadParenthetical,
   extractWoOverride,
   extractWoPct,
@@ -21,6 +27,7 @@ import {
   tokensSubset,
   wageRateFor,
 } from './payroll';
+import { formatTimeNaviRow, parseTimeNaviRowRef } from './pivotByJob';
 import { orderLeadFirst } from './pivot';
 import { applyPivotView, EMPTY_PIVOT_VIEW } from './pivotView';
 import {
@@ -37,7 +44,13 @@ import {
   percentIsFlagged,
   suggestPercent,
 } from './timenavi';
-import type { DirectoryEmployee, PivotModel, ReportRow } from './types';
+import type {
+  CellValue,
+  DirectoryEmployee,
+  PivotModel,
+  ReportRow,
+  WorkbookData,
+} from './types';
 
 interface TestResult {
   name: string;
@@ -423,6 +436,158 @@ export function runSelfTests(): boolean {
     { rate: 18, defaulted: true, prevailing: false },
   );
 
+  // --- Round 6 §6.2: profit-share chain ----------------------------------------------------------
+  check(
+    '§6.2 Antonio: PS − labor − ½mat → 200.165',
+    computeTotalProfitShare({
+      profitShare: 432,
+      workOrderOverride: null,
+      laborWages: 188.11,
+      halfMaterials: 43.725,
+      percentCompletion: 1,
+      mileage: 12.5,
+    }),
+    200.165,
+  );
+  check(
+    '§6.2 % Completion + mileage do not change TPS',
+    computeTotalProfitShare({
+      profitShare: 432,
+      workOrderOverride: null,
+      laborWages: 188.11,
+      halfMaterials: 43.725,
+      percentCompletion: 0.5,
+      mileage: 999,
+    }),
+    200.165,
+  );
+  check(
+    '§6.2 WO override wins when set',
+    computeTotalProfitShare({
+      profitShare: 432,
+      workOrderOverride: 500,
+      laborWages: 100,
+      halfMaterials: 50,
+    }),
+    350,
+  );
+
+  // --- Round 6 §7.1 Branch 1 + §7.2 job rules ----------------------------------------------------
+  const ruleSettings = {
+    ...pwSettings,
+    jobRateRules: [
+      {
+        id: 'r1',
+        apKey: '24314',
+        rate: 22,
+        employeeNames: [] as string[],
+        includeSuffixes: true,
+        note: 'all painters AP24314',
+      },
+      {
+        id: 'r2',
+        apKey: '24314',
+        rate: 30,
+        employeeNames: ['Leonardo'],
+        includeSuffixes: true,
+        note: 'Leonardo only',
+      },
+      {
+        id: 'r3',
+        apKey: '24393',
+        rate: 15,
+        employeeNames: [] as string[],
+        includeSuffixes: true,
+        note: 'below DB',
+      },
+    ],
+  };
+  check(
+    '§7.2 AP24314 @ 22 all painters beats employee default',
+    resolveLineRate('ANTONIO ZUNIGA', 'AP24314 Ext', false, { ...ruleSettings, apKey: '24314' }),
+    { rate: 22, defaulted: false, prevailing: false, fromJobRule: true, ruleNote: 'all painters AP24314' },
+  );
+  check(
+    '§7.2 named employee rule beats all-painters',
+    resolveLineRate('Leonardo Perez', 'AP24314 Ext', false, { ...ruleSettings, apKey: '24314' }).rate,
+    30,
+  );
+  check(
+    '§7.1 Branch 1: rule at $15 on DB job still pays 19.18',
+    resolveLineRate('ANTONIO ZUNIGA', 'AP24393 SNRHA *SS*', false, { ...ruleSettings, apKey: '24393' }).rate,
+    19.18,
+  );
+  check(
+    '§7.1 forceNonDb skips Branch 1 floor',
+    resolveLineRate('ANTONIO ZUNIGA', 'AP24393 SNRHA *SS*', false, {
+      ...ruleSettings,
+      apKey: '24393',
+      forceNonDb: true,
+    }).rate,
+    15,
+  );
+  check(
+    '§7.1 forceNonDb clears prevailing flag',
+    resolveLineRate('ANTONIO ZUNIGA', 'AP24393 SNRHA *SS*', false, {
+      ...ruleSettings,
+      apKey: '24393',
+      forceNonDb: true,
+    }).prevailing,
+    false,
+  );
+
+  // --- Round 6 §7.1 Branch 2: crew-lead Davis-Bacon floor ----------------------------------------
+  check(
+    '§7.1 Branch 2: 10h DB, chain 100 → 191.80 + floorApplied',
+    applyDavisBaconLeadFloor({
+      isDbJob: true,
+      isSubcontractor: false,
+      timesheetHoursOnJob: 10,
+      profitSharePay: 100,
+      dbRate: 19.18,
+    }),
+    { pay: 191.8, floorApplied: true, floor: 191.8, priorPay: 100 },
+  );
+  check(
+    '§7.1 Branch 2: non-DB same shape pays 100',
+    applyDavisBaconLeadFloor({
+      isDbJob: false,
+      isSubcontractor: false,
+      timesheetHoursOnJob: 10,
+      profitSharePay: 100,
+      dbRate: 19.18,
+    }),
+    { pay: 100, floorApplied: false, floor: 0, priorPay: 100 },
+  );
+  check(
+    '§7.1 Branch 2: subcontractor exempt',
+    applyDavisBaconLeadFloor({
+      isDbJob: true,
+      isSubcontractor: true,
+      timesheetHoursOnJob: 10,
+      profitSharePay: 100,
+      dbRate: 19.18,
+    }).floorApplied,
+    false,
+  );
+  check(
+    '§7.1 Branch 2: zero hours → no-op',
+    applyDavisBaconLeadFloor({
+      isDbJob: true,
+      isSubcontractor: false,
+      timesheetHoursOnJob: 0,
+      profitSharePay: 100,
+      dbRate: 19.18,
+    }).floorApplied,
+    false,
+  );
+
+  // --- Round 6 §5.1: TimeNavi row format ---------------------------------------------------------
+  check('TimeNavi row format', formatTimeNaviRow(19), 'TimeNavi row 19');
+  check('TimeNavi row parse labeled', parseTimeNaviRowRef('TimeNavi row 19'), 19);
+  check('TimeNavi row parse bare', parseTimeNaviRowRef('19'), 19);
+  check('TimeNavi row parse junk', parseTimeNaviRowRef('NOT ON CALENDAR'), null);
+
   // --- Round 5 §4: job-naming chain --------------------------------------------------------------
   check('baseApKey: suffixed', baseApKey('24180-A'), '24180');
   check('baseApKey: multi-suffix', baseApKey('21848-A5'), '21848');
@@ -474,6 +639,82 @@ export function runSelfTests(): boolean {
     'jobNames: unresolved → AP{key} + blank',
     jobDisplayPair('99999', emptySrc),
     { poLabel: 'AP99999', customerName: '', usedBaseKey: false, unresolved: true },
+  );
+
+  // --- Round 6 §2.2 Slot A: completed %'s workbook ------------------------------
+  const dA = new Date(2026, 5, 27); // 6/27
+  const dB = new Date(2026, 5, 28);
+  // App 2-row header: analysis labels on row 0, weekdays on row 1.
+  const twoRow: CellValue[][] = [
+    [
+      'NV PAYROLL: 7/10/2026',
+      dA,
+      dB,
+      'Total hrs',
+      '',
+      'AP#',
+      'On Calendar?',
+      'Estimator',
+      'Crew Lead',
+      'WO Override',
+      'WO%',
+      '% of Completion',
+      'Notes',
+    ],
+    ['', 'Fri', 'Sat', '', '', '', '', '', '', '', '', '', ''],
+  ];
+  check('pbj header: app 2-row', findPbjHeaderRow(twoRow), 0);
+
+  // Legacy human 4-row: title / blank / sum label / analysis headers.
+  const fourRow: CellValue[][] = [
+    ['NV PAYROLL: 7/10/2026'],
+    [''],
+    ['Sum of hours'],
+    [
+      'Row Labels',
+      dA,
+      dB,
+      'Total hrs',
+      'AP#',
+      'On Calendar?',
+      'Estimator',
+      'Crew Lead',
+      'WO Override',
+      'WO%',
+      '% of Completion',
+      'Notes',
+    ],
+  ];
+  check('pbj header: legacy 4-row', findPbjHeaderRow(fourRow), 3);
+
+  const missingTs: WorkbookData = {
+    sheets: [{ name: 'Pivot by Job', rows: twoRow }],
+  };
+  const miss = parseCompletedPercentsWorkbook(missingTs);
+  check(
+    'slot A: missing timesheets sheet',
+    'error' in miss
+      ? miss.error
+      : '',
+    "This file has no 'timesheets' sheet — export it from the %'s process first",
+  );
+
+  const missingPbj: WorkbookData = {
+    sheets: [
+      {
+        name: 'timesheets',
+        rows: [
+          ['username', 'group', 'local_date', 'hours', 'jobcode_1', 'jobcode_2'],
+          ['ana.b', "Carlos's Crew", dA, 8, 'Cust', 'AP24314 Ext'],
+        ],
+      },
+    ],
+  };
+  const missPbj = parseCompletedPercentsWorkbook(missingPbj);
+  check(
+    'slot A: missing Pivot by Job sheet',
+    'error' in missPbj ? missPbj.error : '',
+    "This file has no 'Pivot by Job' sheet — export it from the %'s process first",
   );
 
   const failed = results.filter((r) => !r.pass);

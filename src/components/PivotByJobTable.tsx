@@ -336,9 +336,30 @@ function JobBlock({
     <>
       <tr id={`pbj-${job.id}`} style={rowStyle}>
         <td className="xcell pl-4 font-bold" style={hb}>
-          <span className="inline-flex items-center">
+          <span className="inline-flex items-center gap-1">
             <Toggle open={jobOpen} onClick={onToggleJob} label={job.jobcode2} />
             {job.jobcode2}
+            {a.dbPatternMatch && (
+              <button
+                type="button"
+                className={`ml-1 inline-flex h-4 items-center rounded-xs px-1 text-[9px] font-bold leading-none ${
+                  a.dbOverride
+                    ? 'border border-neutral-400 bg-neutral-100 text-neutral-500 line-through'
+                    : 'border border-amber-700 bg-amber-100 text-amber-900'
+                }`}
+                title={
+                  a.dbOverride
+                    ? 'Davis-Bacon pattern matched — click to re-enable DB floor'
+                    : 'Davis-Bacon job — click to force non-DB for this row'
+                }
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onEditJob(job.id, { dbOverride: !a.dbOverride });
+                }}
+              >
+                DB
+              </button>
+            )}
           </span>
         </td>
         {hourCells(job.byDate, 'xcell', hb)}
@@ -360,19 +381,41 @@ function JobBlock({
         <td className="xcell text-center font-bold" title={a.crewLeadResolution?.raw ? `From "(${a.crewLeadResolution.raw})"` : undefined}>
           <EditCell value={a.crewLead} onCommit={(t) => onEditJob(job.id, { crewLead: t })} className="text-center" placeholder="—" />
         </td>
-        <td className="xcell text-center font-bold" title={a.woOverrideSource ?? undefined}>
+        <td
+          className="xcell text-center font-bold"
+          title={
+            a.woOverrideSuggestion !== null
+              ? `Calendar suggests $${fmtAccounting(a.woOverrideSuggestion)}${
+                  a.woOverrideSuggestionSource ? ` — ${a.woOverrideSuggestionSource}` : ''
+                }`
+              : undefined
+          }
+        >
           {a.hourly ? (
             '-'
           ) : (
             <EditCell
               value={a.woOverride !== null ? `$${fmtAccounting(a.woOverride)}` : ''}
-              onCommit={(t) => onEditJob(job.id, { woOverride: parseMoneyInput(t) })}
+              onCommit={(t) => onEditJob(job.id, { woOverride: t.trim() === '' ? null : parseMoneyInput(t) })}
               className="text-center"
-              placeholder="—"
+              placeholder={
+                a.woOverrideSuggestion !== null
+                  ? `suggest $${fmtAccounting(a.woOverrideSuggestion)}`
+                  : '—'
+              }
             />
           )}
         </td>
-        <td className="xcell text-center font-bold" title={a.woPctSource ?? undefined}>
+        <td
+          className="xcell text-center font-bold"
+          title={
+            a.woPctSuggestion !== null
+              ? `Calendar suggests ${Math.round(a.woPctSuggestion * 100)}%${
+                  a.woPctSuggestionSource ? ` — ${a.woPctSuggestionSource}` : ''
+                }`
+              : undefined
+          }
+        >
           {a.hourly ? (
             '-'
           ) : (
@@ -383,6 +426,9 @@ function JobBlock({
                 onEditJob(job.id, { woPct: typeof p === 'number' ? p : null });
               }}
               className="text-center"
+              placeholder={
+                a.woPctSuggestion !== null ? `suggest ${Math.round(a.woPctSuggestion * 100)}%` : '—'
+              }
             />
           )}
         </td>

@@ -12,18 +12,21 @@ import {
   timesheetDisplayMap,
 } from './jobNames';
 import {
+  applyDavisBaconLeadFloor,
+  computeTotalProfitShare,
   directoryFromTimesheet,
   extractLeadParenthetical,
   extractWoOverride,
   extractWoPct,
+  isPrevailingWageJob,
   jobDisplayName,
-  profitSharePctFor,
   resolveCrewLead,
   resolveLineRate,
   splitOvertime,
   stripSingleLetterTokens,
   titleCaseLeadName,
   tokensSubset,
+  wageRateFor,
   type LeadResolverContext,
   type OtJobHours,
 } from './payroll';
@@ -34,6 +37,7 @@ import type {
   EnrichedTimesheetRow,
   HourlyBlock,
   HourlyLine,
+  InactiveEmployeeBlock,
   PainterSectionEntry,
   PayrollEditsMap,
   PayrollPreviewModel,
@@ -141,6 +145,8 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     office: boolean;
     /** Text used for prevailing-wage pattern matching (§5.8). */
     jobText: string;
+    /** Pivot §7.1 — user forced non-DB on a pattern-matched job. */
+    forceNonDb: boolean;
   }
   const empJobs = new Map<string, EmpJob[]>(); // username → jobs in first-encounter order
   const jobRowById = new Map(pbj.customers.flatMap((c) => c.jobs.map((j) => [j.id, j] as const)));
@@ -175,6 +181,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
         lastRowIndex: idx,
         office: r.apKey === 'OFFICE',
         jobText: `${r.jobcode1} ${r.jobcode2} ${eventTitle}`,
+        forceNonDb: pbjJob?.analysis.dbOverride === true,
       };
       list.push(j);
     }
@@ -232,15 +239,15 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     if (isHourlyJob(r.percent, res.display, r.event)) continue;
     const woSrc = extractWoOverride(r.description);
     const pctSrc = extractWoPct(r.description);
+    void woSrc;
+    void pctSrc;
     calOnlyJobs.push({
       row: r,
       lead: res.names,
       sub: res.sub,
       split: res.split,
-      woOverride: woSrc?.amount ?? null,
-      woPct:
-        pctSrc?.pct ??
-        profitSharePctFor(res.names[0], settings.profitShare, settings.defaultProfitSharePct),
+      woOverride: null,
+      woPct: null,
     });
     for (const n of res.names) {
       const up = n.toUpperCase();
@@ -275,7 +282,12 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     const pushLine = (j: EmpJob, hours: number, isOt: boolean): void => {
       const lineId = `${emp.username}\u0000${j.jobId}${isOt ? ':OT' : ''}`;
       const e = edits[`hl:${lineId}`] ?? {};
-      const rateInfo = resolveLineRate(emp.fullName, j.jobText, j.hourly, settings);
+      const rateInfo = resolveLineRate(emp.fullName, j.jobText, j.hourly, {
+        ...settings,
+        apKey: j.apKey,
+        jobRateRules: settings.jobRateRules,
+        forceNonDb: j.forceNonDb,
+      });
       const baseRate = e.rate !== undefined ? e.rate : rateInfo.rate;
       const rate = isOt ? round2(baseRate * 1.5) : baseRate;
       const isOfficeLine = officeStyle || j.office;
@@ -295,6 +307,8 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
         rateDefaulted: rateInfo.defaulted && e.rate === undefined,
         prevailing: rateInfo.prevailing,
         belowPrevailing: rateInfo.prevailing && baseRate < settings.prevailingMinRate,
+        fromJobRule: rateInfo.fromJobRule && e.rate === undefined ? true : undefined,
+        ruleNote: rateInfo.fromJobRule && e.rate === undefined ? rateInfo.ruleNote : undefined,
         ot: isOt,
         hourlyJob: j.hourly,
         colorHex: j.colorHex,
@@ -326,6 +340,8 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       lines,
       totalHours,
       totalPay,
+      taxes: blockEdit.taxes !== undefined ? blockEdit.taxes : null,
+      nest: blockEdit.nest !== undefined ? blockEdit.nest : null,
       net: blockEdit.net !== undefined ? blockEdit.net : null,
       inactive: emp.inactive,
     };
@@ -352,17 +368,43 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
   // ----- PS blocks -------------------------------------------------------------
   const plByJob = pl?.byJob ?? new Map<string, PlJobMetrics>();
 
+  /** Settings crew-map WO% only — no silent global default (§6.2). */
+  const leadMapPct = (leadUpper: string): number | null => {
+    const entry = settings.profitShare.find(
+      (e) => tokensSubset(e.lead, leadUpper) || tokensSubset(leadUpper, e.lead),
+    );
+    return entry ? entry.pct : null;
+  };
+
+  /** Lead's own timesheet hours on an AP# (QB-adjusted). */
+  const leadHoursOnAp = (leadUpper: string, apKey: string | null): number => {
+    if (!apKey) return 0;
+    const emp = leadEmps.find(
+      (e) => tokensSubset(e.fullName, leadUpper) || tokensSubset(leadUpper, e.fullName),
+    );
+    if (!emp) return 0;
+    return round2((empJobs.get(emp.username) ?? []).filter((j) => j.apKey === apKey).reduce((a, j) => a + j.hours, 0));
+  };
+
+  const jobTextForAp = (apKey: string | null, customer: string, jobShort: string): string => {
+    const eventTitle = apKey ? (eventByApKey.get(apKey)?.event ?? '') : '';
+    return `${customer} ${jobShort} ${eventTitle}`;
+  };
+
   const buildPsJob = (
     blockKey: string,
     jobRowId: string,
     apKey: string | null,
     jobShort: string,
     customer: string,
-    woPct: number | null,
-    woOverride: number | null,
+    pivotWoPct: number | null,
+    pivotWoOverride: number | null,
+    leadDefaultWoPct: number | null,
     percent: number,
     split: number,
     colorHex: string | null,
+    leadUpper: string,
+    isSub: boolean,
   ): PsJobColumn => {
     const e = edits[`ps:${blockKey}:${jobRowId}`] ?? {};
     const metrics = apKey ? plByJob.get(apKey) : undefined;
@@ -371,22 +413,54 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     const materials = e.materials !== undefined ? e.materials : (metrics?.materials ?? 0);
     const laborWages = e.laborWages !== undefined ? e.laborWages : (metrics?.laborWagesSubs ?? 0);
     const mileage = e.mileage !== undefined ? e.mileage : (metrics?.mileage ?? 0);
-    // §5.6 precision — full-precision derived values; formats round the display.
     const halfMaterials = e.halfMaterials !== undefined ? e.halfMaterials : materials / 2;
-    const pct = woPct ?? 0;
+    // Round 6 §6.2 — WO% from typed pivot cell, else Settings crew map (no global assume).
+    const effectiveWoPct = pivotWoPct ?? leadDefaultWoPct;
+    const pct = effectiveWoPct ?? 0;
     const profitShare = income * pct;
     const workOrderOverride =
-      e.workOrderOverride !== undefined ? e.workOrderOverride : (woOverride ?? profitShare);
+      e.workOrderOverride !== undefined ? e.workOrderOverride : pivotWoOverride;
     const percentCompletion = e.percentCompletion !== undefined ? e.percentCompletion : percent;
-    const totalProfitShare =
-      workOrderOverride * percentCompletion - laborWages - mileage - halfMaterials;
+    let totalProfitShare = computeTotalProfitShare({
+      profitShare,
+      workOrderOverride,
+      laborWages,
+      halfMaterials,
+      percentCompletion,
+      mileage,
+    });
+    const splitWith = Math.max(1, split);
+    let totalAfterSplit = totalProfitShare / splitWith;
+
+    // Round 6 §7.1 Branch 2 — Davis-Bacon floor after chain + split.
+    const jobText = jobTextForAp(apKey, customer, jobShort);
+    const pbjJobForDb = apKey
+      ? pbj.customers.flatMap((c) => c.jobs).find((j) => j.analysis.apKey === apKey)
+      : undefined;
+    const isDbJob =
+      pbjJobForDb !== undefined
+        ? pbjJobForDb.analysis.isDbJob
+        : isPrevailingWageJob(jobText, settings.prevailingWagePatterns);
+    const hoursOnJob = leadHoursOnAp(leadUpper, apKey);
+    const floorResult = applyDavisBaconLeadFloor({
+      isDbJob,
+      isSubcontractor: isSub,
+      timesheetHoursOnJob: hoursOnJob,
+      profitSharePay: totalAfterSplit,
+      dbRate: settings.prevailingMinRate,
+    });
+    if (floorResult.floorApplied) {
+      totalAfterSplit = floorResult.pay;
+      if (splitWith <= 1) totalProfitShare = floorResult.pay;
+    }
+
     return {
       jobRowId,
       apKey,
       colorHex,
       jobShort,
       customer,
-      woPct,
+      woPct: effectiveWoPct,
       profitShare,
       workOrderOverride,
       percentCompletion,
@@ -394,8 +468,16 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       mileage,
       halfMaterials,
       totalProfitShare,
-      splitWith: split,
-      totalAfterSplit: totalProfitShare / Math.max(1, split),
+      splitWith,
+      totalAfterSplit,
+      ...(floorResult.floorApplied
+        ? {
+            dbFloorApplied: true,
+            dbFloor: floorResult.floor,
+            dbFloorPriorPay: floorResult.priorPay,
+            dbFloorHours: hoursOnJob,
+          }
+        : {}),
       missingFromPl,
       income,
       materials,
@@ -431,9 +513,12 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
           display.customerName || job.id.split('\u0000')[0],
           job.analysis.woPct,
           job.analysis.woOverride,
+          leadMapPct(leadUpper),
           pctNum,
           job.analysis.split,
           job.colorHex,
+          leadUpper,
+          meta.sub,
         ),
       );
     }
@@ -450,9 +535,12 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
           display.customerName,
           cj.woPct,
           cj.woOverride,
+          leadMapPct(leadUpper),
           pctNum,
           cj.split,
           colorByEstimator.get(cj.row.estimator) ?? null,
+          leadUpper,
+          meta.sub,
         ),
       );
     }
@@ -529,11 +617,66 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
   const managers = roster.filter((r) => r.section === 'MANAGER SALARY').map(salaryBlock)
     .sort((a, b) => byText(firstNameOf(a.name), firstNameOf(b.name)));
 
-  // ----- inactive employees with zero hours (feeds Payroll Exceptions only) --
-  const namesWithHours = new Set([...emps.values()].map((e) => e.fullName.toLowerCase()));
-  const inactiveZeroHours = directory
-    .filter((d) => !d.active && !namesWithHours.has(d.fullName.toLowerCase()))
-    .map((d) => d.fullName)
+  // ----- Round 6 §4.10 Inactive Employees tab --------------------------------
+  const norm = (s: string): string => s.trim().toLowerCase();
+  const namesWithHours = new Set<string>();
+  for (const b of painters) {
+    if (b.totalHours > 0) namesWithHours.add(norm(b.employeeName));
+  }
+  for (const b of office) {
+    if (b.totalHours > 0) namesWithHours.add(norm(b.employeeName));
+  }
+  for (const b of leads) namesWithHours.add(norm(b.leadName));
+  for (const entry of painterSequence) {
+    if (entry.kind === 'ps') namesWithHours.add(norm(entry.block.leadName));
+    else if (entry.block.totalHours > 0) namesWithHours.add(norm(entry.block.employeeName));
+  }
+
+  const salariedNames = new Set(settings.salariedRoster.map((r) => norm(r.name)));
+  const leadNameSet = new Set<string>([
+    ...settings.profitShare.map((p) => norm(p.lead)),
+    ...settings.subcontractors.map((s) => norm(s)),
+  ]);
+  const isKnownLead = (name: string): boolean => leadNameSet.has(norm(name));
+
+  interface InactiveCand {
+    name: string;
+    directoryInactive: boolean;
+  }
+  const inactiveCands = new Map<string, InactiveCand>();
+
+  for (const d of directory) {
+    const key = norm(d.fullName);
+    if (namesWithHours.has(key) || salariedNames.has(key)) continue;
+    inactiveCands.set(key, { name: d.fullName, directoryInactive: !d.active });
+  }
+  for (const p of settings.profitShare) {
+    const key = norm(p.lead);
+    if (namesWithHours.has(key) || salariedNames.has(key) || inactiveCands.has(key)) continue;
+    inactiveCands.set(key, { name: p.lead, directoryInactive: false });
+  }
+  for (const sub of settings.subcontractors) {
+    const key = norm(sub);
+    if (namesWithHours.has(key) || salariedNames.has(key) || inactiveCands.has(key)) continue;
+    inactiveCands.set(key, { name: sub, directoryInactive: false });
+  }
+
+  const inactiveEmployees: InactiveEmployeeBlock[] = [...inactiveCands.values()]
+    .map((c) => {
+      const rateInfo = wageRateFor(c.name, settings.wageRates, settings.defaultWageRate, false);
+      return {
+        name: c.name,
+        displayName: stripSingleLetterTokens(c.name),
+        rateNote: `$${rateInfo.rate.toFixed(2)}/hr`,
+        isLead: isKnownLead(c.name),
+        directoryInactive: c.directoryInactive,
+      };
+    })
+    .sort((a, b) => byText(a.displayName, b.displayName));
+
+  const inactiveZeroHours = inactiveEmployees
+    .filter((e) => e.directoryInactive)
+    .map((e) => e.name)
     .sort(byText);
 
   return {
@@ -546,6 +689,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     admin,
     estimators,
     managers,
+    inactiveEmployees,
     inactiveZeroHours,
   };
 }

@@ -7,6 +7,9 @@ interface TopBarProps {
   exportFiltered: boolean;
   onExportFilteredChange: (v: boolean) => void;
   filtersActive: boolean;
+  /** Round 6 §1 — process mode. */
+  mode: 'percents' | 'payroll';
+  onModeChange: (mode: 'percents' | 'payroll') => void;
 }
 
 export function TopBar({
@@ -17,6 +20,8 @@ export function TopBar({
   exportFiltered,
   onExportFilteredChange,
   filtersActive,
+  mode,
+  onModeChange,
 }: TopBarProps): JSX.Element {
   return (
     <header className="flex shrink-0 items-center gap-4 border-b border-neutral-300 bg-white px-4 py-2 shadow-sm">
@@ -28,6 +33,30 @@ export function TopBar({
           AllPro Painters · weekly percent-completion payroll · runs entirely in your browser
         </span>
       </div>
+      <div
+        className="flex rounded-md border border-neutral-300 p-0.5 text-xs font-semibold"
+        role="group"
+        aria-label="Process mode"
+      >
+        <button
+          type="button"
+          className={`rounded px-3 py-1 ${
+            mode === 'percents' ? 'bg-neutral-900 text-white' : 'text-neutral-600 hover:bg-neutral-100'
+          }`}
+          onClick={() => onModeChange('percents')}
+        >
+          %&apos;s Report
+        </button>
+        <button
+          type="button"
+          className={`rounded px-3 py-1 ${
+            mode === 'payroll' ? 'bg-neutral-900 text-white' : 'text-neutral-600 hover:bg-neutral-100'
+          }`}
+          onClick={() => onModeChange('payroll')}
+        >
+          Payroll
+        </button>
+      </div>
       <div className="ml-auto flex items-center gap-2">
         <button
           type="button"
@@ -38,18 +67,20 @@ export function TopBar({
         >
           ⚙ Settings
         </button>
-        <label
-          className={`flex items-center gap-1 text-[11px] ${filtersActive ? 'text-neutral-700' : 'text-neutral-400'}`}
-          title="When on, the Pivot by Crew sheet exports exactly what the on-screen filters show. Off = full data."
-        >
-          <input
-            type="checkbox"
-            checked={exportFiltered}
-            disabled={!filtersActive}
-            onChange={(e) => onExportFilteredChange(e.target.checked)}
-          />
-          Export current filtered view
-        </label>
+        {mode === 'percents' && (
+          <label
+            className={`flex items-center gap-1 text-[11px] ${filtersActive ? 'text-neutral-700' : 'text-neutral-400'}`}
+            title="When on, the Pivot by Crew sheet exports exactly what the on-screen filters show. Off = full data."
+          >
+            <input
+              type="checkbox"
+              checked={exportFiltered}
+              disabled={!filtersActive}
+              onChange={(e) => onExportFilteredChange(e.target.checked)}
+            />
+            Export current filtered view
+          </label>
+        )}
         <button
           type="button"
           className="btn-primary"

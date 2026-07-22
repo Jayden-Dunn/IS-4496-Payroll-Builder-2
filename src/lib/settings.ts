@@ -1,6 +1,7 @@
 import type {
   AppSettings,
   DirectoryEmployee,
+  JobRateRule,
   LegendEntry,
   ProfitShareEntry,
   SalariedEntry,
@@ -117,6 +118,28 @@ export const DEFAULT_PREVAILING_MIN_RATE = 19.18;
 // missing payroll sections get the seeds.
 const STORAGE_KEY = 'pct-completion-builder.settings.v4';
 const STORAGE_KEY_V3 = 'pct-completion-builder.settings.v3';
+const MODE_KEY = 'pct-completion-builder.app-mode.v1';
+
+/** Round 6 §1 — %'s Report vs Payroll process. */
+export type AppMode = 'percents' | 'payroll';
+
+export function loadAppMode(): AppMode {
+  try {
+    const raw = localStorage.getItem(MODE_KEY);
+    if (raw === 'payroll' || raw === 'percents') return raw;
+  } catch {
+    // ignore
+  }
+  return 'percents';
+}
+
+export function saveAppMode(mode: AppMode): void {
+  try {
+    localStorage.setItem(MODE_KEY, mode);
+  } catch {
+    // ignore
+  }
+}
 
 /**
  * Heal a stored pivot column order so every DEFAULT_PIVOT_COLUMNS entry is
@@ -158,9 +181,11 @@ export function defaultSettings(): AppSettings {
     defaultWageRate: DEFAULT_WAGE_RATE,
     salariedRoster: DEFAULT_SALARIED.map((e) => ({ ...e })),
     mileageRate: DEFAULT_MILEAGE_RATE,
+    officeMileageRate: 0.5,
     subcontractors: [...DEFAULT_SUBCONTRACTORS],
     prevailingWagePatterns: [...DEFAULT_PREVAILING_PATTERNS],
     prevailingMinRate: DEFAULT_PREVAILING_MIN_RATE,
+    jobRateRules: [],
   };
 }
 
@@ -253,6 +278,28 @@ function parsePayroll(raw: unknown): Partial<AppSettings> {
   }
   if (typeof r.prevailingMinRate === 'number' && Number.isFinite(r.prevailingMinRate)) {
     out.prevailingMinRate = r.prevailingMinRate;
+  }
+  if (typeof r.officeMileageRate === 'number' && Number.isFinite(r.officeMileageRate)) {
+    out.officeMileageRate = r.officeMileageRate;
+  }
+  if (Array.isArray(r.jobRateRules)) {
+    const rules: JobRateRule[] = [];
+    for (const raw of r.jobRateRules) {
+      if (typeof raw !== 'object' || raw === null) continue;
+      const x = raw as Record<string, unknown>;
+      if (typeof x.apKey !== 'string' || typeof x.rate !== 'number') continue;
+      rules.push({
+        id: typeof x.id === 'string' ? x.id : `rule-${rules.length}`,
+        apKey: x.apKey.trim(),
+        rate: x.rate,
+        employeeNames: Array.isArray(x.employeeNames)
+          ? x.employeeNames.filter((n): n is string => typeof n === 'string')
+          : [],
+        includeSuffixes: x.includeSuffixes !== false,
+        note: typeof x.note === 'string' ? x.note : '',
+      });
+    }
+    out.jobRateRules = rules;
   }
   return out;
 }
@@ -363,31 +410,70 @@ export function newerDirectory(a: SavedDirectory | null, b: SavedDirectory | nul
   return (a.uploadedAt || '') >= (b.uploadedAt || '') ? a : b;
 }
 
-/**
- * Load the app-permanent employee list from `public/employee-directory.json`
- * (same file every device sees when hitting this server / built dist).
- */
-export async function fetchAppDirectory(): Promise<SavedDirectory | null> {
+export type DirectoryPersistResult =
+  | { ok: true }
+  | { ok: false; status: number; message: string };
+
+/** Whether the shared (cross-device) store is wired up on this host. */
+export type DirectoryStoreStatus = 'ready' | 'empty' | 'unconfigured' | 'error';
+
+export async function probeDirectoryStore(): Promise<DirectoryStoreStatus> {
   try {
-    const res = await fetch('/employee-directory.json', { cache: 'no-store' });
-    if (!res.ok) return null;
-    return parseSavedDirectory(await res.json());
+    const res = await fetch('/api/employee-directory', { cache: 'no-store' });
+    if (res.status === 503) return 'unconfigured';
+    if (res.status === 404) return 'empty';
+    if (res.ok) return 'ready';
+    return 'error';
   } catch {
-    return null;
+    return 'error';
   }
 }
 
-/** Write the current list into the app file (dev server API). Falls back silently offline. */
-export async function persistAppDirectory(saved: SavedDirectory): Promise<boolean> {
+/**
+ * Load the shared employee list (Vercel Blob via /api, or local public file).
+ * This is what makes phone + desktop see the same list on the Vercel URL.
+ */
+export async function fetchAppDirectory(): Promise<SavedDirectory | null> {
+  try {
+    const res = await fetch('/api/employee-directory', { cache: 'no-store' });
+    if (res.ok) return parseSavedDirectory(await res.json());
+  } catch {
+    // fall through
+  }
+  // Local vite / static fallback (not used for cross-device on Vercel).
+  try {
+    const res = await fetch('/employee-directory.json', { cache: 'no-store' });
+    if (res.ok) return parseSavedDirectory(await res.json());
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+/** Write the current list to the shared store (Vercel Blob in production). */
+export async function persistAppDirectory(saved: SavedDirectory): Promise<DirectoryPersistResult> {
   try {
     const res = await fetch('/api/employee-directory', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(saved),
     });
-    return res.ok;
+    if (res.ok) return { ok: true };
+    let message = `Could not sync employee list (HTTP ${res.status}).`;
+    try {
+      const body = (await res.json()) as { message?: string };
+      if (body.message) message = body.message;
+    } catch {
+      // ignore
+    }
+    return { ok: false, status: res.status, message };
   } catch {
-    return false;
+    return {
+      ok: false,
+      status: 0,
+      message:
+        'Shared sync unavailable — your list is still saved in this browser. Cross-device sync is optional.',
+    };
   }
 }
 

@@ -76,7 +76,7 @@ function HourlyBlockView({
   onEdit: PayrollPreviewProps['onEdit'];
   tsheets?: boolean;
 }): JSX.Element {
-  const taxes = block.net !== null ? block.totalPay - block.net : null;
+  // Round 6 §6.1 — taxes / nest / net are independent manual cells (never total − net).
   const bodyCls = tsheets ? 'bg-[#F9F9F9]' : '';
   const dotted = tsheets ? 'border-b border-dotted border-neutral-400' : '';
   return (
@@ -128,21 +128,26 @@ function HourlyBlockView({
                 <NumCell value={l.hours} onCommit={(n) => onEdit(`hl:${l.id}`, { hours: n ?? 0 })} className="text-center" />
               </td>
               <td
-                className={`xcell text-center ${l.rateDefaulted ? 'bg-amber-50' : bodyCls} ${l.belowPrevailing ? 'bg-red-100' : ''} ${dotted}`}
+                className={`xcell text-center ${l.rateDefaulted ? 'bg-amber-50' : bodyCls} ${l.belowPrevailing ? 'bg-red-100' : ''} ${l.fromJobRule ? 'ring-1 ring-inset ring-sky-300' : ''} ${dotted}`}
                 title={
                   l.belowPrevailing
-                    ? 'Prevailing-wage job paid below the prevailing minimum'
-                    : l.prevailing
-                      ? 'Prevailing-wage job — rate = max(default, prevailing minimum)'
-                      : l.rateDefaulted
-                        ? 'No configured wage rate — default applied'
-                        : undefined
+                    ? 'Davis-Bacon job paid below the Davis-Bacon rate'
+                    : l.fromJobRule
+                      ? l.ruleNote
+                        ? `Job-rate rule: ${l.ruleNote}`
+                        : 'Job-rate rule applied'
+                      : l.prevailing
+                        ? 'Davis-Bacon job — rate = max(resolved, Davis-Bacon rate)'
+                        : l.rateDefaulted
+                          ? 'No configured wage rate — default applied'
+                          : undefined
                 }
               >
                 <NumCell value={l.rate} onCommit={(n) => onEdit(`hl:${l.id}`, { rate: n ?? 0 })} className="text-center" />
               </td>
               <td className={`xcell text-center ${dotted} ${bodyCls}`}>{fmtAccounting(l.hours * l.rate)}</td>
               <td className="xcell text-center font-bold">{isLast ? '(-) taxes' : ''}</td>
+              <td className="xcell text-center font-bold">{isLast ? 'NEST [IRA]' : ''}</td>
               <td className="xcell text-center font-bold">{isLast ? 'net' : ''}</td>
             </tr>
           );
@@ -153,7 +158,12 @@ function HourlyBlockView({
           <td className={`xcell border-t border-t-neutral-500 text-center ${bodyCls}`}>{block.totalHours.toFixed(2)}</td>
           <td className={`xcell border-t border-t-neutral-500 ${bodyCls}`} />
           <td className={`xcell border-t border-t-neutral-500 text-center ${bodyCls}`}>{fmtAccounting(block.totalPay)}</td>
-          <td className="xcell text-center">{taxes !== null ? fmtAccounting(taxes) : ''}</td>
+          <td className="xcell text-center">
+            <NumCell value={block.taxes} onCommit={(n) => onEdit(`hb:${block.key}`, { taxes: n })} className="text-center" />
+          </td>
+          <td className="xcell text-center">
+            <NumCell value={block.nest} onCommit={(n) => onEdit(`hb:${block.key}`, { nest: n })} className="text-center" />
+          </td>
           <td className="xcell text-center">
             <NumCell value={block.net} onCommit={(n) => onEdit(`hb:${block.key}`, { net: n })} className="text-center" />
           </td>
@@ -258,7 +268,15 @@ function PsBlockView({ block, onEdit }: { block: PsBlock; onEdit: PayrollPreview
         <tr className="font-semibold">
           {label('Total Profit Share')}
           {block.jobs.map((j) => (
-            <td key={j.jobRowId} className={`xcell text-right ${j.totalProfitShare < 25 ? 'bg-amber-100' : ''}`}>
+            <td
+              key={j.jobRowId}
+              className={`xcell text-right ${j.totalProfitShare < 25 ? 'bg-amber-100' : ''} ${j.dbFloorApplied ? 'bg-sky-50 ring-1 ring-inset ring-sky-400' : ''}`}
+              title={
+                j.dbFloorApplied
+                  ? `Davis-Bacon floor: profit share ${j.dbFloorPriorPay?.toFixed(2) ?? '?'} < ${j.dbFloorHours ?? 0}h × floor ${j.dbFloor?.toFixed(2) ?? '?'}`
+                  : undefined
+              }
+            >
               {fmtAccounting(j.totalProfitShare)}
             </td>
           ))}

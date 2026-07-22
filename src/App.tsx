@@ -1,5 +1,21 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ExceptionsPanel } from './components/ExceptionsPanel';
+import { JobsByCrewTable } from './components/JobsByCrewTable';
+import {
+  SalesByCustTable,
+  SalesByRepTable,
+  TimesheetMirrorTable,
+} from './components/MirrorTable';
+import {
+  FinalPayrollTab,
+  InactiveEmployeesTab,
+  InputNumsTab,
+  JobsListTab,
+  JournalEntryTab,
+  ManagementReportTab,
+  NotesTab,
+  ProfitshareOutputTab,
+} from './components/PayrollExtraTabs';
 import { PayrollPreview } from './components/PayrollPreview';
 import { PivotByJobTable } from './components/PivotByJobTable';
 import { PivotTable } from './components/PivotTable';
@@ -8,10 +24,27 @@ import { TimeNaviTable } from './components/TimeNaviTable';
 import { TopBar } from './components/TopBar';
 import { UploadSlot, type SlotChip } from './components/UploadSlot';
 import { timesheetApKey } from './lib/apkey';
+import {
+  parseCompletedPercentsWorkbook,
+  type CompletedPbjJob,
+  type CompletedPercentsResult,
+} from './lib/completedPercents';
 import { buildExceptions, countExceptions } from './lib/exceptions';
-import { exportFilename, exportWorkbook } from './lib/exportXlsx';
+import {
+  exportFilename,
+  exportPayrollWorkbook,
+  exportPercentsWorkbook,
+  payrollExportFilename,
+} from './lib/exportXlsx';
 import { addDays, dateToIso, isoToDate } from './lib/format';
 import { enrichTimesheet } from './lib/joins';
+import { buildJobsByCrew } from './lib/jobsByCrew';
+import {
+  buildSalesByCustMirror,
+  buildSalesByRepMirrorFromParsed,
+  buildSalesByRepMirrorFromSheet,
+  buildTimesheetMirror,
+} from './lib/mirrorTabs';
 import {
   parseCustomerSummary,
   parseEmployeeList,
@@ -28,7 +61,12 @@ import { directoryFromTimesheet, type LeadResolverContext } from './lib/payroll'
 import { buildPayrollExceptions } from './lib/payrollExceptions';
 import { buildPayrollPreview } from './lib/payrollPreview';
 import { buildPivot } from './lib/pivot';
-import { buildPivotByJob, EMPTY_MANUAL_STATE, type ManualSectionState } from './lib/pivotByJob';
+import {
+  buildPivotByJob,
+  EMPTY_MANUAL_STATE,
+  pbjJobId,
+  type ManualSectionState,
+} from './lib/pivotByJob';
 import { applyPivotView, EMPTY_PIVOT_VIEW, isPivotViewActive, type PivotViewState } from './lib/pivotView';
 import {
   cacheDirectoryLocally,
@@ -36,12 +74,17 @@ import {
   clearSavedDirectory,
   ensureDefaultPivotColumns,
   fetchAppDirectory,
+  loadAppMode,
   loadSavedDirectory,
   loadSettings,
   newerDirectory,
   persistAppDirectory,
+  probeDirectoryStore,
+  saveAppMode,
   saveDirectory,
   saveSettings,
+  type AppMode,
+  type DirectoryStoreStatus,
 } from './lib/settings';
 import { buildReportRows, sortReportRows } from './lib/timenavi';
 import type {
@@ -52,24 +95,36 @@ import type {
   PayrollEdit,
   PayrollEditsMap,
   PbjEditsMap,
+  PbjEmployeeRow,
   PbjJobEdit,
+  PivotByJobModel,
   PlParseResult,
   PrevPercent,
   QbHoursMap,
   RowEdit,
   SalesRow,
   SavedDirectory,
+  SheetData,
   TimeNaviEvent,
   TimesheetParseResult,
 } from './lib/types';
 
 // ---------------------------------------------------------------------------
-// Upload slots
+// Upload slots — Round 6 dual rails
 // ---------------------------------------------------------------------------
 
 type SlotId =
-  | 'timesheet' | 'timenavi' | 'nvSales' | 'nvSummary' | 'utSales' | 'utSummary' | 'lastWeek'
-  | 'pl' | 'employees';
+  | 'timesheetNv'
+  | 'timesheetUt'
+  | 'timenavi'
+  | 'nvSales'
+  | 'nvSummary'
+  | 'utSales'
+  | 'utSummary'
+  | 'lastWeek'
+  | 'completedPercents'
+  | 'pl'
+  | 'employees';
 
 interface SlotDef {
   id: SlotId;
@@ -78,34 +133,55 @@ interface SlotDef {
   optional?: boolean;
 }
 
-const SLOT_DEFS: SlotDef[] = [
-  { id: 'timesheet', label: '1 · QuickBooks Time timesheet', hint: 'TSheets weekly payroll export' },
-  { id: 'timenavi', label: '2 · TimeNavi calendar export', hint: 'Reads the "Events" sheet' },
-  { id: 'nvSales', label: '3 · NV Sales by Rep Detail', hint: 'QuickBooks Online (Nevada)' },
-  { id: 'nvSummary', label: '4 · NV Sales by Customer Summary', hint: 'Job totals (Nevada)' },
-  { id: 'utSales', label: '5 · UT Transaction List by Date', hint: 'AllPro Painters LLC (Utah)' },
-  { id: 'utSummary', label: '6 · UT Sales by Customer Summary', hint: 'Job totals (Utah)' },
-  { id: 'lastWeek', label: '7 · Last week\u2019s % of Completion', hint: 'Last % Paid + Balances/UT carry-forward' },
-  { id: 'pl', label: '8 · P&L by Customer (QBO)', hint: 'Required for the payroll tabs' },
-  // Round 5 §1 — Employee Name List lives in Settings only (never in the rail).
+/** %'s Report rail — Round 6 §1.1. lastWeek + timesheetUt optional; pl is payroll-only. */
+const PERCENTS_RAIL: SlotDef[] = [
+  { id: 'timesheetNv', label: '1 · NV QuickBooks Time timesheet', hint: 'TSheets weekly payroll export (Nevada)' },
+  {
+    id: 'timesheetUt',
+    label: '2 · UT QuickBooks Time timesheet',
+    hint: 'TSheets weekly payroll export (Utah)',
+    optional: true,
+  },
+  { id: 'timenavi', label: '3 · TimeNavi calendar export', hint: 'Reads the "Events" sheet' },
+  { id: 'nvSales', label: '4 · NV Sales by Rep Detail', hint: 'QuickBooks Online (Nevada)' },
+  { id: 'nvSummary', label: '5 · NV Sales by Customer Summary', hint: 'Job totals (Nevada)' },
+  { id: 'utSales', label: '6 · UT Transaction List by Date', hint: 'AllPro Painters LLC (Utah)' },
+  { id: 'utSummary', label: '7 · UT Sales by Customer Summary', hint: 'Job totals (Utah)' },
+  {
+    id: 'lastWeek',
+    label: '8 · Last week\u2019s % of Completion',
+    hint: 'Last % Paid + Balances/UT carry-forward',
+    optional: true,
+  },
+];
+
+/** Payroll rail — Slot A + Slot B. */
+const PAYROLL_RAIL: SlotDef[] = [
+  {
+    id: 'completedPercents',
+    label: 'A · This week\u2019s completed %\u2019s',
+    hint: 'Exported % of Completion workbook (Pivot by Job + timesheets)',
+  },
+  { id: 'pl', label: 'B · P&L by Customer (QBO)', hint: 'Required for the payroll tabs' },
 ];
 
 const SLOT_LABELS: Record<Exclude<SlotId, 'employees'>, string> = {
-  timesheet: '1 · QuickBooks Time timesheet',
-  timenavi: '2 · TimeNavi calendar export',
-  nvSales: '3 · NV Sales by Rep Detail',
-  nvSummary: '4 · NV Sales by Customer Summary',
-  utSales: '5 · UT Transaction List by Date',
-  utSummary: '6 · UT Sales by Customer Summary',
-  lastWeek: '7 · Last week\u2019s % of Completion',
-  pl: '8 · P&L by Customer (QBO)',
+  timesheetNv: '1 · NV QuickBooks Time timesheet',
+  timesheetUt: '2 · UT QuickBooks Time timesheet',
+  timenavi: '3 · TimeNavi calendar export',
+  nvSales: '4 · NV Sales by Rep Detail',
+  nvSummary: '5 · NV Sales by Customer Summary',
+  utSales: '6 · UT Transaction List by Date',
+  utSummary: '7 · UT Sales by Customer Summary',
+  lastWeek: '8 · Last week\u2019s % of Completion',
+  completedPercents: 'A · This week\u2019s completed %\u2019s',
+  pl: 'B · P&L by Customer (QBO)',
 };
 
-/** Slots shown in the left rail (1–8). `employees` is Settings-only. */
-const RAIL_SLOTS = SLOT_DEFS;
-
 interface ParsedData {
-  timesheet: TimesheetParseResult | null;
+  timesheetNv: TimesheetParseResult | null;
+  timesheetUt: TimesheetParseResult | null;
+  completedPercents: CompletedPercentsResult | null;
   events: TimeNaviEvent[] | null;
   nvSales: SalesRow[] | null;
   nvTotals: Map<string, number> | null;
@@ -115,10 +191,17 @@ interface ParsedData {
   lastWeekPbj: LastWeekPbjRow[] | null;
   pl: PlParseResult | null;
   directory: DirectoryEmployee[] | null;
+  /** Raw first sheets for Round 6 mirror tabs. */
+  nvSalesSheet: SheetData | null;
+  nvSummarySheet: SheetData | null;
+  utSalesSheet: SheetData | null;
+  utSummarySheet: SheetData | null;
 }
 
 const EMPTY_PARSED: ParsedData = {
-  timesheet: null,
+  timesheetNv: null,
+  timesheetUt: null,
+  completedPercents: null,
   events: null,
   nvSales: null,
   nvTotals: null,
@@ -128,21 +211,50 @@ const EMPTY_PARSED: ParsedData = {
   lastWeekPbj: null,
   pl: null,
   directory: null,
+  nvSalesSheet: null,
+  nvSummarySheet: null,
+  utSalesSheet: null,
+  utSummarySheet: null,
 };
 
 const EMPTY_CHIP: SlotChip = { status: 'empty', fileName: '', message: '' };
 
-type Tab = 'timenavi' | 'pivot' | 'pivotByJob' | 'payroll' | 'exceptions' | 'payrollExceptions';
+type PercentsTab =
+  | 'salesByRep'
+  | 'salesByCust'
+  | 'utSalesByRep'
+  | 'utSalesByCust'
+  | 'timesheets'
+  | 'timenavi'
+  | 'pivot'
+  | 'jobsByCrew'
+  | 'pivotByJob'
+  | 'exceptions';
+type PayrollTab =
+  | 'plImport'
+  | 'mgmtReport'
+  | 'payroll'
+  | 'profitshare'
+  | 'inputNums'
+  | 'notes'
+  | 'final'
+  | 'journal'
+  | 'jobs'
+  | 'inactive'
+  | 'payrollExceptions';
+type Tab = PercentsTab | PayrollTab;
 
 export default function App(): JSX.Element {
   const [chips, setChips] = useState<Record<SlotId, SlotChip>>({
-    timesheet: EMPTY_CHIP,
+    timesheetNv: EMPTY_CHIP,
+    timesheetUt: EMPTY_CHIP,
     timenavi: EMPTY_CHIP,
     nvSales: EMPTY_CHIP,
     nvSummary: EMPTY_CHIP,
     utSales: EMPTY_CHIP,
     utSummary: EMPTY_CHIP,
     lastWeek: EMPTY_CHIP,
+    completedPercents: EMPTY_CHIP,
     pl: EMPTY_CHIP,
     employees: EMPTY_CHIP,
   });
@@ -155,28 +267,38 @@ export default function App(): JSX.Element {
   const [balancesState, setBalancesState] = useState<ManualSectionState>(EMPTY_MANUAL_STATE);
   const [utState, setUtState] = useState<ManualSectionState>(EMPTY_MANUAL_STATE);
   const [payrollEdits, setPayrollEdits] = useState<PayrollEditsMap>({});
-  const [created, setCreated] = useState(false);
+  const [createdPercents, setCreatedPercents] = useState(false);
+  const [createdPayroll, setCreatedPayroll] = useState(false);
   const [tab, setTab] = useState<Tab>('timenavi');
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [mode, setMode] = useState<AppMode>(() => loadAppMode());
   // Round 4 §2 — Pivot by Crew view-level filters (start cleared each session).
   const [pivotView, setPivotView] = useState<PivotViewState>({ ...EMPTY_PIVOT_VIEW });
   const [exportFiltered, setExportFiltered] = useState(false);
-  // Round 4 §4.2 / Round 6 — employee directory (localStorage + app file).
+  // Employee directory: localStorage (this browser) + shared Vercel Blob store
+  // (all devices on the same deployment). Phone never sees another browser's
+  // localStorage — only the shared API.
   const [savedDirectory, setSavedDirectory] = useState<SavedDirectory | null>(() => loadSavedDirectory());
+  const [directoryStoreStatus, setDirectoryStoreStatus] = useState<DirectoryStoreStatus | null>(null);
+  const [directorySyncWarning, setDirectorySyncWarning] = useState<string | null>(null);
   const [missingInputWarning, setMissingInputWarning] = useState<string[] | null>(null);
 
-  // Prefer the newer of browser localStorage vs the app-permanent JSON file so
-  // phone + desktop hitting the same server share one current list + date.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
+      const status = await probeDirectoryStore();
+      if (cancelled) return;
+      setDirectoryStoreStatus(status);
       const remote = await fetchAppDirectory();
       if (cancelled) return;
       const local = loadSavedDirectory();
-      const best = newerDirectory(local, remote);
+      // Shared store wins when present; otherwise keep this browser's cache.
+      const best = remote ?? local;
       if (!best) return;
-      setSavedDirectory(best);
-      cacheDirectoryLocally(best);
+      // If both exist, keep the newer uploadedAt.
+      const chosen = remote && local ? newerDirectory(local, remote)! : best;
+      setSavedDirectory(chosen);
+      cacheDirectoryLocally(chosen);
     })();
     return () => {
       cancelled = true;
@@ -184,6 +306,26 @@ export default function App(): JSX.Element {
   }, []);
 
   // ------------------------------------------------------------------ uploads
+
+  const applyCompletedSeeds = useCallback((jobs: CompletedPbjJob[]): void => {
+    const editPatch: PbjEditsMap = {};
+    const qbPatch: QbHoursMap = {};
+    for (const j of jobs) {
+      const id = pbjJobId(j.customer, j.job);
+      editPatch[id] = {
+        crewLead: j.crewLead || undefined,
+        woOverride: j.woOverride,
+        woPct: j.woPct,
+        percent: j.percent,
+        notes: j.notes || undefined,
+      };
+      for (const e of j.employees) {
+        if (e.qbHours != null) qbPatch[`${id}\u0000${e.username}`] = e.qbHours;
+      }
+    }
+    setPbjEdits((prev) => ({ ...editPatch, ...prev }));
+    setQbHours((prev) => ({ ...qbPatch, ...prev }));
+  }, []);
 
   const handleFile = useCallback(async (id: SlotId, file: File): Promise<void> => {
     const fail = (message: string): void => {
@@ -197,11 +339,11 @@ export default function App(): JSX.Element {
         setChips((c) => ({ ...c, [id]: { status: 'ok', fileName: file.name, message } }));
       };
       switch (id) {
-        case 'timesheet': {
-          const res = parseTimesheet(wbd);
+        case 'timesheetNv': {
+          const res = parseTimesheet(wbd, 'NV');
           ok(
             `✓ ${res.rows.length} rows${res.lunchRemoved > 0 ? ` · ${res.lunchRemoved} lunch removed` : ''}`,
-            { timesheet: res },
+            { timesheetNv: res },
           );
           // Default pay date = week-ending Friday (max local_date) + 7 days.
           let max: Date | null = null;
@@ -211,6 +353,36 @@ export default function App(): JSX.Element {
           if (max) setPayDateIso(dateToIso(addDays(max, 7)));
           break;
         }
+        case 'timesheetUt': {
+          const res = parseTimesheet(wbd, 'UT');
+          ok(
+            `✓ ${res.rows.length} rows${res.lunchRemoved > 0 ? ` · ${res.lunchRemoved} lunch removed` : ''}`,
+            { timesheetUt: res },
+          );
+          break;
+        }
+        case 'completedPercents': {
+          const res = parseCompletedPercentsWorkbook(wbd);
+          if ('error' in res) {
+            fail(res.error);
+            break;
+          }
+          ok(
+            `✓ ${res.jobs.length} jobs · ${res.timesheet.rows.length} timesheet rows` +
+              (res.timesheet.lunchRemoved > 0 ? ` · ${res.timesheet.lunchRemoved} lunch removed` : ''),
+            { completedPercents: res },
+          );
+          applyCompletedSeeds(res.jobs);
+          // Pay date from completed timesheet when not already set from NV upload.
+          if (!payDateIso) {
+            let max: Date | null = null;
+            for (const r of res.timesheet.rows) {
+              if (r.localDate && (!max || r.localDate.getTime() > max.getTime())) max = r.localDate;
+            }
+            if (max) setPayDateIso(dateToIso(addDays(max, 7)));
+          }
+          break;
+        }
         case 'timenavi': {
           const events = parseTimeNavi(wbd);
           ok(`✓ ${events.length} events`, { events });
@@ -218,22 +390,22 @@ export default function App(): JSX.Element {
         }
         case 'nvSales': {
           const rows = parseSalesDetail(wbd, 'customer');
-          ok(`✓ ${rows.length} sales rows`, { nvSales: rows });
+          ok(`✓ ${rows.length} sales rows`, { nvSales: rows, nvSalesSheet: wbd.sheets[0] ?? null });
           break;
         }
         case 'nvSummary': {
           const totals = parseCustomerSummary(wbd);
-          ok(`✓ ${totals.size} job totals`, { nvTotals: totals });
+          ok(`✓ ${totals.size} job totals`, { nvTotals: totals, nvSummarySheet: wbd.sheets[0] ?? null });
           break;
         }
         case 'utSales': {
           const rows = parseSalesDetail(wbd, 'name');
-          ok(`✓ ${rows.length} transaction rows`, { utSales: rows });
+          ok(`✓ ${rows.length} transaction rows`, { utSales: rows, utSalesSheet: wbd.sheets[0] ?? null });
           break;
         }
         case 'utSummary': {
           const totals = parseCustomerSummary(wbd);
-          ok(`✓ ${totals.size} job totals`, { utTotals: totals });
+          ok(`✓ ${totals.size} job totals`, { utTotals: totals, utSummarySheet: wbd.sheets[0] ?? null });
           break;
         }
         case 'lastWeek': {
@@ -261,31 +433,65 @@ export default function App(): JSX.Element {
           ok(`✓ ${active} active / ${directory.length - active} inactive`, { directory });
           const saved = saveDirectory(directory, file.name);
           setSavedDirectory(saved);
-          void persistAppDirectory(saved);
+          void persistAppDirectory(saved).then((sync) => {
+            if (sync.ok) {
+              setDirectorySyncWarning(null);
+              setDirectoryStoreStatus('ready');
+            } else {
+              setDirectorySyncWarning(sync.message);
+            }
+          });
           break;
         }
       }
     } catch (err) {
       fail(err instanceof Error ? err.message : 'Could not read this file.');
     }
-  }, []);
+  }, [applyCompletedSeeds, payDateIso]);
 
-  const missingInputs = useMemo((): string[] => {
+  /** Combined NV+UT timesheet (NV first); falls back to Slot A when neither uploaded. */
+  const combinedTimesheet = useMemo((): TimesheetParseResult | null => {
+    const nv = parsed.timesheetNv;
+    const ut = parsed.timesheetUt;
+    if (nv || ut) {
+      return {
+        rows: [...(nv?.rows ?? []), ...(ut?.rows ?? [])],
+        lunchRemoved: (nv?.lunchRemoved ?? 0) + (ut?.lunchRemoved ?? 0),
+      };
+    }
+    if (parsed.completedPercents) return parsed.completedPercents.timesheet;
+    return null;
+  }, [parsed.timesheetNv, parsed.timesheetUt, parsed.completedPercents]);
+
+  const percentsMissingInputs = useMemo((): string[] => {
     const checks: [Exclude<SlotId, 'employees'>, boolean][] = [
-      ['timesheet', parsed.timesheet !== null],
+      ['timesheetNv', parsed.timesheetNv !== null],
       ['timenavi', parsed.events !== null],
       ['nvSales', parsed.nvSales !== null],
       ['nvSummary', parsed.nvTotals !== null],
       ['utSales', parsed.utSales !== null],
       ['utSummary', parsed.utTotals !== null],
-      ['lastWeek', parsed.lastWeek !== null],
+      // lastWeek + timesheetUt optional; pl is payroll-only
+    ];
+    return checks.filter(([, ok]) => !ok).map(([id]) => SLOT_LABELS[id]);
+  }, [parsed]);
+
+  const payrollMissingInputs = useMemo((): string[] => {
+    const checks: [Exclude<SlotId, 'employees'>, boolean][] = [
+      ['completedPercents', parsed.completedPercents !== null],
       ['pl', parsed.pl !== null],
     ];
     return checks.filter(([, ok]) => !ok).map(([id]) => SLOT_LABELS[id]);
   }, [parsed]);
 
-  /** All eight weekly inputs present — required before Create Report proceeds. */
-  const ready = missingInputs.length === 0;
+  const percentsReady = percentsMissingInputs.length === 0;
+  const payrollReady = payrollMissingInputs.length === 0;
+  const ready = mode === 'percents' ? percentsReady : payrollReady;
+  const modeCreated = mode === 'percents' ? createdPercents : createdPayroll;
+  const canDownload =
+    mode === 'percents'
+      ? createdPercents && percentsReady
+      : createdPayroll && payrollReady;
 
   // ------------------------------------------------------------------ derived
 
@@ -301,20 +507,40 @@ export default function App(): JSX.Element {
   );
   const payDate = useMemo(() => (payDateIso ? isoToDate(payDateIso) : null), [payDateIso]);
 
+  /** Prefer Slot A timesheet for payroll when uploaded; else combined NV+UT. */
+  const payrollTimesheet = useMemo((): TimesheetParseResult | null => {
+    if (createdPayroll && parsed.completedPercents) return parsed.completedPercents.timesheet;
+    return combinedTimesheet;
+  }, [createdPayroll, parsed.completedPercents, combinedTimesheet]);
+
+  const effectiveLastWeekPbj = useMemo(
+    () => parsed.completedPercents?.lastWeekPbj ?? parsed.lastWeekPbj,
+    [parsed.completedPercents, parsed.lastWeekPbj],
+  );
+
   /** apKey → jobcode_2 of the first timesheet row with that key (column M). */
-  const timesheetJobcodeByApKey = useMemo(() => {
+  const timesheetApKeyMap = useMemo(() => {
     const m = new Map<string, string>();
-    if (parsed.timesheet) {
-      for (const r of parsed.timesheet.rows) {
+    const src = combinedTimesheet;
+    if (src) {
+      for (const r of src.rows) {
         const key = timesheetApKey(r.jobcode2);
         if (key && !m.has(key)) m.set(key, r.jobcode2);
       }
     }
     return m;
-  }, [parsed.timesheet]);
+  }, [combinedTimesheet]);
 
   const reportRows = useMemo(() => {
-    if (!created || !ready || !parsed.events || !parsed.nvSales || !parsed.utSales || !parsed.nvTotals || !parsed.utTotals) {
+    if (
+      !createdPercents ||
+      !percentsReady ||
+      !parsed.events ||
+      !parsed.nvSales ||
+      !parsed.utSales ||
+      !parsed.nvTotals ||
+      !parsed.utTotals
+    ) {
       return [];
     }
     const rows = buildReportRows(
@@ -326,13 +552,27 @@ export default function App(): JSX.Element {
         nvTotals: parsed.nvTotals,
         utTotals: parsed.utTotals,
         lastWeekMap: parsed.lastWeek,
-        timesheetJobcodeByApKey,
+        timesheetJobcodeByApKey: timesheetApKeyMap,
         knownEstimators,
       },
       payDate,
     );
     return sortReportRows(rows, legendOrder);
-  }, [created, ready, parsed, edits, timesheetJobcodeByApKey, knownEstimators, legendOrder, payDate]);
+  }, [
+    createdPercents,
+    percentsReady,
+    parsed.events,
+    parsed.nvSales,
+    parsed.utSales,
+    parsed.nvTotals,
+    parsed.utTotals,
+    parsed.lastWeek,
+    edits,
+    timesheetApKeyMap,
+    knownEstimators,
+    legendOrder,
+    payDate,
+  ]);
 
   const includedApKeys = useMemo(() => {
     const s = new Set<string>();
@@ -348,13 +588,87 @@ export default function App(): JSX.Element {
     for (const r of reportRows) {
       if (r.included && r.apKey && r.estimator && !m.has(r.apKey)) m.set(r.apKey, r.estimator);
     }
+    // Payroll-only Slot A: seed estimators from completed jobs when no TimeNavi grid.
+    if (m.size === 0 && parsed.completedPercents) {
+      for (const j of parsed.completedPercents.jobs) {
+        if (j.apKey && j.estimator && !m.has(j.apKey)) m.set(j.apKey, j.estimator);
+      }
+    }
+    return m;
+  }, [reportRows, parsed.completedPercents]);
+
+  const enriched = useMemo(() => {
+    const needPercents = createdPercents && combinedTimesheet && parsed.nvSales && parsed.utSales;
+    const needPayroll = createdPayroll && payrollTimesheet;
+    if (!needPercents && !needPayroll) return [];
+    const rows = (createdPayroll && payrollTimesheet ? payrollTimesheet : combinedTimesheet)!.rows;
+    // Payroll-only may lack sales uploads — enrich still resolves OFFICE / completed estimators.
+    return enrichTimesheet(
+      rows,
+      parsed.nvSales ?? [],
+      parsed.utSales ?? [],
+      includedApKeys,
+      estimatorByApKey,
+    );
+  }, [
+    createdPercents,
+    createdPayroll,
+    combinedTimesheet,
+    payrollTimesheet,
+    parsed.nvSales,
+    parsed.utSales,
+    includedApKeys,
+    estimatorByApKey,
+  ]);
+
+  // Round 6 — mirror models for %'s tabs + export
+  const salesByRepMirror = useMemo(() => {
+    if (parsed.nvSalesSheet) return buildSalesByRepMirrorFromSheet(parsed.nvSalesSheet, 'nv');
+    return buildSalesByRepMirrorFromParsed(parsed.nvSales ?? []);
+  }, [parsed.nvSalesSheet, parsed.nvSales]);
+
+  const utSalesByRepMirror = useMemo(() => {
+    if (parsed.utSalesSheet) return buildSalesByRepMirrorFromSheet(parsed.utSalesSheet, 'ut');
+    return buildSalesByRepMirrorFromParsed(parsed.utSales ?? []);
+  }, [parsed.utSalesSheet, parsed.utSales]);
+
+  const salesByCustMirror = useMemo(
+    () => buildSalesByCustMirror(parsed.nvSummarySheet),
+    [parsed.nvSummarySheet],
+  );
+  const utSalesByCustMirror = useMemo(
+    () => buildSalesByCustMirror(parsed.utSummarySheet),
+    [parsed.utSummarySheet],
+  );
+
+  const timeNaviRowByAp = useMemo(() => {
+    const m = new Map<string, number>();
+    let sheetRow = 2; // header = 1
+    for (const r of reportRows) {
+      if (!r.included) continue;
+      if (r.apKey && !m.has(r.apKey)) m.set(r.apKey, sheetRow);
+      sheetRow++;
+    }
     return m;
   }, [reportRows]);
 
-  const enriched = useMemo(() => {
-    if (!created || !parsed.timesheet || !parsed.nvSales || !parsed.utSales) return [];
-    return enrichTimesheet(parsed.timesheet.rows, parsed.nvSales, parsed.utSales, includedApKeys, estimatorByApKey);
-  }, [created, parsed.timesheet, parsed.nvSales, parsed.utSales, includedApKeys, estimatorByApKey]);
+  const timesheetMirror = useMemo(
+    () => buildTimesheetMirror(enriched, timeNaviRowByAp),
+    [enriched, timeNaviRowByAp],
+  );
+
+  const jobsByCrew = useMemo(() => buildJobsByCrew(enriched), [enriched]);
+
+  const weekBounds = useMemo(() => {
+    let weekStart: Date | null = null;
+    let weekEnd: Date | null = null;
+    for (const r of enriched) {
+      if (!r.localDate) continue;
+      if (!weekStart || r.localDate.getTime() < weekStart.getTime()) weekStart = r.localDate;
+      if (!weekEnd || r.localDate.getTime() > weekEnd.getTime()) weekEnd = r.localDate;
+    }
+    return { weekStart, weekEnd };
+  }, [enriched]);
 
   const pivot = useMemo(
     () => buildPivot(enriched, settings.pivotColumnOrder, payDate),
@@ -381,10 +695,10 @@ export default function App(): JSX.Element {
       buildExceptions({
         reportRows,
         enriched,
-        lunchRemoved: parsed.timesheet?.lunchRemoved ?? 0,
+        lunchRemoved: combinedTimesheet?.lunchRemoved ?? 0,
         payDate,
       }),
-    [reportRows, enriched, parsed.timesheet, payDate],
+    [reportRows, enriched, combinedTimesheet, payDate],
   );
   const exceptionCount = useMemo(() => countExceptions(exceptions), [exceptions]);
 
@@ -397,13 +711,14 @@ export default function App(): JSX.Element {
   );
 
   const leadCtx = useMemo<LeadResolverContext>(() => {
-    const crewGroups = [...new Set((parsed.timesheet?.rows ?? []).map((r) => r.group).filter(Boolean))];
+    const rows = (payrollTimesheet ?? combinedTimesheet)?.rows ?? [];
+    const crewGroups = [...new Set(rows.map((r) => r.group).filter(Boolean))];
     return {
-      directory: effectiveDirectory ?? directoryFromTimesheet(parsed.timesheet?.rows ?? []),
+      directory: effectiveDirectory ?? directoryFromTimesheet(rows),
       crewGroups,
       subcontractors: settings.subcontractors,
     };
-  }, [effectiveDirectory, parsed.timesheet, settings.subcontractors]);
+  }, [effectiveDirectory, payrollTimesheet, combinedTimesheet, settings.subcontractors]);
 
   const pivotByJob = useMemo(
     () =>
@@ -416,7 +731,7 @@ export default function App(): JSX.Element {
         payDate,
         edits: pbjEdits,
         qbHours,
-        lastWeekPbj: parsed.lastWeekPbj,
+        lastWeekPbj: effectiveLastWeekPbj,
         balancesState,
         utState,
         pl: parsed.pl,
@@ -425,11 +740,28 @@ export default function App(): JSX.Element {
         nvSales: parsed.nvSales,
         utSales: parsed.utSales,
       }),
-    [enriched, reportRows, settings, leadCtx, knownEstimators, payDate, pbjEdits, qbHours, parsed.lastWeekPbj, parsed.pl, parsed.nvTotals, parsed.utTotals, parsed.nvSales, parsed.utSales, balancesState, utState],
+    [
+      enriched,
+      reportRows,
+      settings,
+      leadCtx,
+      knownEstimators,
+      payDate,
+      pbjEdits,
+      qbHours,
+      effectiveLastWeekPbj,
+      parsed.pl,
+      parsed.nvTotals,
+      parsed.utTotals,
+      parsed.nvSales,
+      parsed.utSales,
+      balancesState,
+      utState,
+    ],
   );
 
   const payrollPreview = useMemo(() => {
-    if (!created || !parsed.pl) return null;
+    if (!createdPayroll || !parsed.pl) return null;
     return buildPayrollPreview({
       pbj: pivotByJob,
       enriched,
@@ -444,12 +776,28 @@ export default function App(): JSX.Element {
       leadCtx,
       nvSales: parsed.nvSales,
       utSales: parsed.utSales,
-      lastWeekPbj: parsed.lastWeekPbj,
+      lastWeekPbj: effectiveLastWeekPbj,
     });
-  }, [created, parsed.pl, parsed.nvSales, parsed.utSales, parsed.lastWeekPbj, effectiveDirectory, pivotByJob, enriched, reportRows, settings, payDate, payrollEdits, qbHours, knownEstimators, leadCtx]);
+  }, [
+    createdPayroll,
+    parsed.pl,
+    parsed.nvSales,
+    parsed.utSales,
+    effectiveLastWeekPbj,
+    effectiveDirectory,
+    pivotByJob,
+    enriched,
+    reportRows,
+    settings,
+    payDate,
+    payrollEdits,
+    qbHours,
+    knownEstimators,
+    leadCtx,
+  ]);
 
   const payrollExceptions = useMemo(() => {
-    if (!created) return [];
+    if (!createdPayroll) return [];
     return buildPayrollExceptions({
       pbj: pivotByJob,
       preview:
@@ -463,6 +811,7 @@ export default function App(): JSX.Element {
           admin: [],
           estimators: [],
           managers: [],
+          inactiveEmployees: [],
           inactiveZeroHours: [],
         },
       reportRows,
@@ -471,9 +820,20 @@ export default function App(): JSX.Element {
       enriched,
       nvSales: parsed.nvSales,
       utSales: parsed.utSales,
-      lastWeekPbj: parsed.lastWeekPbj,
+      lastWeekPbj: effectiveLastWeekPbj,
     });
-  }, [created, pivotByJob, payrollPreview, reportRows, parsed.pl, parsed.nvSales, parsed.utSales, parsed.lastWeekPbj, effectiveDirectory, enriched]);
+  }, [
+    createdPayroll,
+    pivotByJob,
+    payrollPreview,
+    reportRows,
+    parsed.pl,
+    parsed.nvSales,
+    parsed.utSales,
+    effectiveLastWeekPbj,
+    effectiveDirectory,
+    enriched,
+  ]);
   const payrollExceptionCount = useMemo(() => countExceptions(payrollExceptions), [payrollExceptions]);
 
   const estimatorOptions = useMemo(() => {
@@ -569,18 +929,57 @@ export default function App(): JSX.Element {
   const filtersActive = isPivotViewActive(pivotView);
 
   const onDownload = useCallback((): void => {
-    void exportWorkbook({
+    if (mode === 'payroll') {
+      void exportPayrollWorkbook({
+        payDate,
+        weekStart: weekBounds.weekStart,
+        weekEnd: weekBounds.weekEnd,
+        pl: parsed.pl,
+        payrollPreview,
+        payrollExceptions,
+        mileageRate: settings.mileageRate,
+        defaultProfitSharePct: settings.defaultProfitSharePct,
+      });
+      return;
+    }
+    void exportPercentsWorkbook({
       rows: reportRows,
-      // §2.3 — full unfiltered pivot unless the toggle is on.
       pivot: exportFiltered && filtersActive ? viewPivot : pivot,
       legend: settings.legend,
       payDate,
       pivotByJob,
-      payrollPreview,
       percentExceptions: exceptions,
-      payrollExceptions,
+      salesByRep: salesByRepMirror,
+      salesByCust: salesByCustMirror,
+      utSalesByRep: utSalesByRepMirror,
+      utSalesByCust: utSalesByCustMirror,
+      timesheetMirror,
+      jobsByCrew,
     });
-  }, [reportRows, pivot, viewPivot, exportFiltered, filtersActive, settings.legend, payDate, pivotByJob, payrollPreview, exceptions, payrollExceptions]);
+  }, [
+    mode,
+    payDate,
+    weekBounds,
+    parsed.pl,
+    payrollPreview,
+    payrollExceptions,
+    settings.mileageRate,
+    settings.defaultProfitSharePct,
+    settings.legend,
+    reportRows,
+    pivot,
+    viewPivot,
+    exportFiltered,
+    filtersActive,
+    pivotByJob,
+    exceptions,
+    salesByRepMirror,
+    salesByCustMirror,
+    utSalesByRepMirror,
+    utSalesByCustMirror,
+    timesheetMirror,
+    jobsByCrew,
+  ]);
 
   const onSaveSettings = useCallback((next: AppSettings): void => {
     setSettings(next);
@@ -588,14 +987,21 @@ export default function App(): JSX.Element {
     setSettingsOpen(false);
   }, []);
 
-  // §4.2 — replace / clear the employee directory (localStorage + app file).
+  // Replace / clear: always cache locally; also write the shared store so phone
+  // and desktop both see the same list on the Vercel URL.
   const onDirectoryReplace = useCallback(async (file: File): Promise<string | null> => {
     try {
       const wbd = readWorkbook(await file.arrayBuffer());
       const directory = parseEmployeeList(wbd);
       const saved = saveDirectory(directory, file.name);
       setSavedDirectory(saved);
-      await persistAppDirectory(saved);
+      const sync = await persistAppDirectory(saved);
+      if (sync.ok) {
+        setDirectorySyncWarning(null);
+        setDirectoryStoreStatus('ready');
+      } else {
+        setDirectorySyncWarning(sync.message);
+      }
       setParsed((p) => ({ ...p, directory }));
       const active = directory.filter((d) => d.active).length;
       setChips((c) => ({
@@ -612,43 +1018,82 @@ export default function App(): JSX.Element {
     clearSavedDirectory();
     void clearAppDirectory();
     setSavedDirectory(null);
+    setDirectorySyncWarning(null);
     setParsed((p) => ({ ...p, directory: null }));
     setChips((c) => ({ ...c, employees: EMPTY_CHIP }));
   }, []);
 
-  const onCreateReport = useCallback((): void => {
-    if (missingInputs.length > 0) {
-      setMissingInputWarning(missingInputs);
+  const onCreatePercents = useCallback((): void => {
+    if (percentsMissingInputs.length > 0) {
+      setMissingInputWarning(percentsMissingInputs);
       return;
     }
     setMissingInputWarning(null);
-    setCreated(true);
+    setCreatedPercents(true);
     setTab('timenavi');
-  }, [missingInputs]);
+  }, [percentsMissingInputs]);
+
+  const onCreatePayroll = useCallback((): void => {
+    if (payrollMissingInputs.length > 0) {
+      setMissingInputWarning(payrollMissingInputs);
+      return;
+    }
+    setMissingInputWarning(null);
+    setCreatedPayroll(true);
+    setTab('payroll');
+  }, [payrollMissingInputs]);
+
+  /** Fill Slot A from this session's %'s report (no re-upload). */
+  const onUseSessionPercents = useCallback((): void => {
+    if (!createdPercents || !combinedTimesheet) return;
+    const fromSession = completedFromSession(combinedTimesheet, pivotByJob, parsed.lastWeekPbj);
+    setParsed((p) => ({ ...p, completedPercents: fromSession }));
+    applyCompletedSeeds(fromSession.jobs);
+    setChips((c) => ({
+      ...c,
+      completedPercents: {
+        status: 'ok',
+        fileName: 'this session',
+        message: `✓ from this session · ${fromSession.jobs.length} jobs · ${fromSession.timesheet.rows.length} rows`,
+      },
+    }));
+  }, [createdPercents, combinedTimesheet, pivotByJob, parsed.lastWeekPbj, applyCompletedSeeds]);
 
   // ------------------------------------------------------------------ render
 
   const includedCount = reportRows.filter((r) => r.included).length;
+  const activeRail = mode === 'percents' ? PERCENTS_RAIL : PAYROLL_RAIL;
 
   return (
     <div className="flex h-full flex-col">
       <TopBar
-        canDownload={created && ready}
+        canDownload={canDownload}
         onDownload={onDownload}
         onOpenSettings={() => setSettingsOpen(true)}
-        downloadName={exportFilename(payDate)}
+        downloadName={
+          mode === 'payroll'
+            ? payrollExportFilename(payDate, weekBounds.weekStart, weekBounds.weekEnd)
+            : exportFilename(payDate)
+        }
         exportFiltered={exportFiltered}
         onExportFilteredChange={setExportFiltered}
         filtersActive={filtersActive}
+        mode={mode}
+        onModeChange={(m) => {
+          setMode(m);
+          saveAppMode(m);
+          setTab(m === 'percents' ? 'timenavi' : 'payroll');
+        }}
       />
       <div className="flex min-h-0 flex-1">
-        {/* Left rail — uploads */}
+        {/* Left rail — uploads (mode-specific; parsed data persists across switches) */}
         <aside className="flex w-[320px] shrink-0 flex-col gap-2 overflow-y-auto border-r border-neutral-300 bg-neutral-50 p-3">
           <p className="text-[11px] leading-snug text-neutral-500">
-            Upload the weekly reports (<b>.xlsx</b> or <b>.csv</b>). Everything is parsed locally in your browser — no
-            data leaves this computer.
+            {mode === 'percents'
+              ? 'Upload the weekly %\u2019s inputs (.xlsx or .csv). Everything is parsed locally — no data leaves this computer.'
+              : 'Upload this week\u2019s completed %\u2019s workbook and the P&L. Switching modes keeps your uploads.'}
           </p>
-          {RAIL_SLOTS.map((def) => (
+          {activeRail.map((def) => (
             <UploadSlot
               key={def.id}
               label={def.label}
@@ -658,6 +1103,16 @@ export default function App(): JSX.Element {
               onFile={(file) => void handleFile(def.id, file)}
             />
           ))}
+          {mode === 'payroll' && createdPercents && (
+            <button
+              type="button"
+              className="rounded border border-emerald-300 bg-emerald-50 px-2 py-1.5 text-left text-[11px] font-semibold text-emerald-800 hover:bg-emerald-100"
+              onClick={onUseSessionPercents}
+              title="Copy this session's Pivot by Job + timesheet into Slot A"
+            >
+              Use this session&apos;s %&apos;s report
+            </button>
+          )}
           {/* Round 5 §1 — Employee Directory status (Settings is the only upload home). */}
           <button
             type="button"
@@ -694,17 +1149,28 @@ export default function App(): JSX.Element {
               onChange={(e) => setPayDateIso(e.target.value)}
             />
             <span className="text-[10px] font-normal text-neutral-400">
-              Defaults to the timesheet week-ending Friday + 7 days. Drives the pivot title and the filename.
+              Defaults to the NV timesheet week-ending Friday + 7 days. Drives the pivot title and the filename.
             </span>
           </label>
-          <button
-            type="button"
-            className="btn-primary mt-1 py-2.5 text-base"
-            title={ready ? 'Build the report tables' : 'Upload all inputs 1–8 first'}
-            onClick={onCreateReport}
-          >
-            Create Report
-          </button>
+          {mode === 'percents' ? (
+            <button
+              type="button"
+              className="btn-primary mt-1 py-2.5 text-base"
+              title={percentsReady ? 'Build the %\u2019s report tables' : 'Upload required inputs 1 and 3–7 first'}
+              onClick={onCreatePercents}
+            >
+              Create %&apos;s Report
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="btn-primary mt-1 py-2.5 text-base"
+              title={payrollReady ? 'Build the payroll preview' : 'Upload Slot A and Slot B first'}
+              onClick={onCreatePayroll}
+            >
+              Create Payroll Preview
+            </button>
+          )}
         </aside>
 
         {missingInputWarning && (
@@ -719,7 +1185,9 @@ export default function App(): JSX.Element {
                 Missing inputs
               </h2>
               <p className="mb-3 text-xs text-neutral-600">
-                Upload every file below before creating the report. Slots 1–8 are all required.
+                {mode === 'percents'
+                  ? 'Upload the required %\u2019s files before creating the report. Slots 2 and 8 are optional.'
+                  : 'Upload Slot A (completed %\u2019s) and Slot B (P&L) before creating the payroll preview.'}
               </p>
               <ul className="mb-4 list-inside list-disc space-y-1 text-xs text-red-700">
                 {missingInputWarning.map((label) => (
@@ -737,21 +1205,42 @@ export default function App(): JSX.Element {
 
         {/* Main area — tabs */}
         <main className="flex min-w-0 flex-1 flex-col">
-          <nav className="flex shrink-0 gap-1 border-b border-neutral-300 bg-white px-3 pt-2">
+          <nav className="flex shrink-0 gap-1 overflow-x-auto border-b border-neutral-300 bg-white px-3 pt-2">
             {(
-              [
-                ['timenavi', `TimeNavi Export${created ? ` (${includedCount})` : ''}`],
-                ['pivot', 'Pivot by Crew'],
-                ['pivotByJob', 'Pivot by Job'],
-                ['payroll', 'Payroll Preview'],
-                ['exceptions', `%'s Exceptions${created ? ` (${exceptionCount})` : ''}`],
-                ['payrollExceptions', `Payroll Exceptions${created ? ` (${payrollExceptionCount})` : ''}`],
-              ] as [Tab, string][]
+              mode === 'percents'
+                ? ([
+                    ['salesByRep', 'Sales by Rep'],
+                    ['salesByCust', 'Sales by Cust'],
+                    ['utSalesByRep', 'UT SalesbyRep'],
+                    ['utSalesByCust', 'UT SalesbyCust'],
+                    ['timesheets', 'timesheets'],
+                    ['timenavi', `TimeNavi Export${createdPercents ? ` (${includedCount})` : ''}`],
+                    ['pivot', 'Pivot by Crew'],
+                    ['jobsByCrew', 'Jobs by Crew'],
+                    ['pivotByJob', 'Pivot by Job'],
+                    ['exceptions', `%'s Exceptions${createdPercents ? ` (${exceptionCount})` : ''}`],
+                  ] as [Tab, string][])
+                : ([
+                    ['plImport', 'P&L by Job Import'],
+                    ['mgmtReport', 'Management Report Export'],
+                    ['payroll', 'Payroll Preview'],
+                    ['profitshare', 'Profitshare Output'],
+                    ['inputNums', "Input #'s"],
+                    ['notes', 'Notes'],
+                    ['final', 'Final Payroll Breakdown'],
+                    ['journal', 'Journal Entry'],
+                    ['jobs', 'Jobs'],
+                    ['inactive', 'Inactive Employees'],
+                    [
+                      'payrollExceptions',
+                      `Payroll Exceptions${createdPayroll ? ` (${payrollExceptionCount})` : ''}`,
+                    ],
+                  ] as [Tab, string][])
             ).map(([t, label]) => (
               <button
                 key={t}
                 type="button"
-                className={`rounded-t-md border border-b-0 px-4 py-1.5 text-sm font-medium ${
+                className={`shrink-0 rounded-t-md border border-b-0 px-3 py-1.5 text-sm font-medium ${
                   tab === t
                     ? 'border-neutral-300 bg-neutral-100 text-neutral-900'
                     : 'border-transparent text-neutral-500 hover:text-neutral-800'
@@ -763,8 +1252,18 @@ export default function App(): JSX.Element {
             ))}
           </nav>
           <div className="min-h-0 flex-1 overflow-auto bg-neutral-100">
-            {!created ? (
-              <Placeholder ready={ready} />
+            {!modeCreated ? (
+              <Placeholder mode={mode} ready={ready} />
+            ) : tab === 'salesByRep' ? (
+              <SalesByRepTable headers={salesByRepMirror.headers} rows={salesByRepMirror.rows} />
+            ) : tab === 'salesByCust' ? (
+              <SalesByCustTable rows={salesByCustMirror} />
+            ) : tab === 'utSalesByRep' ? (
+              <SalesByRepTable headers={utSalesByRepMirror.headers} rows={utSalesByRepMirror.rows} />
+            ) : tab === 'utSalesByCust' ? (
+              <SalesByCustTable rows={utSalesByCustMirror} />
+            ) : tab === 'timesheets' ? (
+              <TimesheetMirrorTable rows={timesheetMirror} />
             ) : tab === 'timenavi' ? (
               <TimeNaviTable
                 rows={reportRows}
@@ -780,6 +1279,8 @@ export default function App(): JSX.Element {
                 view={pivotView}
                 onViewChange={setPivotView}
               />
+            ) : tab === 'jobsByCrew' ? (
+              <JobsByCrewTable model={jobsByCrew} />
             ) : tab === 'pivotByJob' ? (
               <PivotByJobTable
                 model={pivotByJob}
@@ -789,12 +1290,37 @@ export default function App(): JSX.Element {
                 onManualAdd={onManualAdd}
                 onManualDelete={onManualDelete}
               />
-            ) : tab === 'payroll' ? (
-              <PayrollPreview model={payrollPreview} mileageRate={settings.mileageRate} onEdit={onPayrollEdit} />
             ) : tab === 'exceptions' ? (
               <ExceptionsPanel groups={exceptions} onNavigate={navigateToRow} />
-            ) : (
+            ) : tab === 'payroll' ? (
+              <PayrollPreview model={payrollPreview} mileageRate={settings.mileageRate} onEdit={onPayrollEdit} />
+            ) : tab === 'profitshare' ? (
+              <ProfitshareOutputTab model={payrollPreview} />
+            ) : tab === 'mgmtReport' ? (
+              <ManagementReportTab model={payrollPreview} defaultPsPct={settings.defaultProfitSharePct} />
+            ) : tab === 'inputNums' ? (
+              <InputNumsTab model={payrollPreview} onEdit={onPayrollEdit} />
+            ) : tab === 'notes' ? (
+              <NotesTab model={payrollPreview} mileageRate={settings.mileageRate} onEdit={onPayrollEdit} />
+            ) : tab === 'final' ? (
+              <FinalPayrollTab
+                model={payrollPreview}
+                mileageRate={settings.mileageRate}
+                onEdit={onPayrollEdit}
+                defaultPsPct={settings.defaultProfitSharePct}
+              />
+            ) : tab === 'journal' ? (
+              <JournalEntryTab model={payrollPreview} />
+            ) : tab === 'jobs' ? (
+              <JobsListTab model={payrollPreview} pl={parsed.pl} />
+            ) : tab === 'payrollExceptions' ? (
               <ExceptionsPanel groups={payrollExceptions} onNavigate={navigateToRow} />
+            ) : tab === 'inactive' ? (
+              <InactiveEmployeesTab model={payrollPreview} />
+            ) : tab === 'plImport' ? (
+              <PlImportTable pl={parsed.pl} />
+            ) : (
+              <PayrollPreview model={payrollPreview} mileageRate={settings.mileageRate} onEdit={onPayrollEdit} />
             )}
           </div>
         </main>
@@ -804,6 +1330,8 @@ export default function App(): JSX.Element {
         <SettingsModal
           settings={settings}
           directory={savedDirectory}
+          directoryStoreStatus={directoryStoreStatus}
+          directorySyncWarning={directorySyncWarning}
           onDirectoryReplace={onDirectoryReplace}
           onDirectoryClear={onDirectoryClear}
           onSave={onSaveSettings}
@@ -816,18 +1344,22 @@ export default function App(): JSX.Element {
 
 function clearForSlot(id: SlotId): Partial<ParsedData> {
   switch (id) {
-    case 'timesheet':
-      return { timesheet: null };
+    case 'timesheetNv':
+      return { timesheetNv: null };
+    case 'timesheetUt':
+      return { timesheetUt: null };
+    case 'completedPercents':
+      return { completedPercents: null };
     case 'timenavi':
       return { events: null };
     case 'nvSales':
-      return { nvSales: null };
+      return { nvSales: null, nvSalesSheet: null };
     case 'nvSummary':
-      return { nvTotals: null };
+      return { nvTotals: null, nvSummarySheet: null };
     case 'utSales':
-      return { utSales: null };
+      return { utSales: null, utSalesSheet: null };
     case 'utSummary':
-      return { utTotals: null };
+      return { utTotals: null, utSummarySheet: null };
     case 'lastWeek':
       return { lastWeek: null, lastWeekPbj: null };
     case 'pl':
@@ -837,18 +1369,157 @@ function clearForSlot(id: SlotId): Partial<ParsedData> {
   }
 }
 
-function Placeholder({ ready }: { ready: boolean }): JSX.Element {
+/** Build a CompletedPercentsResult from the in-session %'s models. */
+function completedFromSession(
+  timesheet: TimesheetParseResult,
+  pbj: PivotByJobModel,
+  lastWeekPbj: LastWeekPbjRow[] | null,
+): CompletedPercentsResult {
+  const jobs: CompletedPbjJob[] = [];
+  for (const c of pbj.customers) {
+    for (const j of c.jobs) {
+      jobs.push({
+        section: 'nv',
+        customer: c.customer,
+        job: j.jobcode2,
+        apKey: j.analysis.apKey ?? '',
+        onCalendar: j.analysis.onCalendar,
+        estimator: j.analysis.estimator,
+        crewLead: j.analysis.crewLead,
+        split: j.analysis.split,
+        woOverride: j.analysis.woOverride,
+        woPct: j.analysis.woPct,
+        percent: j.analysis.percent,
+        notes: j.analysis.notes,
+        hourly: j.analysis.hourly,
+        byDate: j.byDate,
+        total: j.total,
+        employees: j.employees.map((e: PbjEmployeeRow) => ({
+          username: e.username,
+          byDate: e.byDate,
+          total: e.total,
+          qbHours: e.qbHours,
+        })),
+      });
+    }
+  }
+  for (const row of pbj.balances) {
+    jobs.push(manualToCompleted('balances', row));
+  }
+  for (const row of pbj.utPayroll) {
+    jobs.push(manualToCompleted('ut', row));
+  }
+  return {
+    timesheet,
+    jobs,
+    dates: pbj.dates,
+    dateIsos: pbj.dateIsos,
+    title: pbj.title,
+    lastWeekPbj:
+      lastWeekPbj ??
+      jobs.map((j) => ({
+        section: j.section === 'nv' ? 'pivot' : j.section,
+        customer: j.customer,
+        job: j.job,
+        apKey: j.apKey,
+        estimator: j.estimator,
+        crewLead: j.crewLead,
+        woOverride: j.woOverride,
+        woPct: j.woPct,
+        percent: j.percent,
+        notes: j.notes,
+      })),
+  };
+}
+
+function manualToCompleted(
+  section: 'balances' | 'ut',
+  row: ManualSectionRow,
+): CompletedPbjJob {
+  return {
+    section,
+    customer: row.customer,
+    job: row.job,
+    apKey: row.apKey ?? '',
+    onCalendar: '-',
+    estimator: row.estimator,
+    crewLead: row.crewLead,
+    split: 1,
+    woOverride: row.woOverride,
+    woPct: row.woPct,
+    percent: row.percent,
+    notes: row.notes,
+    hourly: row.percent === 'HOURLY' || /^hourly$/i.test(row.crewLead),
+    byDate: {},
+    total: 0,
+    employees: [],
+  };
+}
+
+function Placeholder({ mode, ready }: { mode: AppMode; ready: boolean }): JSX.Element {
+  const isPayroll = mode === 'payroll';
   return (
     <div className="flex h-full items-center justify-center">
       <div className="max-w-md rounded-lg border border-neutral-300 bg-white p-6 text-center shadow-sm">
-        <div className="mb-2 text-4xl">📋</div>
-        <h2 className="mb-1 text-base font-bold">Build the weekly % of Completion report</h2>
+        <div className="mb-2 text-4xl">{isPayroll ? '💵' : '📋'}</div>
+        <h2 className="mb-1 text-base font-bold">
+          {isPayroll ? 'Build the weekly payroll preview' : 'Build the weekly % of Completion report'}
+        </h2>
         <p className="text-xs leading-relaxed text-neutral-500">
-          {ready
-            ? 'Press "Create Report" to build the tables for each item listed in the navigation menu above'
-            : 'Upload files 1–8 on the left, check the pay date, then press Create Report. You can edit AP#, % Completion, Estimator, Apptivo $ and include/exclude rows afterwards — both tables and the exceptions list recompute live.'}
+          {isPayroll
+            ? ready
+              ? 'Press "Create Payroll Preview" to build the payroll tabs.'
+              : 'Upload Slot A (completed %\u2019s — or use this session\u2019s report) and Slot B (P&L), check the pay date, then create.'
+            : ready
+              ? 'Press "Create %\u2019s Report" to build the tables for each item in the navigation menu above.'
+              : 'Upload required files 1 and 3–7 on the left (2 and 8 are optional), check the pay date, then press Create %\u2019s Report. Edits recompute live.'}
         </p>
       </div>
+    </div>
+  );
+}
+
+/** Minimal P&L grid for the payroll tab (full layout is in the export). */
+function PlImportTable({ pl }: { pl: PlParseResult | null }): JSX.Element {
+  if (!pl) {
+    return (
+      <div className="p-4 text-xs text-neutral-500 italic">Upload the P&amp;L by Customer file to populate this tab.</div>
+    );
+  }
+  const jobs = [...pl.byJob.entries()];
+  const headers = ['Account', ...jobs.map(([ap, m]) => m.plJobHeader || `AP${ap}`)];
+  const metricRows: { label: string; pick: (m: (typeof jobs)[0][1]) => number }[] = [
+    { label: 'Total Income', pick: (m) => m.income },
+    { label: 'Materials', pick: (m) => m.materials },
+    { label: 'QB Labor-Wages-Subs', pick: (m) => m.laborWagesSubs },
+    { label: 'Mileage Expense', pick: (m) => m.mileage },
+    { label: 'Sundries -', pick: (m) => m.sundries },
+  ];
+  return (
+    <div className="p-2 overflow-auto">
+      <table className="w-max border-collapse bg-white text-xs">
+        <thead>
+          <tr>
+            {headers.map((h) => (
+              <th key={h} className="xcell2 text-left font-bold whitespace-nowrap">
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {metricRows.map((mr) => (
+            <tr key={mr.label}>
+              <td className="xcell font-bold whitespace-nowrap">{mr.label}</td>
+              {jobs.map(([ap, m]) => (
+                <td key={ap} className="xcell text-right whitespace-nowrap">
+                  {mr.pick(m).toFixed(2)}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

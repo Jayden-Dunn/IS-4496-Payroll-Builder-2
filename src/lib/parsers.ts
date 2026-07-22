@@ -210,7 +210,10 @@ const TS_OPTIONAL = [
   'approved_status', 'has_flags', 'flag_types',
 ];
 
-export function parseTimesheet(wbd: WorkbookData): TimesheetParseResult {
+export function parseTimesheet(
+  wbd: WorkbookData,
+  sourceEntity: 'NV' | 'UT' = 'NV',
+): TimesheetParseResult {
   const sheet = wbd.sheets[0];
   const hdr = findHeaderRow(sheet.rows, TS_REQUIRED, TS_OPTIONAL);
   if (!hdr) {
@@ -258,6 +261,7 @@ export function parseTimesheet(wbd: WorkbookData): TimesheetParseResult {
       approvedStatus: asString(get('approved_status')),
       hasFlags: asString(get('has_flags')),
       flagTypes: asString(get('flag_types')),
+      sourceEntity,
     });
   }
   if (rows.length === 0) throw new Error('No timesheet rows found under the header row.');

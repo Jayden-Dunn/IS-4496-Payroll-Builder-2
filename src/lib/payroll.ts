@@ -3,11 +3,13 @@
  * extraction/resolution, overtime split, WO pre-fills. All pure functions —
  * nothing dataset-specific lives here; tribal knowledge comes from Settings.
  */
-import { AP_RE } from './apkey';
+import { AP_RE, extractApKey, normalizeApInput } from './apkey';
 import { round2 } from './format';
+import { baseApKey } from './jobNames';
 import type {
   CrewLeadResolution,
   DirectoryEmployee,
+  JobRateRule,
   TimesheetRow,
 } from './types';
 
@@ -360,7 +362,34 @@ export function wageRateFor(
 }
 
 // ---------------------------------------------------------------------------
-// Round 4 §5.8 — prevailing-wage (Davis-Bacon) rate suggestion chain
+// Round 6 §6.2 — profit-share chain (pure)
+// ---------------------------------------------------------------------------
+
+/**
+ * Total Profit Share = (WO Override if entered, else Profit Share)
+ * − Labor − ½ Materials. % Completion and Mileage are display-only.
+ */
+export function computeTotalProfitShare(args: {
+  profitShare: number;
+  workOrderOverride: number | null | undefined;
+  laborWages: number;
+  halfMaterials: number;
+  /** Display-only — must not affect the result. */
+  percentCompletion?: number;
+  /** Display-only — must not affect the result. */
+  mileage?: number;
+}): number {
+  void args.percentCompletion;
+  void args.mileage;
+  const base =
+    args.workOrderOverride !== null && args.workOrderOverride !== undefined
+      ? args.workOrderOverride
+      : args.profitShare;
+  return base - args.laborWages - args.halfMaterials;
+}
+
+// ---------------------------------------------------------------------------
+// Round 6 §7.1 / §7.2 — Davis-Bacon + job-rate resolution
 // ---------------------------------------------------------------------------
 
 /** Case-insensitive substring match of any configured pattern on the job text. */
@@ -372,14 +401,63 @@ export function isPrevailingWageJob(jobText: string, patterns: readonly string[]
 export interface LineRate {
   rate: number;
   defaulted: boolean;
-  /** Rule 2 fired: the rate came from max(default, prevailing minimum). */
+  /** Branch 1 considered: job matched a Davis-Bacon pattern. */
   prevailing: boolean;
+  /** A §7.2 job-specific rule supplied the pre–Branch-1 rate. */
+  fromJobRule?: boolean;
+  /** Optional note from the matched job rule (tooltip). */
+  ruleNote?: string;
+}
+
+/** How a job-rate rule's AP# matches a timesheet/calendar apKey. */
+function jobRuleApMatch(
+  rule: JobRateRule,
+  jobApKey: string,
+): 'exact' | 'suffix' | null {
+  const ruleKey = (normalizeApInput(rule.apKey) ?? rule.apKey.trim()).toUpperCase();
+  const jobKey = jobApKey.trim().toUpperCase();
+  if (!ruleKey || !jobKey) return null;
+  if (ruleKey === jobKey) return 'exact';
+  if (!rule.includeSuffixes) return null;
+  const ruleBase = baseApKey(ruleKey) ?? ruleKey;
+  const jobBase = baseApKey(jobKey) ?? jobKey;
+  return ruleBase === jobBase ? 'suffix' : null;
+}
+
+function jobRuleAppliesToEmployee(rule: JobRateRule, employeeName: string): boolean {
+  if (rule.employeeNames.length === 0) return true;
+  return rule.employeeNames.some(
+    (n) => tokensSubset(n, employeeName) || tokensSubset(employeeName, n),
+  );
 }
 
 /**
- * §5.8 suggestion chain (a per-line user edit — rule 1 — is applied by the
- * caller): prevailing-wage jobs pay max(default rate, prevailing minimum);
- * hourly (T&M) jobs pay the employee's hourly-jobs rate; else the default.
+ * Specificity: exact+named (4) > exact+all (3) > suffix+named (2) > suffix+all (1).
+ * Returns null when no rule matches.
+ */
+export function matchJobRateRule(
+  employeeName: string,
+  jobApKey: string | null | undefined,
+  rules: readonly JobRateRule[] | undefined,
+): { rule: JobRateRule; specificity: number } | null {
+  if (!jobApKey || !rules || rules.length === 0) return null;
+  let best: { rule: JobRateRule; specificity: number } | null = null;
+  for (const rule of rules) {
+    const ap = jobRuleApMatch(rule, jobApKey);
+    if (!ap) continue;
+    if (!jobRuleAppliesToEmployee(rule, employeeName)) continue;
+    const named = rule.employeeNames.length > 0;
+    const specificity =
+      ap === 'exact' ? (named ? 4 : 3) : named ? 2 : 1;
+    if (!best || specificity > best.specificity) best = { rule, specificity };
+  }
+  return best;
+}
+
+/**
+ * Round 6 §7.2 + §7.1 Branch 1. Manual line edits are applied by the caller
+ * before/after this. Order: job rule → hourly-jobs rate → employee default →
+ * global fallback; then on DB jobs `rate = max(resolved, prevailingMinRate)`.
  */
 export function resolveLineRate(
   employeeName: string,
@@ -390,16 +468,71 @@ export function resolveLineRate(
     defaultWageRate: number;
     prevailingWagePatterns: string[];
     prevailingMinRate: number;
+    jobRateRules?: JobRateRule[];
+    apKey?: string | null;
+    /** Pivot-by-Job §7.1 toggle: skip Davis-Bacon floor even when patterns match. */
+    forceNonDb?: boolean;
   },
 ): LineRate {
-  if (isPrevailingWageJob(jobText, settings.prevailingWagePatterns)) {
-    const base = wageRateFor(employeeName, settings.wageRates, settings.defaultWageRate, false);
-    return {
-      rate: Math.max(base.rate, settings.prevailingMinRate),
-      defaulted: base.defaulted,
-      prevailing: true,
-    };
+  const apKey = settings.apKey ?? extractApKey(jobText);
+  const matched = matchJobRateRule(employeeName, apKey, settings.jobRateRules);
+  let rate: number;
+  let defaulted: boolean;
+  let fromJobRule = false;
+  let ruleNote: string | undefined;
+
+  if (matched) {
+    rate = matched.rule.rate;
+    defaulted = false;
+    fromJobRule = true;
+    if (matched.rule.note.trim()) ruleNote = matched.rule.note.trim();
+  } else {
+    const info = wageRateFor(
+      employeeName,
+      settings.wageRates,
+      settings.defaultWageRate,
+      hourlyJob,
+    );
+    rate = info.rate;
+    defaulted = info.defaulted;
   }
-  const info = wageRateFor(employeeName, settings.wageRates, settings.defaultWageRate, hourlyJob);
-  return { rate: info.rate, defaulted: info.defaulted, prevailing: false };
+
+  const isDb =
+    !settings.forceNonDb && isPrevailingWageJob(jobText, settings.prevailingWagePatterns);
+  if (isDb) {
+    rate = Math.max(rate, settings.prevailingMinRate);
+  }
+
+  return {
+    rate,
+    defaulted,
+    prevailing: isDb,
+    ...(fromJobRule ? { fromJobRule: true, ...(ruleNote ? { ruleNote } : {}) } : {}),
+  };
+}
+
+/**
+ * Round 6 §7.1 Branch 2 — crew-lead Davis-Bacon floor on per-job pay after
+ * the §6.2 chain and any split. Never lowers pay; subcontractors exempt.
+ */
+export function applyDavisBaconLeadFloor(args: {
+  isDbJob: boolean;
+  isSubcontractor: boolean;
+  timesheetHoursOnJob: number;
+  profitSharePay: number;
+  dbRate: number;
+}): { pay: number; floorApplied: boolean; floor: number; priorPay: number } {
+  const priorPay = args.profitSharePay;
+  if (!args.isDbJob || args.isSubcontractor) {
+    return { pay: priorPay, floorApplied: false, floor: 0, priorPay };
+  }
+  const hours = args.timesheetHoursOnJob;
+  if (!Number.isFinite(hours) || hours <= 0) {
+    return { pay: priorPay, floorApplied: false, floor: 0, priorPay };
+  }
+  const floor = round2(hours * args.dbRate);
+  if (priorPay < floor) {
+    return { pay: floor, floorApplied: true, floor, priorPay };
+  }
+  return { pay: priorPay, floorApplied: false, floor, priorPay };
 }

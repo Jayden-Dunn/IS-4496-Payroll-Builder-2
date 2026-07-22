@@ -43,6 +43,8 @@ export interface TimesheetRow {
   approvedStatus: string;
   hasFlags: string;
   flagTypes: string;
+  /** Round 6 §2.1 — which timesheet upload produced this row. */
+  sourceEntity: 'NV' | 'UT';
 }
 
 export interface TimesheetParseResult {
@@ -217,11 +219,26 @@ export interface AppSettings {
   defaultWageRate: number; // seed 18
   salariedRoster: SalariedEntry[];
   mileageRate: number; // $/mile; seed 0.625
+  /** Round 6 §7.3 — office mileage rate (PS footer); seed 0.50. */
+  officeMileageRate: number;
   subcontractors: string[]; // §7.4 — valid crew leads without directory matches
-  /** Round 4 §5.8 — substring patterns marking prevailing-wage (Davis-Bacon) jobs. */
+  /** Round 4/6 — Davis-Bacon job patterns (Settings UI label). */
   prevailingWagePatterns: string[];
-  /** Round 4 §5.8 — prevailing minimum hourly rate; seed 19.18. */
+  /** Round 4/6 — Davis-Bacon minimum hourly rate; seed 19.18. */
   prevailingMinRate: number;
+  /** Round 6 §7.2 — negotiated job-specific $/hr rules. */
+  jobRateRules: JobRateRule[];
+}
+
+/** Round 6 §7.2 — job-specific pay rule. */
+export interface JobRateRule {
+  id: string;
+  apKey: string;
+  rate: number;
+  /** Empty = all painters. */
+  employeeNames: string[];
+  includeSuffixes: boolean;
+  note: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -306,19 +323,32 @@ export interface CrewLeadResolution {
 /** Per-job analysis fields shown on job rows (all editable). */
 export interface JobAnalysis {
   apKey: string | null;
-  onCalendar: string; // 'NOT ON CALENDAR', '-', or the TimeNavi row ref
+  /** 'NOT ON CALENDAR' | '-' | 'TimeNavi row {n}' */
+  onCalendar: string;
   estimator: string;
   crewLead: string; // resolved display, editable
   crewLeadResolution: CrewLeadResolution | null;
-  woOverride: number | null; // $ — editable, pre-filled from description
-  woOverrideSource: string | null; // tooltip
-  woPct: number | null; // fraction; null renders '-' (hourly)
-  woPctSource: string | null; // tooltip when description-overridden
+  /** Manual WO Override $ — blank by default (Round 6 §5.3). */
+  woOverride: number | null;
+  /** Calendar description-$ suggestion (tooltip only; not written into the cell). */
+  woOverrideSuggestion: number | null;
+  woOverrideSuggestionSource: string | null;
+  /** Manual WO% — blank by default (Round 6 §5.3). */
+  woPct: number | null;
+  /** Calendar @ NN% PS suggestion (tooltip only). */
+  woPctSuggestion: number | null;
+  woPctSuggestionSource: string | null;
   percent: PercentValue; // live mirror of the TimeNavi grid value
   notes: string;
   hourly: boolean; // job is hourly (vs piece-rate)
   sub: boolean; // paid to a subcontractor
   split: number; // co-lead count (≥1)
+  /** True when job text matches a Davis-Bacon pattern (before any override). */
+  dbPatternMatch: boolean;
+  /** Effective DB flag: pattern match and not forced off via `dbOverride`. */
+  isDbJob: boolean;
+  /** True when the user forced non-DB on a pattern-matched job (§7.1). */
+  dbOverride: boolean;
 }
 
 export interface PbjEmployeeRow {
@@ -379,7 +409,11 @@ export interface PbjJobEdit {
   crewLead?: string;
   woOverride?: number | null;
   woPct?: number | null;
+  /** Seeded from completed %'s (Slot A) or last-week carry; otherwise mirrors TimeNavi. */
+  percent?: PercentValue;
   notes?: string;
+  /** Round 6 §7.1 — when true, force non–Davis-Bacon even if the job text matches a pattern. */
+  dbOverride?: boolean;
 }
 
 /** QB Hrs overrides keyed by `${jobRowId}\u0000${username}`. */
@@ -401,10 +435,14 @@ export interface HourlyLine {
   hours: number;
   rate: number;
   rateDefaulted: boolean; // true when no configured wage rate was found
-  /** True when the prevailing-wage rule (§5.8 rule 2) suggested the rate. */
+  /** True when the job matched a Davis-Bacon pattern (§7.1 Branch 1). */
   prevailing: boolean;
-  /** True when rule 2 fired but the rendered rate is below the prevailing minimum. */
+  /** True when Branch 1 fired but the rendered rate is below the DB minimum. */
   belowPrevailing: boolean;
+  /** Round 6 §7.2 — rate came from a job-specific rule (pre–Branch-1). */
+  fromJobRule?: boolean;
+  /** Optional note from the matched job rule. */
+  ruleNote?: string;
   ot: boolean;
   hourlyJob: boolean;
   colorHex: string | null; // estimator fill for the PO# cell
@@ -418,7 +456,10 @@ export interface HourlyBlock {
   lines: HourlyLine[];
   totalHours: number;
   totalPay: number;
-  net: number | null; // editable; taxes = total − net once entered
+  /** Round 6 §6.1 — independent manual cells; blank by default. */
+  taxes: number | null;
+  nest: number | null;
+  net: number | null;
   inactive: boolean;
 }
 
@@ -431,14 +472,22 @@ export interface PsJobColumn {
   customer: string;
   woPct: number | null;
   profitShare: number; // income × woPct
-  workOrderOverride: number; // editable default
-  percentCompletion: number; // fraction (HOURLY jobs excluded from PS blocks)
+  workOrderOverride: number | null; // blank unless typed (Round 6 §6.2)
+  percentCompletion: number; // fraction (HOURLY jobs excluded from PS blocks) — displayed, not in TPS chain
   laborWages: number;
-  mileage: number;
+  mileage: number; // displayed, not in TPS chain
   halfMaterials: number;
-  totalProfitShare: number; // WO×% − labor − mileage − ½materials
+  totalProfitShare: number; // (WO Override|PS) − labor − ½materials (Round 6 §6.2)
   splitWith: number; // 1 = no split
   totalAfterSplit: number;
+  /** Round 6 §7.1 Branch 2 — Davis-Bacon floor raised this lead's per-job pay. */
+  dbFloorApplied?: boolean;
+  /** Floor amount (hours × DB rate) when Branch 2 was evaluated. */
+  dbFloor?: number;
+  /** Per-job pay before Branch 2 raise (for tooltip / exception). */
+  dbFloorPriorPay?: number;
+  /** Timesheet hours used for the Branch 2 floor. */
+  dbFloorHours?: number;
   missingFromPl: boolean;
   income: number;
   materials: number;
@@ -479,6 +528,18 @@ export type PainterSectionEntry =
   | { kind: 'hourly'; block: HourlyBlock }
   | { kind: 'ps'; block: PsBlock };
 
+/** Round 6 §4.10 — empty template block for someone without hours this week. */
+export interface InactiveEmployeeBlock {
+  name: string;
+  displayName: string;
+  /** e.g. "$25/hr" from the wage map. */
+  rateNote: string;
+  /** Crew-lead / subcontractor → materials + T-SHEETS blocks; else painter T-SHEETS only. */
+  isLead: boolean;
+  /** Directory row marked inactive (*). */
+  directoryInactive: boolean;
+}
+
 export interface PayrollPreviewModel {
   title: string;
   /** "M/D - M/D" week range (office PO cells, salary date-range lines). */
@@ -491,14 +552,19 @@ export interface PayrollPreviewModel {
   admin: SalaryBlock[];
   estimators: SalaryBlock[];
   managers: SalaryBlock[];
-  inactiveZeroHours: string[]; // §5.7 parked names
+  /** §4.10 — full inactive tab (directory + absent leads/subs). */
+  inactiveEmployees: InactiveEmployeeBlock[];
+  inactiveZeroHours: string[]; // §5.7 — *-inactive directory names without hours (exceptions)
 }
 
 /** Sparse edits for Payroll Preview (keyed by block/line ids). */
 export interface PayrollEdit {
   rate?: number;
+  /** Round 6 §6.1 — manual; never auto-computed. */
+  taxes?: number | null;
+  nest?: number | null;
   net?: number | null;
-  workOrderOverride?: number;
+  workOrderOverride?: number | null;
   percentCompletion?: number;
   laborWages?: number;
   mileage?: number;

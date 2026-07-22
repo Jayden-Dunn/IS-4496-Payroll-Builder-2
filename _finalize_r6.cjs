@@ -1,0 +1,15 @@
+﻿const fs = require('fs');
+const transcript = 'C:/Users/jayda/.cursor/projects/c-Users-jayda-OneDrive-Desktop-AI-Agents-A-web-app-for-s-Attempt-1/agent-transcripts/8822d2a3-15ea-4084-ba6d-cb3eb839251e/8822d2a3-15ea-4084-ba6d-cb3eb839251e.jsonl';
+const lines = fs.readFileSync(transcript, 'utf8').split(/\r?\n/);
+const text = JSON.parse(lines[516]).message.content[0].text;
+const i12 = text.indexOf('### 1.2 Payroll mode');
+const i2 = text.indexOf('## 2. Upload changes');
+const i22 = text.indexOf('### 2.2 Slot A parser');
+const i3 = text.indexOf('## 3.');
+const slotA = text.slice(i12, i2).trim() + '\n\n---\n\n' + text.slice(i22, i3).trim() + '\n';
+fs.writeFileSync('_r6_slotA.txt', slotA, 'utf8');
+const section = text.slice(text.indexOf('## 2.'), i3);
+fs.writeFileSync('_r6_section2.txt', section, 'utf8');
+console.log('section2 chars', section.length);
+console.log('slotA chars', slotA.length);
+console.log(slotA);

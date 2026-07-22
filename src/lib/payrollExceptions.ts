@@ -178,7 +178,7 @@ export function buildPayrollExceptions(input: PayrollExceptionsInput): Exception
     });
   }
 
-  // 5b (Round 4 §5.8). Prevailing-wage job paid below the prevailing minimum.
+  // 5b (Round 4/6 §7.1). Davis-Bacon job paid below the DB minimum (manual edit).
   {
     const items: ExceptionItem[] = [];
     const everyBlock = [...preview.painters, ...preview.office, ...preview.leads.flatMap((l) => (l.tsheets ? [l.tsheets] : []))];
@@ -186,15 +186,76 @@ export function buildPayrollExceptions(input: PayrollExceptionsInput): Exception
       for (const l of b.lines) {
         if (l.belowPrevailing) {
           items.push({
-            message: `${b.employeeName} — "${l.jobLabel}" is a prevailing-wage job but pays ${l.rate.toFixed(2)}/hr (below the prevailing minimum)`,
+            message: `${b.employeeName} — "${l.jobLabel}" is a Davis-Bacon job but pays ${l.rate.toFixed(2)}/hr (below the Davis-Bacon rate)`,
           });
         }
       }
     }
     groups.push({
       key: 'prevailingWage',
-      title: 'Prevailing-wage job paid at default rate',
-      note: 'The job matched a Prevailing-wage pattern in Settings but the rendered rate sits below the prevailing minimum.',
+      title: 'Davis-Bacon job paid below DB rate',
+      note: 'The job matched a Davis-Bacon pattern in Settings but the rendered rate sits below the Davis-Bacon minimum (usually after a manual edit).',
+      items,
+    });
+  }
+
+  // 5c (Round 6 §7.1 Branch 2). Davis-Bacon floor applied on crew-lead pay.
+  {
+    const items: ExceptionItem[] = [];
+    for (const b of preview.leads) {
+      for (const j of b.jobs) {
+        if (!j.dbFloorApplied) continue;
+        const ps = (j.dbFloorPriorPay ?? j.totalAfterSplit).toFixed(2);
+        const hrs = j.dbFloorHours ?? 0;
+        const rate = j.dbFloor && hrs > 0 ? (j.dbFloor / hrs).toFixed(2) : '?';
+        items.push({
+          message: `Davis-Bacon floor applied: ${b.leadName} on ${j.apKey ? `AP${j.apKey}` : '—'} — profit share ${ps} < ${hrs}h × ${rate}`,
+        });
+      }
+    }
+    groups.push({
+      key: 'dbFloorApplied',
+      title: 'Davis-Bacon floor applied',
+      note: 'Informational: crew-lead per-job pay was raised to hours × Davis-Bacon rate on a DB job.',
+      items,
+    });
+  }
+
+  // 5d (Round 6 §7.2). Job-rate rule applied (informational).
+  {
+    const items: ExceptionItem[] = [];
+    const everyBlock = [...preview.painters, ...preview.office, ...preview.leads.flatMap((l) => (l.tsheets ? [l.tsheets] : []))];
+    for (const b of everyBlock) {
+      for (const l of b.lines) {
+        if (!l.fromJobRule) continue;
+        const note = l.ruleNote ? ` (${l.ruleNote})` : '';
+        items.push({
+          message: `${b.employeeName} — "${l.jobLabel}" @ $${l.rate.toFixed(2)}/hr${note}`,
+        });
+      }
+    }
+    groups.push({
+      key: 'jobRateRule',
+      title: 'Job-rate rule applied',
+      note: 'Informational: hourly lines paid from a Settings job-specific pay rule this week.',
+      items,
+    });
+  }
+
+  // 5e (Round 6 §6.2). No work-order % for lead (pivot blank + no Settings crew map entry).
+  {
+    const items: ExceptionItem[] = [];
+    const seen = new Set<string>();
+    for (const b of preview.leads) {
+      if (b.jobs.some((j) => j.woPct === null) && !seen.has(b.leadName)) {
+        seen.add(b.leadName);
+        items.push({ message: `no work-order % for ${b.leadName}` });
+      }
+    }
+    groups.push({
+      key: 'noWorkOrderPct',
+      title: 'No work-order %',
+      note: 'Pivot WO% blank and the lead has no Work-order % entry in Settings — Profit Share uses 0 until one is set.',
       items,
     });
   }
