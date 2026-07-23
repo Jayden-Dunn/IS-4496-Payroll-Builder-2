@@ -14,6 +14,7 @@ import {
   JournalEntryTab,
   ManagementReportTab,
   NotesTab,
+  PrFinalCheckTab,
   ProfitshareOutputTab,
 } from './components/PayrollExtraTabs';
 import { PayrollPreview } from './components/PayrollPreview';
@@ -241,7 +242,8 @@ type PayrollTab =
   | 'journal'
   | 'jobs'
   | 'inactive'
-  | 'payrollExceptions';
+  | 'payrollExceptions'
+  | 'prFinalCheck';
 type Tab = PercentsTab | PayrollTab;
 
 export default function App(): JSX.Element {
@@ -935,10 +937,13 @@ export default function App(): JSX.Element {
         weekStart: weekBounds.weekStart,
         weekEnd: weekBounds.weekEnd,
         pl: parsed.pl,
+        plSourceFileName: chips.pl.fileName || null,
         payrollPreview,
         payrollExceptions,
         mileageRate: settings.mileageRate,
         defaultProfitSharePct: settings.defaultProfitSharePct,
+        estimatorByApKey,
+        legend: settings.legend,
       });
       return;
     }
@@ -961,11 +966,13 @@ export default function App(): JSX.Element {
     payDate,
     weekBounds,
     parsed.pl,
+    chips.pl.fileName,
     payrollPreview,
     payrollExceptions,
     settings.mileageRate,
     settings.defaultProfitSharePct,
     settings.legend,
+    estimatorByApKey,
     reportRows,
     pivot,
     viewPivot,
@@ -1235,6 +1242,7 @@ export default function App(): JSX.Element {
                       'payrollExceptions',
                       `Payroll Exceptions${createdPayroll ? ` (${payrollExceptionCount})` : ''}`,
                     ],
+                    ['prFinalCheck', 'PR Final Check'],
                   ] as [Tab, string][])
             ).map(([t, label]) => (
               <button
@@ -1315,6 +1323,8 @@ export default function App(): JSX.Element {
               <JobsListTab model={payrollPreview} pl={parsed.pl} />
             ) : tab === 'payrollExceptions' ? (
               <ExceptionsPanel groups={payrollExceptions} onNavigate={navigateToRow} />
+            ) : tab === 'prFinalCheck' ? (
+              <PrFinalCheckTab pl={parsed.pl} sourceFileName={chips.pl.fileName} />
             ) : tab === 'inactive' ? (
               <InactiveEmployeesTab model={payrollPreview} />
             ) : tab === 'plImport' ? (
@@ -1479,13 +1489,49 @@ function Placeholder({ mode, ready }: { mode: AppMode; ready: boolean }): JSX.El
   );
 }
 
-/** Minimal P&L grid for the payroll tab (full layout is in the export). */
+/** Full P&L account tree when available; else byJob summary metrics. */
 function PlImportTable({ pl }: { pl: PlParseResult | null }): JSX.Element {
   if (!pl) {
     return (
       <div className="p-4 text-xs text-neutral-500 italic">Upload the P&amp;L by Customer file to populate this tab.</div>
     );
   }
+
+  if (pl.columnHeaders.length > 0 && pl.accountRows.length > 0) {
+    const headers = [...pl.columnHeaders];
+    if (!headers[0]) headers[0] = 'Account';
+    return (
+      <div className="p-2 overflow-auto">
+        <table className="w-max border-collapse bg-white text-xs">
+          <thead>
+            <tr>
+              {headers.map((h, i) => (
+                <th key={`${i}-${h}`} className="xcell2 text-left font-bold whitespace-nowrap">
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {pl.accountRows.map((ar, ri) => (
+              <tr key={`${ri}-${ar.label}`}>
+                <td className="xcell font-bold whitespace-nowrap">{ar.label}</td>
+                {headers.slice(1).map((_, ci) => {
+                  const v = ar.values[ci + 1];
+                  return (
+                    <td key={ci} className="xcell text-right whitespace-nowrap">
+                      {v === null || v === undefined ? '' : v.toFixed(2)}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
+
   const jobs = [...pl.byJob.entries()];
   const headers = ['Account', ...jobs.map(([ap, m]) => m.plJobHeader || `AP${ap}`)];
   const metricRows: { label: string; pick: (m: (typeof jobs)[0][1]) => number }[] = [

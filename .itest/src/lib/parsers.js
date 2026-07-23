@@ -698,7 +698,32 @@ function parsePl(wbd) {
             byJob.set(jc.apKey, metrics);
         }
     }
-    return { byJob, duplicateColumns };
+    // Round 7 — retain the full P&L grid (header + every account row as uploaded).
+    const colCount = Math.max(headerRow.length, 1);
+    const columnHeaders = [];
+    for (let c = 0; c < colCount; c++)
+        columnHeaders.push(asString(headerRow[c]));
+    const accountRows = [];
+    for (let i = incomeRow; i < sheet.rows.length; i++) {
+        const r = sheet.rows[i];
+        if (!r)
+            continue;
+        const label = asString(r[0]);
+        if (!label)
+            continue;
+        const values = [];
+        for (let c = 0; c < colCount; c++) {
+            if (c === 0) {
+                values.push(null);
+                continue;
+            }
+            const n = parseNumberLoose(cellAt(r, c));
+            // Formula remnants / blanks → null; plain numeric formula remnants parse as numbers.
+            values.push(typeof n === 'number' ? n : null);
+        }
+        accountRows.push({ label, values });
+    }
+    return { byJob, duplicateColumns, columnHeaders, accountRows };
 }
 // ---------------------------------------------------------------------------
 // Slot 9 — Employee Name List (QB Time employee directory)

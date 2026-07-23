@@ -4,6 +4,8 @@
  */
 import { useState, type CSSProperties, type ReactNode } from 'react';
 import { fmtAccounting, isDarkColor, parseMoneyInput, parsePercentInput } from '../lib/format';
+import { buildJournalEntryRows } from '../lib/journalEntry';
+import { buildPrFinalCheckRows } from '../lib/prFinalCheck';
 import type {
   HourlyBlock,
   PayrollEdit,
@@ -22,6 +24,9 @@ const NEARWHITE: CSSProperties = { backgroundColor: '#F9F9F9', fontWeight: 700 }
 const MANAGER: CSSProperties = { backgroundColor: '#D99694', fontWeight: 700 };
 const HOURLY_PAY_YELLOW: CSSProperties = { backgroundColor: '#FFFF99' };
 const OFFICE_BLUE: CSSProperties = { backgroundColor: '#4F81BD', color: '#fff' };
+const NAME_RED: CSSProperties = { backgroundColor: '#C0504D', color: '#fff', fontWeight: 700 };
+const NAME_GREEN: CSSProperties = { backgroundColor: '#00B050', color: '#fff', fontWeight: 700 };
+const HEADER_GRAY: CSSProperties = { backgroundColor: '#808080', color: '#fff', fontWeight: 700 };
 
 function EmptyPayroll({ label }: { label: string }): JSX.Element {
   return (
@@ -113,51 +118,64 @@ function PsChainBody({
   defaultPsPct,
   onEdit,
   showGrossWages,
+  nameStyle,
+  highlightFirstJob,
 }: {
   block: PsBlock;
   skipWoBand?: boolean;
   defaultPsPct?: number;
   onEdit?: OnEdit;
   showGrossWages?: boolean;
+  nameStyle?: CSSProperties;
+  highlightFirstJob?: boolean;
 }): JSX.Element {
   const jobs = block.jobs.slice(0, 6);
   const psKey = (jobRowId: string): string => `ps:${block.key}:${jobRowId}`;
   const label = (t: string): JSX.Element => <td className="xcell w-40 font-medium">{t}</td>;
   const editable = Boolean(onEdit);
+  const bandStyle = nameStyle ?? TAN;
 
   return (
     <table className="mb-2 w-max min-w-[420px] border-collapse bg-white text-xs">
       <thead>
         <tr>
-          <th className="xcell text-left" style={TAN}>
+          <th className="xcell text-left" style={bandStyle}>
             {block.displayName}
             {block.sub && <span className="ml-2 rounded bg-blue-100 px-1 text-[10px] font-normal text-blue-700">sub</span>}
           </th>
           {!skipWoBand &&
             jobs.map((j) => (
-              <th key={j.jobRowId} className="xcell min-w-[100px] text-right" style={TAN}>
+              <th key={j.jobRowId} className="xcell min-w-[100px] text-right" style={bandStyle}>
                 {pctLabel(j.woPct)}
               </th>
             ))}
           {skipWoBand &&
             jobs.map((j) => (
-              <th key={j.jobRowId} className="xcell min-w-[100px]" style={TAN} />
+              <th key={j.jobRowId} className="xcell min-w-[100px]" style={bandStyle} />
             ))}
         </tr>
       </thead>
       <tbody>
         <tr>
           {label('PO')}
-          {jobs.map((j) => (
-            <td key={j.jobRowId} className="xcell text-right text-[11px] font-bold" style={jobCellStyle(j.colorHex)}>
+          {jobs.map((j, i) => (
+            <td
+              key={j.jobRowId}
+              className="xcell text-right text-[11px] font-bold"
+              style={highlightFirstJob && i === 0 ? HOURLY_PAY_YELLOW : jobCellStyle(j.colorHex)}
+            >
               {j.jobShort}
             </td>
           ))}
         </tr>
         <tr>
           {label('Name')}
-          {jobs.map((j) => (
-            <td key={j.jobRowId} className="xcell text-right text-[11px] font-bold" style={jobCellStyle(j.colorHex)}>
+          {jobs.map((j, i) => (
+            <td
+              key={j.jobRowId}
+              className="xcell text-right text-[11px] font-bold"
+              style={highlightFirstJob && i === 0 ? HOURLY_PAY_YELLOW : jobCellStyle(j.colorHex)}
+            >
               {j.customer}
             </td>
           ))}
@@ -292,13 +310,17 @@ function PsChainBody({
         </tr>
         <tr className="font-bold">
           {label('Total Pay')}
-          <td className="xcell text-right" colSpan={Math.max(jobs.length, 1)}>
+          <td
+            className="xcell text-right"
+            colSpan={Math.max(jobs.length, 1)}
+            style={highlightFirstJob ? { backgroundColor: '#FAF5F0' } : undefined}
+          >
             ${money(block.totalPay)}
           </td>
         </tr>
         {showGrossWages && (
           <tr className="font-bold">
-            {label('Total Gross Wages')}
+            {label('Total Gross Wages:')}
             <td className="xcell text-right" colSpan={Math.max(jobs.length, 1)}>
               ${money(block.total + block.hourlyPay)}
             </td>
@@ -496,12 +518,60 @@ function TitleBand({ title }: { title: string }): JSX.Element {
   );
 }
 
+function moneyPlain(n: number): string {
+  return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+/** NOTES working-log materials table (export parity). */
+function LeadMaterialsTable({ block }: { block: PsBlock }): JSX.Element {
+  return (
+    <table className="mb-2 w-max min-w-[560px] border-collapse bg-white text-xs">
+      <thead>
+        <tr>
+          <th className="xcell text-left" style={TAN} colSpan={6}>
+            {block.displayName}
+            {block.sub && (
+              <span className="ml-2 rounded bg-blue-100 px-1 text-[10px] font-normal text-blue-700">sub</span>
+            )}
+          </th>
+        </tr>
+        <tr>
+          {['PO#', 'Job', 'Reported Materials', 'Total Materials', 'DIFFERENCE', ''].map((h, i) => (
+            <th key={i} className="xcell text-left font-bold underline">
+              {h}
+            </th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {block.jobs.slice(0, 6).map((j) => {
+          const woBase = j.workOrderOverride !== null ? j.workOrderOverride : j.profitShare;
+          const woNote = `w.o. $${moneyPlain(woBase)} less ½ mats $${moneyPlain(j.halfMaterials)}`;
+          return (
+            <tr key={j.jobRowId}>
+              <td className="xcell whitespace-nowrap" style={jobCellStyle(j.colorHex)}>
+                {j.apKey ? `AP${j.apKey}` : j.jobShort}
+              </td>
+              <td className="xcell">{`${j.customer} ${j.jobShort}`.trim()}</td>
+              <td className="xcell" />
+              <td className="xcell text-right whitespace-nowrap">{money(j.materials)}</td>
+              <td className="xcell" />
+              <td className="xcell text-[11px] text-neutral-600 whitespace-nowrap">{woNote}</td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
 function PainterSequence({
   model,
   skipWoBand,
   defaultPsPct,
   blankTaxes,
   showGrossWages,
+  notesMode,
   onEdit,
 }: {
   model: PayrollPreviewModel;
@@ -509,6 +579,8 @@ function PainterSequence({
   defaultPsPct?: number;
   blankTaxes?: boolean;
   showGrossWages?: boolean;
+  /** NOTES working log: materials table + T-SHEETS; no PS WO% band. */
+  notesMode?: boolean;
   onEdit?: OnEdit;
 }): ReactNode {
   return (
@@ -516,6 +588,15 @@ function PainterSequence({
       {model.painterSequence.map((entry) =>
         entry.kind === 'hourly' ? (
           <HourlyReadOnly key={entry.block.key} block={entry.block} blankTaxes={blankTaxes} />
+        ) : notesMode ? (
+          <div key={entry.block.key} className="mb-4">
+            <LeadMaterialsTable block={entry.block} />
+            {entry.block.tsheets && (
+              <div className="mb-2 ml-4 max-w-3xl">
+                <HourlyReadOnly block={entry.block.tsheets} tsheets blankTaxes={blankTaxes} />
+              </div>
+            )}
+          </div>
         ) : (
           <div key={entry.block.key}>
             <PsChainBody
@@ -573,7 +654,7 @@ export function ProfitshareOutputTab({ model }: { model: PayrollPreviewModel | n
               className="shrink-0"
               style={{ marginLeft: i === 0 ? 0 : '2rem' /* spacer ≈ 8th column between bands */ }}
             >
-              <PsChainBody block={block} />
+              <PsChainBody block={block} nameStyle={NAME_RED} highlightFirstJob />
             </div>
           ))}
         </div>
@@ -596,13 +677,25 @@ export function ManagementReportTab({
       {model.leads.length === 0 ? (
         <p className="text-xs italic text-neutral-500">(no crew leads this week)</p>
       ) : (
-        model.leads.map((block) => (
-          <div key={block.key} className="mb-6">
-            <PsChainBody block={block} defaultPsPct={defaultPsPct} />
-            {/* blank spacer between leads */}
-            <div className="h-6" />
-          </div>
-        ))
+        <>
+          <table className="mb-2 w-max border-collapse text-xs">
+            <thead>
+              <tr>
+                {['Crew', 'Job 1', 'Job 2', 'Job 3', 'Job 4', 'Job 5', 'Job 6'].map((h) => (
+                  <th key={h} className="xcell text-left" style={HEADER_GRAY}>
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+          </table>
+          {model.leads.map((block) => (
+            <div key={block.key} className="mb-6">
+              <PsChainBody block={block} defaultPsPct={defaultPsPct} nameStyle={NAME_GREEN} />
+              <div className="h-6" />
+            </div>
+          ))}
+        </>
       )}
     </div>
   );
@@ -618,38 +711,38 @@ export function InputNumsTab({
   if (!model) return <EmptyPayroll label="Input #'s needs Payroll Preview" />;
   return (
     <div className="p-3" style={GARAMOND}>
-      <TitleBand title="Input #'s" />
+      <div className="mb-3 text-[20px] font-bold" style={GARAMOND}>
+        Crew Profit Share
+      </div>
       {model.leads.length === 0 ? (
         <p className="text-xs italic text-neutral-500">(no crew leads this week)</p>
       ) : (
-        model.leads.map((block, idx) => {
+        model.leads.map((block) => {
           const jobs = block.jobs.slice(0, 6);
           const psKey = (jobRowId: string): string => `ps:${block.key}:${jobRowId}`;
           return (
             <table key={block.key} className="mb-6 w-max min-w-[480px] border-collapse bg-white text-xs">
               <tbody>
                 <tr>
-                  <td className="xcell font-bold" style={TAN}>
-                    Crew {idx + 1}
+                  <td className="xcell" style={NAME_RED}>
+                    {block.displayName}
                   </td>
-                  {jobs.map((_, i) => (
-                    <td key={i} className="xcell text-center font-bold" style={TAN}>
-                      Job {i + 1}
-                    </td>
-                  ))}
-                </tr>
-                <tr>
-                  <td className="xcell font-semibold">{block.displayName}</td>
                   {jobs.map((j) => (
-                    <td key={j.jobRowId} className="xcell text-right">
+                    <td key={j.jobRowId} className="xcell text-right" style={NAME_RED}>
                       {pctLabel(j.woPct)}
                     </td>
                   ))}
                 </tr>
                 <tr>
-                  <td className="xcell">PO #&apos;s:</td>
-                  {jobs.map((j) => (
-                    <td key={j.jobRowId} className="xcell text-right text-[11px]" style={jobCellStyle(j.colorHex)}>
+                  <td className="xcell" style={HEADER_GRAY}>
+                    PO #&apos;s:
+                  </td>
+                  {jobs.map((j, i) => (
+                    <td
+                      key={j.jobRowId}
+                      className="xcell text-right text-[11px] font-bold"
+                      style={i === 0 ? HOURLY_PAY_YELLOW : HEADER_GRAY}
+                    >
                       {j.jobShort}
                     </td>
                   ))}
@@ -736,10 +829,24 @@ export function NotesTab({
   onEdit?: OnEdit;
 }): JSX.Element {
   if (!model) return <EmptyPayroll label="Notes needs Payroll Preview" />;
+  const gross = model.painterSequence.reduce(
+    (s, e) => s + (e.kind === 'hourly' ? e.block.totalPay : e.block.totalPay),
+    0,
+  ) +
+    model.office.reduce((s, b) => s + b.totalPay, 0) +
+    [...model.admin, ...model.estimators, ...model.managers].reduce(
+      (s, b) => s + b.amount + b.mileageReimb,
+      0,
+    );
   return (
     <div className="p-3" style={GARAMOND}>
-      <TitleBand title={model.title} />
-      <PainterSequence model={model} />
+      <div className="mb-3 flex max-w-4xl items-baseline justify-between gap-4">
+        <div className="px-2 py-1.5 text-sm font-bold" style={BLACK}>
+          «{model.title}
+        </div>
+        <div className="text-sm font-bold tabular-nums">{money(gross)}</div>
+      </div>
+      <PainterSequence model={model} notesMode />
     </div>
   );
 }
@@ -770,102 +877,7 @@ export function FinalPayrollTab({
 
 export function JournalEntryTab({ model }: { model: PayrollPreviewModel | null }): JSX.Element {
   if (!model) return <EmptyPayroll label="Journal Entry needs Payroll Preview" />;
-
-  interface JobAgg {
-    apKey: string;
-    jobShort: string;
-    customer: string;
-    amount: number;
-    parts: { lead: string; amt: number; woPct: number | null; split: number }[];
-  }
-  const byAp = new Map<string, JobAgg>();
-  for (const lead of model.leads) {
-    for (const j of lead.jobs) {
-      if (!j.apKey) continue;
-      let agg = byAp.get(j.apKey);
-      if (!agg) {
-        agg = { apKey: j.apKey, jobShort: j.jobShort, customer: j.customer, amount: 0, parts: [] };
-        byAp.set(j.apKey, agg);
-      }
-      const amt = j.totalAfterSplit;
-      agg.amount += amt;
-      agg.parts.push({ lead: lead.displayName, amt, woPct: j.woPct, split: j.splitWith });
-    }
-  }
-  const sorted = [...byAp.values()].sort((a, b) =>
-    a.jobShort.localeCompare(b.jobShort, 'en', { sensitivity: 'base' }),
-  );
-
-  type Row = { account: string; amount: number; memo: string; po: string; className: string; job: string };
-  const rows: Row[] = [];
-  let amountSum = 0;
-
-  for (const j of sorted) {
-    const pctParts = j.parts.map((p) => `${p.lead} (${p.amt.toFixed(2)})`).join(', ');
-    const firstPct = j.parts[0]?.woPct;
-    const pctLabelStr = firstPct !== null && firstPct !== undefined ? `${Math.round(firstPct * 100)}%` : '';
-    const splitNote = j.parts.some((p) => p.split > 1)
-      ? `*split x${Math.max(...j.parts.map((p) => p.split))}*`
-      : '';
-    const amt = Math.round(j.amount * 100) / 100;
-    rows.push({
-      account: 'Employee Labor',
-      amount: amt,
-      memo: `${j.jobShort} [${pctLabelStr}${splitNote}]:  ${pctParts}`,
-      po: `AP${j.apKey}`,
-      className: 'Painting',
-      job: `${j.customer} ${j.jobShort}`.trim(),
-    });
-    amountSum += amt;
-  }
-
-  for (const lead of model.leads) {
-    if (lead.mileageNew) {
-      rows.push({
-        account: 'Mileage',
-        amount: lead.mileageNew,
-        memo: `mileage reimb:  ${lead.displayName}`,
-        po: 'Allpro',
-        className: 'Office',
-        job: '',
-      });
-      amountSum += lead.mileageNew;
-    }
-    if (lead.reimbursements) {
-      rows.push({
-        account: 'Mileage',
-        amount: lead.reimbursements,
-        memo: lead.reimbMemo || `reimb: ${lead.displayName}`,
-        po: 'Allpro',
-        className: 'Office',
-        job: '',
-      });
-      amountSum += lead.reimbursements;
-    }
-    if (lead.deductions && lead.deductMemo) {
-      rows.push({
-        account: 'Sundries -',
-        amount: lead.deductions,
-        memo: `(${lead.displayName}) ${lead.deductMemo}`,
-        po: '',
-        className: 'Painting',
-        job: '',
-      });
-      amountSum += lead.deductions;
-    }
-  }
-  for (const b of [...model.admin, ...model.estimators, ...model.managers]) {
-    if (!b.mileageReimb) continue;
-    rows.push({
-      account: 'Mileage',
-      amount: b.mileageReimb,
-      memo: `mileage reimb:  ${b.name} - ${b.miles} miles`,
-      po: 'Allpro',
-      className: 'Office',
-      job: '',
-    });
-    amountSum += b.mileageReimb;
-  }
+  const { rows, amountSum } = buildJournalEntryRows(model);
 
   return (
     <div className="p-3" style={GARAMOND}>
@@ -893,9 +905,79 @@ export function JournalEntryTab({ model }: { model: PayrollPreviewModel | null }
           ))}
           <tr className="font-bold border-t border-neutral-500">
             <td className="xcell">Total</td>
-            <td className="xcell text-right">{money(Math.round(amountSum * 100) / 100)}</td>
+            <td className="xcell text-right">{money(amountSum)}</td>
             <td className="xcell" colSpan={4} />
           </tr>
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** Round 7 §2 — PR Final Check from parsed P&L. */
+export function PrFinalCheckTab({
+  pl,
+  sourceFileName,
+}: {
+  pl: PlParseResult | null;
+  sourceFileName?: string;
+}): JSX.Element {
+  if (!pl) {
+    return (
+      <div className="flex h-full items-center justify-center p-6">
+        <div className="max-w-md rounded-lg border border-neutral-300 bg-white p-6 text-center shadow-sm">
+          <h2 className="mb-1 text-base font-bold">PR Final Check needs the P&amp;L</h2>
+          <p className="text-xs leading-relaxed text-neutral-500">
+            Upload the P&amp;L by Customer file to populate this tab.
+          </p>
+        </div>
+      </div>
+    );
+  }
+  const rows = buildPrFinalCheckRows(pl);
+  return (
+    <div className="p-3" style={GARAMOND}>
+      <TitleBand title="PR Final Check" />
+      {sourceFileName ? (
+        <p className="mb-2 text-[11px] text-neutral-600 italic">Source: {sourceFileName}</p>
+      ) : null}
+      <table className="w-max min-w-[720px] border-collapse bg-white text-xs">
+        <thead>
+          <tr>
+            {['PO#', 'Job', 'Total Income', 'Materials', 'QB Labor-Wages-Subs', 'Mileage Expense', 'Sundries -'].map(
+              (h) => (
+                <th key={h} className="xcell text-left font-bold whitespace-nowrap">
+                  {h}
+                </th>
+              ),
+            )}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => {
+            const job =
+              r.customerName && r.jobHeader && !r.jobHeader.includes(r.customerName)
+                ? `${r.customerName} ${r.jobHeader}`.trim()
+                : r.customerName || r.jobHeader || `AP${r.apKey}`;
+            return (
+              <tr key={r.apKey}>
+                <td className="xcell whitespace-nowrap">{`AP${r.apKey}`}</td>
+                <td className="xcell">{job}</td>
+                <td className="xcell text-right whitespace-nowrap">{money(r.income)}</td>
+                <td className="xcell text-right whitespace-nowrap">{money(r.materials)}</td>
+                <td className="xcell text-right whitespace-nowrap">{money(r.laborWagesSubs)}</td>
+                <td className="xcell text-right whitespace-nowrap">{money(r.mileage)}</td>
+                <td className="xcell text-right whitespace-nowrap">{money(r.sundries)}</td>
+              </tr>
+            );
+          })}
+          {rows.length === 0 && (
+            <tr>
+              <td className="xcell italic text-neutral-500" colSpan={7}>
+                (no jobs on P&amp;L)
+              </td>
+            </tr>
+          )}
         </tbody>
       </table>
     </div>

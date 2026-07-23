@@ -154,6 +154,10 @@ export interface PlParseResult {
   byJob: Map<string, PlJobMetrics>;
   /** apKeys that appeared in more than one column (values summed). */
   duplicateColumns: string[];
+  /** Round 7 — header row as parsed (col A often blank; then customer | job | Total …). */
+  columnHeaders: string[];
+  /** Round 7 — full account tree in file order; values aligned to columnHeaders. */
+  accountRows: { label: string; values: (number | null)[] }[];
 }
 
 // ---------------------------------------------------------------------------

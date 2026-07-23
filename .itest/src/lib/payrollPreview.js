@@ -163,6 +163,46 @@ function buildPayrollPreview(input) {
                 leadNames.set(up, { sub: res.sub });
         }
     }
+    // Round 7 §20.1 — timesheet crew-group owners are leads even when no
+    // piece-rate parenthetical named them this week (e.g. "Antonio Zuniga's Crew").
+    const crewOwnerOf = (group) => {
+        const m = /^(.*?)['\u2019]s\s+crew\s*$/i.exec(group.trim());
+        return m ? m[1].trim() : null;
+    };
+    const addLeadName = (name, sub = false) => {
+        const up = name.replace(/\s+/g, ' ').trim().toUpperCase();
+        if (!up)
+            return;
+        if (!leadNames.has(up))
+            leadNames.set(up, { sub });
+    };
+    const nameMatches = (a, b) => (0, payroll_1.tokensSubset)(a, b) ||
+        (0, payroll_1.tokensSubset)(b, a) ||
+        a.replace(/\s+/g, ' ').trim().toUpperCase() === b.replace(/\s+/g, ' ').trim().toUpperCase();
+    const seenCrewOwners = new Set();
+    for (const emp of emps.values()) {
+        const owner = crewOwnerOf(emp.group);
+        if (!owner)
+            continue;
+        const ownerKey = owner.toUpperCase();
+        if (seenCrewOwners.has(ownerKey))
+            continue;
+        seenCrewOwners.add(ownerKey);
+        const match = [...emps.values()].find((e) => nameMatches(e.fullName, owner));
+        addLeadName(match?.fullName ?? owner);
+    }
+    // Optional boost: Settings profitShare leads with hours this week.
+    for (const p of settings.profitShare) {
+        const lead = p.lead.trim();
+        if (!lead)
+            continue;
+        const match = [...emps.values()].find((e) => nameMatches(e.fullName, lead));
+        if (!match)
+            continue;
+        const hrs = (empJobs.get(match.username) ?? []).reduce((a, j) => a + j.hours, 0);
+        if (hrs > 0)
+            addLeadName(match.fullName);
+    }
     /** Is this timesheet employee one of the resolved crew leads? */
     const isLead = (fullName) => {
         for (const lead of leadNames.keys()) {
@@ -363,16 +403,20 @@ function buildPayrollPreview(input) {
         };
     };
     const leads = [];
+    const leadMatchesName = (candidate, leadUpper) => candidate.toUpperCase() === leadUpper ||
+        (0, payroll_1.tokensSubset)(candidate, leadUpper) ||
+        (0, payroll_1.tokensSubset)(leadUpper, candidate);
     for (const [leadUpper, meta] of leadNames) {
         const blockKey = `lead:${leadUpper}`;
         const jobs = [];
+        const seenJobIds = new Set();
         for (const { job } of pieceRateJobs) {
             const names = job.analysis.crewLeadResolution && job.analysis.crewLeadResolution.names.length > 0
                 ? job.analysis.crewLeadResolution.names
                 : job.analysis.crewLead
                     ? [job.analysis.crewLead.toUpperCase()]
                     : [];
-            if (!names.some((n) => n.toUpperCase() === leadUpper))
+            if (!names.some((n) => leadMatchesName(n, leadUpper)))
                 continue;
             const pctNum = typeof job.analysis.percent === 'number' ? job.analysis.percent : 0;
             // Timesheet jobs already have clean jobcode_1/jobcode_2; still run the
@@ -381,18 +425,40 @@ function buildPayrollPreview(input) {
                 ...nameSources,
                 eventTitle: eventByApKey.get(job.analysis.apKey ?? '')?.event,
             });
+            seenJobIds.add(job.id);
             jobs.push(buildPsJob(blockKey, job.id, job.analysis.apKey, display.poLabel || job.jobcode2, display.customerName || job.id.split('\u0000')[0], job.analysis.woPct, job.analysis.woOverride, leadMapPct(leadUpper), pctNum, job.analysis.split, job.colorHex, leadUpper, meta.sub));
         }
         for (const cj of calOnlyJobs) {
-            if (!cj.lead.some((n) => n.toUpperCase() === leadUpper))
+            if (!cj.lead.some((n) => leadMatchesName(n, leadUpper)))
                 continue;
             const pctNum = typeof cj.row.percent === 'number' ? cj.row.percent : 0;
             const display = (0, jobNames_1.jobDisplayPair)(cj.row.apKey, { ...nameSources, eventTitle: cj.row.event });
-            jobs.push(buildPsJob(blockKey, `cal:${cj.row.id}`, cj.row.apKey, display.poLabel, display.customerName, cj.woPct, cj.woOverride, leadMapPct(leadUpper), pctNum, cj.split, colorByEstimator.get(cj.row.estimator) ?? null, leadUpper, meta.sub));
+            const calId = `cal:${cj.row.id}`;
+            seenJobIds.add(calId);
+            jobs.push(buildPsJob(blockKey, calId, cj.row.apKey, display.poLabel, display.customerName, cj.woPct, cj.woOverride, leadMapPct(leadUpper), pctNum, cj.split, colorByEstimator.get(cj.row.estimator) ?? null, leadUpper, meta.sub));
         }
-        if (jobs.length === 0)
-            continue;
         const leadEmp = leadEmps.find((e) => (0, payroll_1.tokensSubset)(e.fullName, leadUpper) || (0, payroll_1.tokensSubset)(leadUpper, e.fullName));
+        // Crew-owner / profitShare leads with no parenthetical jobs: attach their
+        // own piece-rate timesheet APs so they still get a PS band (not a painter block).
+        if (jobs.length === 0 && leadEmp) {
+            for (const ej of empJobs.get(leadEmp.username) ?? []) {
+                if (ej.hourly || ej.office || !ej.apKey || seenJobIds.has(ej.jobId))
+                    continue;
+                const pbjJob = jobRowById.get(ej.jobId);
+                if (!pbjJob || pbjJob.analysis.hourly || pbjJob.analysis.apKey === 'OFFICE')
+                    continue;
+                const pctNum = typeof pbjJob.analysis.percent === 'number' ? pbjJob.analysis.percent : 0;
+                const display = (0, jobNames_1.jobDisplayPair)(pbjJob.analysis.apKey, {
+                    ...nameSources,
+                    eventTitle: eventByApKey.get(pbjJob.analysis.apKey ?? '')?.event,
+                });
+                seenJobIds.add(ej.jobId);
+                jobs.push(buildPsJob(blockKey, ej.jobId, pbjJob.analysis.apKey, display.poLabel || pbjJob.jobcode2 || ej.jobcode2, display.customerName || ej.customer, pbjJob.analysis.woPct, pbjJob.analysis.woOverride, leadMapPct(leadUpper), pctNum, pbjJob.analysis.split, pbjJob.colorHex ?? ej.colorHex, leadUpper, meta.sub));
+            }
+        }
+        // Skip pure name-only entries with neither jobs nor timesheet presence.
+        if (jobs.length === 0 && !leadEmp)
+            continue;
         const tsheets = leadEmp && !meta.sub ? buildHourlyBlock(leadEmp, false) : null;
         const be = edits[`psb:${blockKey}`] ?? {};
         const total = jobs.reduce((a, j) => a + j.totalAfterSplit, 0);

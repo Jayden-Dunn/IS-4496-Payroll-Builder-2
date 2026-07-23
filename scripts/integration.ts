@@ -496,6 +496,19 @@ const pl24403 = pl.byJob.get('24403')!;
 check('24403 metrics', [pl24403.income, round2(pl24403.materials), pl24403.laborWagesSubs], [9000, 760.1, 2081.09]);
 check('duplicated 24450 columns summed', pl.byJob.get('24450')!.income, 150);
 check('sundries tracked separately (24500)', pl.byJob.get('24500')!.sundries, 58.51);
+// Round 7 — retain full P&L grid for PR Final Check / import mirror.
+check('parsePl columnHeaders present', pl.columnHeaders.length > 1, true);
+check(
+  'parsePl columnHeaders include a job header',
+  pl.columnHeaders.some((h) => /AP24314/i.test(h)),
+  true,
+);
+check(
+  'parsePl accountRows include Total Income',
+  pl.accountRows.some((r) => /^total income$/i.test(r.label.trim())),
+  true,
+);
+check('parsePl accountRows non-empty', pl.accountRows.length > 0, true);
 
 console.log('employee directory (slot 9)…');
 const directory = parseEmployeeList(employeesWb);
@@ -565,9 +578,9 @@ check('split leads joined with / and tagged', [j24450.analysis.crewLead, j24450.
 
 // §4.6 seeds.
 check(
-  'BALANCES: <100%-paid NV jobs with no hours this week, *PAID n% LAST WK*',
+  'BALANCES: <100%-paid NV jobs with no hours this week (notes blank — Round 7)',
   pbj.balances.map((r) => [r.apKey, r.notes]),
-  [['21848-A5', 'wk1 note *PAID 75% LAST WK*'], ['20000', 'still open *PAID 50% LAST WK*']],
+  [['21848-A5', ''], ['20000', '']],
 );
 check('BALANCES: fully-paid job NOT carried', pbj.balances.some((r) => r.apKey === '24314'), false);
 check(
@@ -715,9 +728,9 @@ async function testExport(): Promise<void> {
   const readBack = new ExcelJS.Workbook();
   await readBack.xlsx.load(pctBuf);
 
-  // Round 6 §9 — %'s workbook: mirrors + Jobs by Crew; payroll is a separate file.
+  // Round 6/7 §9 — %'s workbook: mirrors + Jobs by Crew; payroll is a separate file.
   check(
-    "sheet names (Round 6 %'s workbook)",
+    "sheet names (Round 6/7 %'s workbook)",
     readBack.worksheets.map((w) => w.name),
     [
       'Sales by Rep',
@@ -733,6 +746,19 @@ async function testExport(): Promise<void> {
     ],
   );
 
+  // Round 7 — timesheets "Not on Calendar" uses `TimeNavi row {n}` when resolved.
+  const tsMirror = buildTimesheetMirror(enriched, timeNaviRowByAp);
+  check(
+    'timesheets Not on Calendar: TimeNavi row prefix when resolved',
+    tsMirror.find((r) => r.apKey === '24314')?.notOnCalendar,
+    'TimeNavi row 3',
+  );
+  check(
+    'timesheets Not on Calendar: unresolved → NotOnCalendar',
+    tsMirror.find((r) => r.apKey === '99999')?.notOnCalendar,
+    'NotOnCalendar',
+  );
+
   const payBuf = await buildPayrollWorkbookBuffer({
     payDate,
     weekStart: pbj.dates[0] ?? null,
@@ -740,25 +766,43 @@ async function testExport(): Promise<void> {
     pl,
     payrollPreview: preview,
     payrollExceptions: pGroups,
+    plSourceFileName: 'Profit and Loss by Customer.xlsx',
   });
   const payWb = new ExcelJS.Workbook();
   await payWb.xlsx.load(payBuf);
   check(
-    'sheet names (Round 6 payroll workbook)',
+    'sheet names (Round 7 payroll workbook)',
     payWb.worksheets.map((w) => w.name),
     [
       'P&L by Job Import',
       'Management Report Export',
-      'Payroll Preview',
+      'PAYROLL PREVIEW',
       'Profitshare Output',
       "Input #'s",
-      'Notes',
-      'Final Payroll Breakdown',
-      'Journal Entry',
-      'Jobs',
+      'NOTES',
+      'FINAL PAYROLL BREAKDOWN',
+      '►JOURNAL ENTRY◄',
+      'JOBS',
       'Inactive Employees',
       'Payroll Exceptions',
+      'PR Final Check',
     ],
+  );
+  // Optional Round 7 tab colors (ARGB) on a couple of named sheets.
+  check(
+    'tab color: PAYROLL PREVIEW',
+    (payWb.getWorksheet('PAYROLL PREVIEW') as ExcelJS.Worksheet).properties.tabColor?.argb,
+    'FFF79646',
+  );
+  check(
+    'tab color: NOTES',
+    (payWb.getWorksheet('NOTES') as ExcelJS.Worksheet).properties.tabColor?.argb,
+    'FF000000',
+  );
+  check(
+    'tab color: Pivot by Job',
+    (readBack.getWorksheet('Pivot by Job') as ExcelJS.Worksheet).properties.tabColor?.argb,
+    'FFFFFF00',
   );
 
   const tn = readBack.getWorksheet('TimeNavi Export') as ExcelJS.Worksheet;
@@ -957,6 +1001,9 @@ async function testExport(): Promise<void> {
   check('pbj job row analysis: AP#, TimeNavi row, lead', [pj.getCell('I4').value, pj.getCell('J4').value, pj.getCell('L4').value], ['24314', 'TimeNavi row 3', 'DANIEL GONZALES BONILLA']);
   check('pbj WO Override blank by default', isBlank(pj.getCell('M4').value), true);
   check('pbj job % of Completion 0% format', [pj.getCell('O4').value, pj.getCell('O4').numFmt], [0.3, '0%']);
+  // Round 7 — Notes column keeps the header label; job/BALANCES/UT data cells stay empty.
+  check('pbj Notes header present', pj.getCell(1, lastColNum).value, 'Notes');
+  check('pbj Notes data empty on job row (Round 7)', isBlank(pj.getCell(4, lastColNum).value), true);
   check('pbj hours 0.00 format', pj.getCell('G4').numFmt, '0.00');
   check('pbj widths (A, first date, Crew Lead)', [pj.getColumn(1).width, pj.getColumn(2).width, pj.getColumn(12).width], [40, 10, 43]);
   // Outline levels: customer 0, job 1, employee 2; summaryAbove.
@@ -1029,8 +1076,19 @@ async function testExport(): Promise<void> {
     [0, 1],
   );
 
-  // ---------- Payroll Preview (Round 6 — separate payroll workbook) ----------
-  const pp = payWb.getWorksheet('Payroll Preview') as ExcelJS.Worksheet;
+  // ---------- timesheets mirror (Round 7 Not on Calendar label) ----------
+  const tsSheet = readBack.getWorksheet('timesheets') as ExcelJS.Worksheet;
+  const nocCol = TS_HEADERS.length + 5; // Apname…Not on Calendar (Round 6/7 helpers)
+  check('timesheets Not on Calendar header', tsSheet.getCell(1, nocCol).value, 'Not on Calendar');
+  let noc24314 = '';
+  tsSheet.eachRow((row, n) => {
+    if (n === 1) return;
+    if (String(row.getCell(26).value ?? '') === '24314') noc24314 = String(row.getCell(nocCol).value ?? '');
+  });
+  check('timesheets sheet: 24314 Not on Calendar = TimeNavi row 3', noc24314, 'TimeNavi row 3');
+
+  // ---------- Payroll Preview (Round 7 — separate payroll workbook) ----------
+  const pp = payWb.getWorksheet('PAYROLL PREVIEW') as ExcelJS.Worksheet;
   check('preview title', pp.getCell('A1').value, 'PAYROLL BREAKDOWN 7/10/2026 (6/29 - 7/3)');
   check('preview title black band', fillOf(pp.getCell('A1')), 'FF000000');
   // Round 4 §5.1/§5.4 — Garamond everywhere; title merged A1:H1, centered, 13 bold.
@@ -1140,6 +1198,24 @@ async function testExport(): Promise<void> {
     String(payEx.getCell('A1').value).includes(`(${payItemCount} items)`),
     true,
   );
+
+  // ---------- Journal Entry (Round 7 §18 — header shell only) ----------
+  const je = payWb.getWorksheet('►JOURNAL ENTRY◄') as ExcelJS.Worksheet;
+  check(
+    'Journal Entry headers (PO# | blank | Job)',
+    [je.getCell('A1').value, je.getCell('B1').value, je.getCell('C1').value],
+    ['PO#', '', 'Job'],
+  );
+  check('Journal Entry header only (no data rows)', je.actualRowCount, 1);
+
+  // ---------- PR Final Check (Round 7 §2) ----------
+  const prfc = payWb.getWorksheet('PR Final Check') as ExcelJS.Worksheet;
+  check(
+    'PR Final Check headers',
+    [prfc.getCell('A1').value, prfc.getCell('B1').value, prfc.getCell('C1').value],
+    ['PO#', 'Job', 'Total Income'],
+  );
+  check('PR Final Check has data rows from P&L', prfc.actualRowCount > 1, true);
 }
 
 testExport()

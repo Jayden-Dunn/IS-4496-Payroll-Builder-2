@@ -106,12 +106,6 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
     if (r.apKey && !eventByApKey.has(r.apKey)) eventByApKey.set(r.apKey, { row: r, sheetRow: i + 2 });
   });
 
-  // Last-week notes / carry rows keyed by apKey.
-  const lastWeekByAp = new Map<string, LastWeekPbjRow>();
-  for (const r of input.lastWeekPbj ?? []) {
-    if (!lastWeekByAp.has(r.apKey)) lastWeekByAp.set(r.apKey, r);
-  }
-
   const nameSources: JobDisplaySources = {
     timesheetByAp: timesheetDisplayMap(enriched),
     carryByAp: carryDisplayMap(input.lastWeekPbj),
@@ -238,8 +232,8 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
           const woPct = hourly ? null : edit.woPct !== undefined ? edit.woPct : null;
           const woOverride = hourly ? null : edit.woOverride !== undefined ? edit.woOverride : null;
 
-          const carried = apKey ? lastWeekByAp.get(apKey) : undefined;
-          const notes = edit.notes !== undefined ? edit.notes : (carried?.notes ?? '');
+          // Round 7 — notes stay blank unless the user edited; do not carry last-week / *PAID* text.
+          const notes = edit.notes !== undefined ? edit.notes : '';
 
           // Round 6 §7.1 — DB chip + optional force-non-DB override.
           const dbPatternMatch = isPrevailingWageJob(jobText, settings.prevailingWagePatterns);
@@ -317,23 +311,19 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
   const seenBalancesAp = new Set<string>();
   const seenUtAp = new Set<string>();
 
-  const carryNote = (row: LastWeekPbjRow): string => {
-    const paid = typeof row.percent === 'number' ? ` *PAID ${Math.round(row.percent * 100)}% LAST WK*` : '';
-    return `${row.notes}${paid}`.trim();
-  };
-
   for (const row of input.lastWeekPbj ?? []) {
     if (row.section === 'ut') {
       if (seenUtAp.has(row.apKey)) continue;
       seenUtAp.add(row.apKey);
-      utSeeds.push(manualRowFromCarry('ut', row, carryNote(row), colorByEstimator));
+      // Round 7 — no carried notes / *PAID* text in BALANCES/UT.
+      utSeeds.push(manualRowFromCarry('ut', row, '', colorByEstimator));
     } else {
       // NV pivot/balances rows: carry when paid < 100% and no hours this week.
       const partial = typeof row.percent === 'number' && row.percent < 1;
       const open = row.section === 'balances' ? row.percent !== 1 : partial;
       if (!open || timesheetApKeys.has(row.apKey) || seenBalancesAp.has(row.apKey)) continue;
       seenBalancesAp.add(row.apKey);
-      balancesSeeds.push(manualRowFromCarry('balances', row, carryNote(row), colorByEstimator));
+      balancesSeeds.push(manualRowFromCarry('balances', row, '', colorByEstimator));
     }
   }
 

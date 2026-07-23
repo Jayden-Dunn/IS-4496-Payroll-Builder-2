@@ -27,6 +27,8 @@ import {
   tokensSubset,
   wageRateFor,
 } from './payroll';
+import { buildPayrollPreview } from './payrollPreview';
+import { buildPrFinalCheckRows } from './prFinalCheck';
 import { formatTimeNaviRow, parseTimeNaviRowRef } from './pivotByJob';
 import { orderLeadFirst } from './pivot';
 import { applyPivotView, EMPTY_PIVOT_VIEW } from './pivotView';
@@ -36,6 +38,7 @@ import {
   jobDisplayPair,
   type JobDisplaySources,
 } from './jobNames';
+import { defaultSettings } from './settings';
 import {
   dollarDiffIsFlagged,
   duplicateInQboValues,
@@ -47,7 +50,10 @@ import {
 import type {
   CellValue,
   DirectoryEmployee,
+  EnrichedTimesheetRow,
+  PivotByJobModel,
   PivotModel,
+  PlParseResult,
   ReportRow,
   WorkbookData,
 } from './types';
@@ -587,6 +593,190 @@ export function runSelfTests(): boolean {
   check('TimeNavi row parse labeled', parseTimeNaviRowRef('TimeNavi row 19'), 19);
   check('TimeNavi row parse bare', parseTimeNaviRowRef('19'), 19);
   check('TimeNavi row parse junk', parseTimeNaviRowRef('NOT ON CALENDAR'), null);
+
+  // --- Round 7 §2: PR Final Check rows -----------------------------------------------------------
+  const plForPr: PlParseResult = {
+    byJob: new Map([
+      [
+        '24314',
+        {
+          income: 650,
+          materials: 35.74,
+          laborWagesSubs: 113.04,
+          mileage: 0,
+          sundries: 0,
+          plJobHeader: 'AP24314 Ext',
+          customerName: 'Aaron Ward',
+        },
+      ],
+      [
+        '24403',
+        {
+          income: 9000,
+          materials: 760.1,
+          laborWagesSubs: 2081.09,
+          mileage: 0,
+          sundries: 0,
+          plJobHeader: 'AP24403 Lambrook',
+          customerName: 'CCSD',
+        },
+      ],
+    ]),
+    duplicateColumns: [],
+    columnHeaders: ['', 'Aaron Ward', 'AP24314 Ext', 'AP24403 Lambrook'],
+    accountRows: [
+      { label: 'Total Income', values: [null, null, 650, 9000] },
+      { label: 'Employee Labor', values: [null, null, 113.04, 2081.09] },
+    ],
+  };
+  const prRows = buildPrFinalCheckRows(plForPr);
+  check('buildPrFinalCheckRows length', prRows.length, 2);
+  check(
+    'buildPrFinalCheckRows first job',
+    [prRows[0].apKey, prRows[0].income, prRows[0].customerName],
+    ['24314', 650, 'Aaron Ward'],
+  );
+  check('buildPrFinalCheckRows empty P&L', buildPrFinalCheckRows({
+    byJob: new Map(),
+    duplicateColumns: [],
+    columnHeaders: [],
+    accountRows: [],
+  }).length, 0);
+
+  // --- Round 7 §20.1: crew-group owner becomes a lead --------------------------------------------
+  const ownerDay = new Date(2026, 5, 30); // 6/30
+  const ownerEnriched: EnrichedTimesheetRow[] = [
+    {
+      username: 'antonio@x.com',
+      payrollId: '',
+      fname: 'Antonio',
+      lname: 'Zuniga',
+      number: '',
+      group: "Antonio Zuniga's Crew",
+      localDate: ownerDay,
+      localDay: 'Tue',
+      localStartTime: null,
+      localEndTime: null,
+      tz: '',
+      hours: 8,
+      jobcode1: 'Cust',
+      jobcode2: 'AP25000 Ext',
+      billable: '',
+      klass: '',
+      department: '',
+      payrollItem: '',
+      serviceItem: '',
+      location: '',
+      notes: '',
+      approvedStatus: '',
+      hasFlags: '',
+      flagTypes: '',
+      sourceEntity: 'NV',
+      apKey: '25000',
+      estimator: 'MH',
+      notOnCalendar: false,
+    },
+  ];
+  const ownerPbj: PivotByJobModel = {
+    title: 'NV PAYROLL: 7/10/2026',
+    dates: [ownerDay],
+    dateIsos: ['2026-06-30'],
+    customers: [
+      {
+        customer: 'Cust',
+        byDate: { '2026-06-30': 8 },
+        total: 8,
+        colorHex: 'FFFF99',
+        jobs: [
+          {
+            id: 'Cust\u0000AP25000 Ext',
+            jobcode2: 'AP25000 Ext',
+            byDate: { '2026-06-30': 8 },
+            total: 8,
+            colorHex: 'FFFF99',
+            employees: [{ username: 'antonio@x.com', byDate: { '2026-06-30': 8 }, total: 8, qbHours: null }],
+            analysis: {
+              apKey: '25000',
+              onCalendar: 'NOT ON CALENDAR',
+              estimator: 'MH',
+              crewLead: '',
+              crewLeadResolution: null,
+              woOverride: null,
+              woOverrideSuggestion: null,
+              woOverrideSuggestionSource: null,
+              woPct: null,
+              woPctSuggestion: null,
+              woPctSuggestionSource: null,
+              percent: 0.5,
+              notes: '',
+              hourly: false,
+              sub: false,
+              split: 1,
+              dbPatternMatch: false,
+              isDbJob: false,
+              dbOverride: false,
+            },
+          },
+        ],
+      },
+    ],
+    grandByDate: { '2026-06-30': 8 },
+    grandTotal: 8,
+    balances: [],
+    utPayroll: [],
+  };
+  const ownerSettings = defaultSettings();
+  ownerSettings.salariedRoster = [];
+  ownerSettings.profitShare = [];
+  const ownerPreview = buildPayrollPreview({
+    pbj: ownerPbj,
+    enriched: ownerEnriched,
+    reportRows: [],
+    pl: {
+      byJob: new Map([
+        [
+          '25000',
+          {
+            income: 1000,
+            materials: 0,
+            laborWagesSubs: 0,
+            mileage: 0,
+            sundries: 0,
+            plJobHeader: 'AP25000 Ext',
+            customerName: 'Cust',
+          },
+        ],
+      ]),
+      duplicateColumns: [],
+      columnHeaders: ['', 'AP25000 Ext'],
+      accountRows: [{ label: 'Total Income', values: [null, 1000] }],
+    },
+    directory: [
+      { fullName: 'Antonio Zuniga', firstName: 'Antonio', lastName: 'Zuniga', active: true },
+    ],
+    settings: ownerSettings,
+    payDate: new Date(2026, 6, 10),
+    edits: {},
+    qbHours: {},
+    knownEstimators: new Set(['MH']),
+    leadCtx: {
+      directory: [
+        { fullName: 'Antonio Zuniga', firstName: 'Antonio', lastName: 'Zuniga', active: true },
+      ],
+      crewGroups: ["Antonio Zuniga's Crew"],
+      subcontractors: [],
+    },
+  });
+  check(
+    'crew-owner lead: employee in "X\'s Crew" becomes a lead',
+    ownerPreview.leads.map((l) => l.leadName),
+    ['ANTONIO ZUNIGA'],
+  );
+  check(
+    'crew-owner lead: not also an hourly painter',
+    ownerPreview.painters.length,
+    0,
+  );
 
   // --- Round 5 §4: job-naming chain --------------------------------------------------------------
   check('baseApKey: suffixed', baseApKey('24180-A'), '24180');
