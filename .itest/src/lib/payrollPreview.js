@@ -157,6 +157,18 @@ function buildPayrollPreview(input) {
         if (r.apKey && !utJobByAp.has(r.apKey))
             utJobByAp.set(r.apKey, r);
     }
+    const nvJobByAp = new Map();
+    for (const r of nvBalanceJobs) {
+        if (r.apKey && !nvJobByAp.has(r.apKey))
+            nvJobByAp.set(r.apKey, r);
+    }
+    const pbjJobByAp = new Map();
+    for (const c of pbj.customers) {
+        for (const j of c.jobs) {
+            if (j.analysis.apKey && !pbjJobByAp.has(j.analysis.apKey))
+                pbjJobByAp.set(j.analysis.apKey, j);
+        }
+    }
     const carriedIsHourly = (row) => (0, pivotByJob_1.isHourlyJob)(row.percent, row.crewLead, `${row.customer} ${row.job}`);
     const nameSources = {
         timesheetByAp: (0, jobNames_1.timesheetDisplayMap)(enriched),
@@ -220,21 +232,26 @@ function buildPayrollPreview(input) {
         }
         let j = list.find((x) => x.jobId === jobId);
         if (!j) {
-            const pbjJob = jobRowById.get(jobId);
-            // UT jobs have no pivot row — their analysis lives on the UT PAYROLL row.
+            const pbjJob = jobRowById.get(jobId) ?? (r.apKey ? pbjJobByAp.get(r.apKey) : undefined);
+            // UT / carried NV jobs have no pivot-tree row — analysis lives on the section row.
             const utRow = r.apKey ? utJobByAp.get(r.apKey) : undefined;
+            const nvRow = r.apKey ? nvJobByAp.get(r.apKey) : undefined;
             const eventTitle = r.apKey ? (eventByApKey.get(r.apKey)?.event ?? '') : '';
             const res = pbjJob?.analysis.crewLeadResolution;
+            const hourly = pbjJob?.analysis.hourly ??
+                (utRow ? carriedIsHourly(utRow) : undefined) ??
+                (nvRow ? carriedIsHourly(nvRow) : undefined) ??
+                false;
             j = {
                 jobId,
                 apKey: r.apKey,
                 customer: r.jobcode1,
                 jobcode2: r.jobcode2,
                 hours: 0,
-                hourly: pbjJob?.analysis.hourly ?? (utRow?.percent === 'HOURLY'),
+                hourly,
                 colorHex: r.apKey === 'OFFICE'
                     ? '4F81BD'
-                    : (pbjJob?.colorHex ?? utRow?.colorHex ?? colorByEstimator.get(r.estimator) ?? null),
+                    : (pbjJob?.colorHex ?? utRow?.colorHex ?? nvRow?.colorHex ?? colorByEstimator.get(r.estimator) ?? null),
                 firstIndex: idx,
                 lastDate: r.localDate,
                 lastRowIndex: idx,
@@ -247,7 +264,10 @@ function buildPayrollPreview(input) {
                         ? [pbjJob.analysis.crewLead]
                         : utRow
                             ? leadNamesFromDisplay(utRow.crewLead)
-                            : [],
+                            : nvRow
+                                ? leadNamesFromDisplay(nvRow.crewLead)
+                                : [],
+                notes: pbjJob?.analysis.notes || utRow?.notes || nvRow?.notes || '',
             };
             list.push(j);
         }
@@ -466,11 +486,13 @@ function buildPayrollPreview(input) {
             const dailyTag = segment
                 ? `[Daily OT — ${dayLabel}: ${(0, format_1.round2)(hours)} hrs over ${settings.dailyOtHoursThreshold} @ 1.5× (rate < $${settings.nvDailyOtRateThreshold}, NV)]`
                 : '';
-            const otTag = kind === 'weeklyOt' ? ' [OT >40 hrs/wk]' : kind === 'dailyOt' ? ` ${dailyTag}` : '';
+            const otTag = kind === 'weeklyOt' ? ' [OT >40 hrs/wk]' : kind === 'dailyOt' ? ' [Daily OT]' : '';
             const isOfficeLine = officeStyle || j.office;
+            const notesSuffix = !isOfficeLine && j.notes.trim() ? ` — ${j.notes.trim()}` : '';
+            const typeTag = isOfficeLine ? '' : j.hourly ? ' [Hourly]' : ' [PS]';
             const label = isOfficeLine
                 ? `Office${otTag}`
-                : `${(0, payroll_1.jobDisplayName)(j.customer, j.jobcode2)}${j.hourly ? ' [hrly]' : ''}${otTag}`;
+                : `${(0, payroll_1.jobDisplayName)(j.customer, j.jobcode2)}${typeTag}${otTag}${notesSuffix}`;
             // §5.5 — office lines carry the week range (or "Allpro Office" inside a
             // mixed painter block) on the blue PO cell instead of an AP number.
             const poText = officeStyle ? `(${weekRange})` : j.office ? 'Allpro Office' : null;
@@ -507,6 +529,7 @@ function buildPayrollPreview(input) {
                 dailyOtNote: kind === 'dailyOt' ? dailyTag : undefined,
                 hourlyJob: j.hourly,
                 colorHex: j.colorHex,
+                jobNotes: j.notes.trim() || undefined,
             });
         };
         if (officeStyle && jobs.length > 0) {
@@ -660,6 +683,17 @@ function buildPayrollPreview(input) {
             if (splitWith <= 1)
                 totalProfitShare = floorResult.pay;
         }
+        const pbjNotes = (() => {
+            if (apKey) {
+                const job = pbjJobByAp.get(apKey);
+                if (job?.analysis.notes)
+                    return job.analysis.notes;
+                const carried = utJobByAp.get(apKey) ?? nvJobByAp.get(apKey);
+                if (carried?.notes)
+                    return carried.notes;
+            }
+            return '';
+        })();
         return {
             jobRowId,
             apKey,
@@ -692,6 +726,7 @@ function buildPayrollPreview(input) {
             missingFromPl,
             income,
             materials,
+            notes: pbjNotes,
         };
     };
     const leads = [];

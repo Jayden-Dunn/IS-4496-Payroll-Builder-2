@@ -203,3 +203,40 @@ export function parseMoneyInput(text: string): number | null {
   const n = Number(t);
   return Number.isFinite(n) ? n : null;
 }
+
+/** Plain 1,234.56 — used in NOTES work-order strings. */
+export function moneyPlain(n: number): string {
+  return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+/**
+ * Crew-lead NOTES column F: `w.o. $1159.20 @40% PS & 90% complete`.
+ * Missing % of completion becomes `& ? Complete` (red-flagged by the caller).
+ */
+export function formatCrewLeadWoNote(args: {
+  workOrderOverride: number | null;
+  profitShare: number;
+  woPct: number | null;
+  percent: PercentValue;
+  percentCompletion: number;
+  missingPercent: boolean;
+  manualPay: 'SUBBED' | 'SET RATE' | null;
+}): { text: string; flagMissing: boolean } {
+  const woBase = args.workOrderOverride !== null ? args.workOrderOverride : args.profitShare;
+  const psPct = args.woPct !== null && Number.isFinite(args.woPct) ? Math.round(args.woPct * 100) : null;
+  const psPart = `${psPct !== null ? String(psPct) : '?'}% PS`;
+  let completePart: string;
+  if (args.manualPay) completePart = args.manualPay;
+  else if (args.percent === 'HOURLY') completePart = 'HOURLY';
+  else if (typeof args.percent === 'number' && !args.missingPercent) {
+    completePart = `${Math.round(args.percentCompletion * 100)}% complete`;
+  } else if (args.percent && typeof args.percent === 'object' && args.percent.kind === 'text') {
+    completePart = args.percent.text;
+  } else {
+    completePart = '? Complete';
+  }
+  return {
+    text: `w.o. $${moneyPlain(woBase)} @${psPart} & ${completePart}`,
+    flagMissing: completePart === '? Complete',
+  };
+}

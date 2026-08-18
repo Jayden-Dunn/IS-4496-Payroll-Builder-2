@@ -5,7 +5,7 @@
  */
 import type { CellValue, Fill, Workbook, Worksheet } from 'exceljs';
 import { extractApKey } from './apkey';
-import { isDarkColor } from './format';
+import { formatCrewLeadWoNote, isDarkColor } from './format';
 import type { JobsByCrewModel } from './jobsByCrew';
 import type {
   SalesByCustMirrorRow,
@@ -630,38 +630,47 @@ function writePsChainValues(
   return r;
 }
 
-function moneyPlain(n: number): string {
-  return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+function notesJobText(customer: string, jobShort: string, notes: string): string {
+  const base = `${customer} ${jobShort}`.trim();
+  const tagged = `${base} [PS]`;
+  const n = notes.trim();
+  return n ? `${tagged} — ${n}` : tagged;
 }
 
 /** NOTES-only materials reconciliation table + WO note in col F. */
 function writeLeadMaterialsTable(ws: Worksheet, block: PsBlock): void {
   const name = ws.addRow([block.displayName]);
-  name.getCell(1).fill = solidFill(TAN);
+  name.getCell(1).fill = solidFill('FFB8CCE4');
   name.getCell(1).font = { name: PP_FONT, bold: true, size: 12 };
   const hdr = ws.addRow(['PO#', 'Job', 'Reported Materials', 'Total Materials', 'DIFFERENCE']);
   for (let c = 1; c <= 5; c++) {
     hdr.getCell(c).font = { name: PP_FONT, bold: true, underline: true, size: 12 };
   }
   for (const j of block.jobs.slice(0, 6)) {
-    const woBase = j.workOrderOverride !== null ? j.workOrderOverride : j.profitShare;
-    const woNote = `w.o. $${moneyPlain(woBase)} less ½ mats $${moneyPlain(j.halfMaterials)}`;
+    const wo = formatCrewLeadWoNote(j);
     const row = ws.addRow([
       j.apKey ? `AP${j.apKey}` : j.jobShort,
-      `${j.customer} ${j.jobShort}`.trim(),
+      notesJobText(j.customer, j.jobShort, j.notes),
       '', // Reported Materials — blank working cell
-      j.materials,
+      wo.flagMissing ? '?Did we finish?' : j.materials,
       '', // DIFFERENCE — blank until reported is filled
-      woNote,
+      wo.text,
     ]);
-    row.getCell(4).numFmt = MONEY_FMT;
-    for (let c = 1; c <= 6; c++) row.getCell(c).font = { name: PP_FONT, size: 12 };
+    if (!wo.flagMissing) row.getCell(4).numFmt = MONEY_FMT;
+    for (let c = 1; c <= 6; c++) {
+      row.getCell(c).font = {
+        name: PP_FONT,
+        size: 12,
+        ...(wo.flagMissing ? { color: { argb: DEDUCT_RED }, bold: true } : {}),
+      };
+    }
     if (j.colorHex) {
       row.getCell(1).fill = solidFill('FF' + j.colorHex);
       row.getCell(1).font = {
         name: PP_FONT,
         size: 12,
-        color: { argb: textOn(j.colorHex) },
+        color: { argb: wo.flagMissing ? DEDUCT_RED : textOn(j.colorHex) },
+        bold: wo.flagMissing,
       };
     }
   }
@@ -848,41 +857,50 @@ export function buildInputNumbersSheet(wb: Workbook, model: PayrollPreviewModel 
 function writeHourlyBlockValues(
   ws: Worksheet,
   block: HourlyBlock,
-  opts?: { tsheets?: boolean },
+  opts?: { tsheets?: boolean; notesLayout?: boolean },
 ): void {
+  const notesLayout = opts?.notesLayout === true;
+  const colCount = notesLayout ? 7 : 5;
   if (opts?.tsheets) {
     const title = ws.addRow([`${block.employeeName.split(' ')[0]}'s T-SHEETS BREAKDOWN`]);
-    for (let c = 1; c <= 5; c++) {
+    for (let c = 1; c <= colCount; c++) {
       title.getCell(c).fill = solidFill('FFF9F9F9');
       title.getCell(c).font = { name: PP_FONT, bold: true, size: 12 };
       title.getCell(c).border = {
         top: { style: 'thin' },
         bottom: { style: 'thin' },
         ...(c === 1 ? { left: { style: 'thin' as const } } : {}),
-        ...(c === 5 ? { right: { style: 'thin' as const } } : {}),
+        ...(c === colCount ? { right: { style: 'thin' as const } } : {}),
       };
     }
   } else {
     const nameRow = ws.addRow([
       block.crewTag ? `${block.employeeName} (${block.crewTag})` : block.employeeName,
     ]);
-    nameRow.getCell(1).fill = solidFill(TAN);
-    nameRow.getCell(1).font = { name: PP_FONT, bold: true, size: 12 };
+    nameRow.getCell(1).fill = solidFill(notesLayout ? HEADER_GRAY : TAN);
+    nameRow.getCell(1).font = {
+      name: PP_FONT,
+      bold: true,
+      size: 12,
+      ...(notesLayout ? { color: { argb: WHITE } } : {}),
+    };
   }
-  const hdr = ws.addRow(['PO#', 'Job', 'hrs', 'rate', 'total']);
-  for (let c = 1; c <= 5; c++) {
+  const hdr = ws.addRow(
+    notesLayout
+      ? ['PO#', 'Job', 'hrs', 'rate', 'total', '(-) taxes', 'net']
+      : ['PO#', 'Job', 'hrs', 'rate', 'total'],
+  );
+  for (let c = 1; c <= colCount; c++) {
     hdr.getCell(c).font = { name: PP_FONT, bold: true, underline: true, size: 12 };
     hdr.getCell(c).alignment = { horizontal: 'center' };
   }
   for (const l of block.lines) {
     const total = Math.round(l.hours * l.rate * 100) / 100;
-    const row = ws.addRow([
-      l.poText ?? (l.apKey ? `AP${l.apKey}` : ''),
-      l.jobLabel,
-      l.hours,
-      l.rate,
-      total,
-    ]);
+    const row = ws.addRow(
+      notesLayout
+        ? [l.poText ?? (l.apKey ? `AP${l.apKey}` : ''), l.jobLabel, l.hours, l.rate, total, '', '']
+        : [l.poText ?? (l.apKey ? `AP${l.apKey}` : ''), l.jobLabel, l.hours, l.rate, total],
+    );
     for (const c of [3, 4, 5]) {
       row.getCell(c).numFmt = HOURS_FMT;
       row.getCell(c).alignment = { horizontal: 'center' };
@@ -890,10 +908,16 @@ function writeHourlyBlockValues(
     }
     row.getCell(2).font = { name: PP_FONT, size: 10.5 };
   }
-  const sums = ws.addRow(['', '', block.totalHours, '', block.totalPay]);
+  const sums = notesLayout
+    ? ws.addRow(['', '', block.totalHours, '', block.totalPay, block.taxes ?? '', block.net ?? ''])
+    : ws.addRow(['', '', block.totalHours, '', block.totalPay]);
   sums.font = { name: PP_FONT, bold: true, size: 12 };
   sums.getCell(3).numFmt = HOURS_FMT;
   sums.getCell(5).numFmt = HOURS_FMT;
+  if (notesLayout) {
+    if (typeof block.taxes === 'number') sums.getCell(6).numFmt = HOURS_FMT;
+    if (typeof block.net === 'number') sums.getCell(7).numFmt = HOURS_FMT;
+  }
   ws.addRow([]);
 }
 
@@ -925,12 +949,14 @@ function writePreviewSequence(
   let grossSum = 0;
   for (const entry of model.painterSequence) {
     if (entry.kind === 'hourly') {
-      writeHourlyBlockValues(ws, entry.block);
+      writeHourlyBlockValues(ws, entry.block, { notesLayout: opts.mode === 'notes' });
       grossSum += entry.block.totalPay;
     } else if (opts.mode === 'notes') {
       // Working log: materials table → T-SHEETS (not the full PS WO% band).
       writeLeadMaterialsTable(ws, entry.block);
-      if (entry.block.tsheets) writeHourlyBlockValues(ws, entry.block.tsheets, { tsheets: true });
+      if (entry.block.tsheets) {
+        writeHourlyBlockValues(ws, entry.block.tsheets, { tsheets: true, notesLayout: true });
+      }
       grossSum += entry.block.totalPay;
     } else {
       writePsChainValues(ws, entry.block, 1, {
@@ -950,7 +976,7 @@ function writePreviewSequence(
   };
   section('OFFICE');
   for (const b of model.office) {
-    writeHourlyBlockValues(ws, b);
+    writeHourlyBlockValues(ws, b, { notesLayout: opts.mode === 'notes' });
     grossSum += b.totalPay;
   }
   section('ADMIN');

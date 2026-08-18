@@ -556,7 +556,7 @@ check('block totals (reg+OT = actual, pay = Σ h×r)', [leoBlock.totalHours, leo
 check('weekly OT tag on the line label', leoBlock.lines[1].jobLabel.endsWith('[OT >40 hrs/wk]'), true);
 const juanB = preview.painters[0];
 check('unknown employee → fallback rate + flag', [juanB.lines[0].rate, juanB.lines[0].rateDefaulted], [18, true]);
-check('job display name on the line', juanB.lines[0].jobLabel, 'CCSD 5321 Lambrook Dr Int/Ext');
+check('job display name on the line', juanB.lines[0].jobLabel, 'CCSD 5321 Lambrook Dr Int/Ext [PS]');
 check('lines in first-encounter order', juanB.lines.map((l) => l.apKey), ['24403', '99999', '24450', '24500']);
 check('lead blocks alphabetical by first name', preview.leads.map((b) => b.leadName), ['CARLOS RUIZ CRUZ', 'DANIEL GONZALES BONILLA', 'RAFAEL AGUILAR', 'RENE SALAZAR', 'TED FRANK']);
 const leadBy = (name) => preview.leads.find((b) => b.leadName === name);
@@ -714,6 +714,16 @@ async function testExport() {
     // Optional Round 7 tab colors (ARGB) on a couple of named sheets.
     check('tab color: PAYROLL PREVIEW', payWb.getWorksheet('PAYROLL PREVIEW').properties.tabColor?.argb, 'FFF79646');
     check('tab color: NOTES', payWb.getWorksheet('NOTES').properties.tabColor?.argb, 'FF000000');
+    {
+        const notesWs = payWb.getWorksheet('NOTES');
+        const woNotes = [];
+        notesWs.eachRow((row) => {
+            const v = row.getCell(6).value;
+            if (typeof v === 'string' && v.startsWith('w.o. $'))
+                woNotes.push(v);
+        });
+        check('NOTES col F uses w.o. $X @N% PS & % complete', woNotes.length > 0 && woNotes.every((s) => /^w\.o\. \$[\d,.]+ @(\d+|\?)% PS & /.test(s)), true);
+    }
     check('tab color: Pivot by Job', readBack.getWorksheet('Pivot by Job').properties.tabColor?.argb, 'FFFFFF00');
     const tn = readBack.getWorksheet('TimeNavi Export');
     check('TimeNavi frozen at A2', [tn.views[0].state, tn.views[0].ySplit], ['frozen', 1]);
@@ -729,8 +739,8 @@ async function testExport() {
     check('columns E,F,G,L hidden', [5, 6, 7, 12].map((c) => tn.getColumn(c).hidden === true), [true, true, true, true]);
     check('hidden column data intact (Description)', String(tn.getCell('G3').value).includes('30% COMPLETE'), true);
     check('other columns not hidden', [1, 8, 14].map((c) => tn.getColumn(c).hidden === true), [false, false, false]);
-    // C-3: reference column widths; Round 5 §2.1 — AP# (H) best-fit ≥ 8.
-    check('column widths (A, B, G, H, L)', [1, 2, 7, 8, 12].map((c) => tn.getColumn(c).width), [60, 11, 13, 8, 39]);
+    // C-3: Event autofits (capped), Description ~40% narrower, AP# fits longest key.
+    check('column widths (A, B, G, H, L)', [1, 2, 7, 8, 12].map((c) => tn.getColumn(c).width), [36, 11, 7.8, 6, 39]);
     // Only the 6 included rows are exported; row 2 = JS (24222) after sorting.
     check('only included rows exported', tn.actualRowCount, 7);
     check('row 2 is the JS job', tn.getCell('H2').value, '24222');

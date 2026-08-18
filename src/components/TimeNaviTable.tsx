@@ -148,7 +148,7 @@ export function TimeNaviTable({ rows, colorByEstimator, estimatorOptions, onEdit
                   title={r.included ? 'Exclude this event from the report' : 'Include this event in the report'}
                 />
               </td>
-              <td className="xcell min-w-[260px] max-w-[340px]">{r.event}</td>
+              <td className="xcell max-w-[16rem] whitespace-normal break-words">{r.event}</td>
               <td className="xcell whitespace-nowrap">{fmtDateShort(r.startDate)}</td>
               <td className="xcell whitespace-nowrap">{fmtDateShort(r.endDate)}</td>
               <td className="xcell whitespace-nowrap">{r.calendar}</td>
@@ -166,7 +166,7 @@ export function TimeNaviTable({ rows, colorByEstimator, estimatorOptions, onEdit
                   {r.location}
                 </td>
               )}
-              <td className="xcell min-w-[240px] max-w-[320px]">
+              <td className="xcell min-w-[144px] max-w-[192px]">
                 <div
                   className={`cursor-pointer whitespace-pre-line ${isExpanded ? '' : 'line-clamp-2'}`}
                   onClick={() => toggleExpanded(r.id)}
@@ -175,7 +175,7 @@ export function TimeNaviTable({ rows, colorByEstimator, estimatorOptions, onEdit
                   {r.description}
                 </div>
               </td>
-              <td className="xcell min-w-[5.5rem] text-center font-mono">
+              <td className="xcell w-px whitespace-nowrap text-center font-mono">
                 <CellInput
                   value={r.apKey ?? ''}
                   onCommit={(text) => onEdit(r.id, { apKey: normalizeApInput(text) })}

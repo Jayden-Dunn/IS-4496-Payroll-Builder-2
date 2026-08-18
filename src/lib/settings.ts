@@ -70,7 +70,7 @@ const BASE_WAGE_RATES: WageRateEntry[] = [
   { name: 'Armando Alfonso Marin', rate: 15 },
   { name: 'Calixto Efrain Climaco', rate: 19.18 },
   { name: 'Jesus Perez', rate: 19.18 },
-  { name: 'Carlos Ruiz Cruz', rate: 18 },
+  { name: 'Carlos Ruiz Cruz', rate: 18, hourlyRate: 25 },
   { name: 'Damian Vasquez', rate: 18 },
   { name: 'Daniel Gonzales Bonilla', rate: 18 },
   { name: 'Gertrudis Campoverde Anguiano', rate: 20 },
@@ -334,10 +334,12 @@ export const LEGACY_PREVAILING_PATTERN = 'SNRHA *SS*';
 export const MIGRATION_RF_COLOR = 'r8-rf-color';
 export const MIGRATION_DB_PATTERN = 'r8-db-pattern';
 export const MIGRATION_WAGE_SEEDS = 'r8-wage-seeds';
+export const MIGRATION_CARLOS_HOURLY = 'r8-carlos-hourly-25';
 export const ALL_MIGRATIONS: string[] = [
   MIGRATION_RF_COLOR,
   MIGRATION_DB_PATTERN,
   MIGRATION_WAGE_SEEDS,
+  MIGRATION_CARLOS_HOURLY,
 ];
 
 // v4: Round 3 payroll settings added. v3 legend/pivot values are migrated;
@@ -680,8 +682,8 @@ export function parseSettings(raw: unknown): AppSettings | null {
 
 /**
  * Round 8 one-time data migrations, each gated by an id in `appliedMigrations`:
- * §5 RF `DA9694` → `C4A484`, §9.1 Davis-Bacon `SNRHA *SS*` → `SNRHA`, and the
- * §9.3 three-rate wage seeds merged by name.
+ * §5 RF `DA9694` → `C4A484`, §9.1 Davis-Bacon `SNRHA *SS*` → `SNRHA`, the
+ * §9.3 three-rate wage seeds merged by name, and Carlos Ruiz Cruz hourly $25.
  */
 export function applySettingsMigrations(settings: AppSettings): AppSettings {
   const done = new Set(settings.appliedMigrations);
@@ -723,6 +725,17 @@ export function applySettingsMigrations(settings: AppSettings): AppSettings {
           : DEFAULT_PER_JOB_RATE_OVERRIDES.map((r) => ({ ...r })),
     });
     done.add(MIGRATION_WAGE_SEEDS);
+  }
+
+  if (!done.has(MIGRATION_CARLOS_HOURLY)) {
+    patch({
+      wageRates: next.wageRates.map((row) =>
+        /^carlos\s+ruiz(\s+cruz)?$/i.test(row.name.trim()) && (row.hourlyRate === undefined || row.hourlyRate === 18)
+          ? { ...row, hourlyRate: 25 }
+          : row,
+      ),
+    });
+    done.add(MIGRATION_CARLOS_HOURLY);
   }
 
   return { ...next, appliedMigrations: [...done] };

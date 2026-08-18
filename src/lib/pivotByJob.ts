@@ -112,8 +112,11 @@ export function pbjJobId(customer: string, jobcode2: string): string {
 /** A job is hourly when its % says HOURLY, its lead is HOURLY, or it's tagged T&M/[hrly]. */
 export function isHourlyJob(percent: JobAnalysis['percent'], crewLead: string, jobText: string): boolean {
   if (percent === 'HOURLY') return true;
+  if (percent && typeof percent === 'object' && percent.kind === 'text' && /hourly/i.test(percent.text)) {
+    return true;
+  }
   if (/^hourly$/i.test(crewLead.trim())) return true;
-  return /\bT\s*&\s*M\b|\[hrly\]/i.test(jobText);
+  return /\bT\s*&\s*M\b|\[hrly\]|\[hourly\]/i.test(jobText);
 }
 
 const byText = (a: string, b: string): number => a.localeCompare(b, 'en', { sensitivity: 'base' });
@@ -243,6 +246,15 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
                 ? livePercent
                 : (edit.percentSeed ?? null);
 
+          const typePercent: PercentValue =
+            isOffice
+              ? null
+              : percentOverride
+                ? (edit.percent as PercentValue)
+                : edit.percentSeed !== undefined
+                  ? edit.percentSeed
+                  : percent;
+
           // Crew lead — from the matched event title (§3.2); OFFICE → HOURLY.
           const resolution = match
             ? resolveCrewLead(extractLeadParenthetical(match.row.event, knownEstimators), leadCtx)
@@ -251,7 +263,9 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
             edit.crewLead !== undefined ? edit.crewLead : isOffice ? 'HOURLY' : (resolution?.display ?? '');
 
           const jobText = `${job.jobcode2} ${match?.row.event ?? ''}`;
-          const hourly = isHourlyJob(percent, crewLead, jobText);
+          // Payroll job type follows Slot A / a typed Pivot % (HOURLY vs a
+          // percentage). Live TimeNavi % still fills the displayed cell.
+          const hourly = isHourlyJob(typePercent, crewLead, jobText);
 
           // Round 6 §5.3 — WO% / WO Override blank by default; calendar patterns
           // are suggestions only (tooltips / click-to-accept). Slot A seeds via edits.

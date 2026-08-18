@@ -3,7 +3,7 @@
  * (same shared model as Payroll Preview). Core = data content + recognizable sketch.
  */
 import type { CSSProperties, ReactNode } from 'react';
-import { fmtAccounting, isDarkColor, parseMoneyInput, parsePercentInput } from '../lib/format';
+import { fmtAccounting, formatCrewLeadWoNote, isDarkColor, parseMoneyInput, parsePercentInput } from '../lib/format';
 import { CellInput } from './CellInput';
 import { buildJournalEntryRows } from '../lib/journalEntry';
 import { buildPrFinalCheckRows } from '../lib/prFinalCheck';
@@ -28,6 +28,8 @@ const OFFICE_BLUE: CSSProperties = { backgroundColor: '#4F81BD', color: '#fff' }
 const NAME_RED: CSSProperties = { backgroundColor: '#C0504D', color: '#fff', fontWeight: 700 };
 const NAME_GREEN: CSSProperties = { backgroundColor: '#00B050', color: '#fff', fontWeight: 700 };
 const HEADER_GRAY: CSSProperties = { backgroundColor: '#808080', color: '#fff', fontWeight: 700 };
+const NOTES_FLAG: CSSProperties = { color: '#FF0000', fontWeight: 700 };
+const NOTES_LEAD_BAND: CSSProperties = { backgroundColor: '#B8CCE4', fontWeight: 700 };
 
 function EmptyPayroll({ label }: { label: string }): JSX.Element {
   return (
@@ -386,12 +388,17 @@ function HourlyReadOnly({
   block,
   tsheets = false,
   blankTaxes = false,
+  notesLayout = false,
 }: {
   block: HourlyBlock;
   tsheets?: boolean;
   blankTaxes?: boolean;
+  notesLayout?: boolean;
 }): JSX.Element {
   const bodyCls = tsheets ? 'bg-[#F9F9F9]' : '';
+  const showTaxCols = notesLayout || !blankTaxes;
+  const colCount = showTaxCols ? (notesLayout ? 7 : 8) : 5;
+  const nameStyle = notesLayout && !tsheets ? HEADER_GRAY : tsheets ? NEARWHITE : TAN;
   return (
     <table
       className={`mb-3 w-full max-w-3xl border-collapse bg-white text-xs ${tsheets ? 'border border-neutral-500' : ''}`}
@@ -399,14 +406,16 @@ function HourlyReadOnly({
       <thead>
         {tsheets ? (
           <tr>
-            <th className="xcell border border-neutral-500 text-center" style={NEARWHITE} colSpan={5}>
+            <th className="xcell border border-neutral-500 text-center" style={NEARWHITE} colSpan={colCount}>
               {block.employeeName.split(' ')[0]}&apos;s T-SHEETS BREAKDOWN
             </th>
           </tr>
         ) : (
           <tr>
-            <th className="xcell py-1 text-center" style={TAN} colSpan={5}>
-              <span className="text-[13px] font-bold text-black">{block.employeeName}</span>
+            <th className="xcell py-1 text-center" style={nameStyle} colSpan={colCount}>
+              <span className={`text-[13px] font-bold ${notesLayout && !tsheets ? 'text-white' : 'text-black'}`}>
+                {block.employeeName}
+              </span>
               {block.crewTag && <span className="ml-1 text-[11px] font-bold text-white">({block.crewTag})</span>}
             </th>
           </tr>
@@ -417,12 +426,19 @@ function HourlyReadOnly({
           <th className={`xcell w-16 text-center font-bold underline ${bodyCls}`}>hrs</th>
           <th className={`xcell w-16 text-center font-bold underline ${bodyCls}`}>rate</th>
           <th className={`xcell w-24 text-center font-bold underline ${bodyCls}`}>total</th>
-          {!blankTaxes && (
+          {notesLayout ? (
             <>
-              <th className="xcell w-20" />
-              <th className="xcell w-20" />
-              <th className="xcell w-20" />
+              <th className={`xcell w-20 text-center font-bold underline ${bodyCls}`}>(-) taxes</th>
+              <th className={`xcell w-20 text-center font-bold underline ${bodyCls}`}>net</th>
             </>
+          ) : (
+            !blankTaxes && (
+              <>
+                <th className="xcell w-20" />
+                <th className="xcell w-20" />
+                <th className="xcell w-20" />
+              </>
+            )
           )}
         </tr>
       </thead>
@@ -437,16 +453,25 @@ function HourlyReadOnly({
               >
                 {l.poText ?? (l.apKey ? `AP${l.apKey}` : '')}
               </td>
-              <td className={`xcell text-[11px] ${bodyCls}`}>{l.jobLabel}</td>
+              <td className={`xcell text-[11px] ${bodyCls}`} title={l.dailyOtNote}>
+                {l.jobLabel}
+              </td>
               <td className={`xcell text-center ${bodyCls}`}>{l.hours.toFixed(2)}</td>
               <td className={`xcell text-center ${bodyCls}`}>{l.rate.toFixed(2)}</td>
               <td className={`xcell text-center ${bodyCls}`}>{money(l.hours * l.rate)}</td>
-              {!blankTaxes && (
+              {notesLayout ? (
                 <>
-                  <td className="xcell text-center font-bold">{isLast ? '(-) taxes' : ''}</td>
-                  <td className="xcell text-center font-bold">{isLast ? 'NEST [IRA]' : ''}</td>
-                  <td className="xcell text-center font-bold">{isLast ? 'net' : ''}</td>
+                  <td className={`xcell ${bodyCls}`} />
+                  <td className={`xcell ${bodyCls}`} />
                 </>
+              ) : (
+                !blankTaxes && (
+                  <>
+                    <td className="xcell text-center font-bold">{isLast ? '(-) taxes' : ''}</td>
+                    <td className="xcell text-center font-bold">{isLast ? 'NEST [IRA]' : ''}</td>
+                    <td className="xcell text-center font-bold">{isLast ? 'net' : ''}</td>
+                  </>
+                )
               )}
             </tr>
           );
@@ -457,12 +482,23 @@ function HourlyReadOnly({
           <td className={`xcell border-t border-t-neutral-500 text-center ${bodyCls}`}>{block.totalHours.toFixed(2)}</td>
           <td className={`xcell border-t border-t-neutral-500 ${bodyCls}`} />
           <td className={`xcell border-t border-t-neutral-500 text-center ${bodyCls}`}>{money(block.totalPay)}</td>
-          {!blankTaxes && (
+          {notesLayout ? (
             <>
-              <td className="xcell text-center" />
-              <td className="xcell text-center" />
-              <td className="xcell text-center">{block.net !== null ? money(block.net) : ''}</td>
+              <td className={`xcell border-t border-t-neutral-500 text-center ${bodyCls}`}>
+                {block.taxes !== null ? money(block.taxes) : ''}
+              </td>
+              <td className={`xcell border-t border-t-neutral-500 text-center ${bodyCls}`}>
+                {block.net !== null ? money(block.net) : ''}
+              </td>
             </>
+          ) : (
+            !blankTaxes && (
+              <>
+                <td className="xcell text-center" />
+                <td className="xcell text-center" />
+                <td className="xcell text-center">{block.net !== null ? money(block.net) : ''}</td>
+              </>
+            )
           )}
         </tr>
       </tbody>
@@ -526,17 +562,13 @@ function TitleBand({ title }: { title: string }): JSX.Element {
   );
 }
 
-function moneyPlain(n: number): string {
-  return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-
 /** NOTES working-log materials table (export parity). */
 function LeadMaterialsTable({ block }: { block: PsBlock }): JSX.Element {
   return (
     <table className="mb-2 w-max min-w-[560px] border-collapse bg-white text-xs">
       <thead>
         <tr>
-          <th className="xcell text-left" style={TAN} colSpan={6}>
+          <th className="xcell text-left" style={NOTES_LEAD_BAND} colSpan={6}>
             {block.displayName}
             {block.sub && (
               <span className="ml-2 rounded bg-blue-100 px-1 text-[10px] font-normal text-blue-700">sub</span>
@@ -553,18 +585,36 @@ function LeadMaterialsTable({ block }: { block: PsBlock }): JSX.Element {
       </thead>
       <tbody>
         {block.jobs.slice(0, 6).map((j) => {
-          const woBase = j.workOrderOverride !== null ? j.workOrderOverride : j.profitShare;
-          const woNote = `w.o. $${moneyPlain(woBase)} less ½ mats $${moneyPlain(j.halfMaterials)}`;
+          const wo = formatCrewLeadWoNote(j);
+          const jobText = (() => {
+            const base = `${j.customer} ${j.jobShort}`.trim();
+            const tagged = `${base} [PS]`;
+            const n = j.notes.trim();
+            return n ? `${tagged} — ${n}` : tagged;
+          })();
+          const flag = wo.flagMissing;
           return (
             <tr key={j.jobRowId}>
-              <td className="xcell whitespace-nowrap" style={jobCellStyle(j.colorHex)}>
+              <td
+                className="xcell whitespace-nowrap"
+                style={{ ...jobCellStyle(j.colorHex), ...(flag ? NOTES_FLAG : {}) }}
+              >
                 {j.apKey ? `AP${j.apKey}` : j.jobShort}
               </td>
-              <td className="xcell">{`${j.customer} ${j.jobShort}`.trim()}</td>
+              <td className="xcell" style={flag ? NOTES_FLAG : undefined}>
+                {jobText}
+              </td>
               <td className="xcell" />
-              <td className="xcell text-right whitespace-nowrap">{money(j.materials)}</td>
+              <td className="xcell text-right whitespace-nowrap" style={flag ? NOTES_FLAG : undefined}>
+                {flag ? '?Did we finish?' : money(j.materials)}
+              </td>
               <td className="xcell" />
-              <td className="xcell text-[11px] text-neutral-600 whitespace-nowrap">{woNote}</td>
+              <td
+                className="xcell text-[11px] whitespace-nowrap"
+                style={flag ? NOTES_FLAG : { color: '#525252' }}
+              >
+                {wo.text}
+              </td>
             </tr>
           );
         })}
@@ -595,13 +645,23 @@ function PainterSequence({
     <>
       {model.painterSequence.map((entry) =>
         entry.kind === 'hourly' ? (
-          <HourlyReadOnly key={entry.block.key} block={entry.block} blankTaxes={blankTaxes} />
+          <HourlyReadOnly
+            key={entry.block.key}
+            block={entry.block}
+            blankTaxes={blankTaxes}
+            notesLayout={notesMode}
+          />
         ) : notesMode ? (
           <div key={entry.block.key} className="mb-4">
             <LeadMaterialsTable block={entry.block} />
             {entry.block.tsheets && (
               <div className="mb-2 ml-4 max-w-3xl">
-                <HourlyReadOnly block={entry.block.tsheets} tsheets blankTaxes={blankTaxes} />
+                <HourlyReadOnly
+                  block={entry.block.tsheets}
+                  tsheets
+                  blankTaxes={blankTaxes}
+                  notesLayout
+                />
               </div>
             )}
           </div>
@@ -624,7 +684,7 @@ function PainterSequence({
       )}
       <SectionHeader title="OFFICE" />
       {model.office.map((b) => (
-        <HourlyReadOnly key={b.key} block={b} blankTaxes={blankTaxes} />
+        <HourlyReadOnly key={b.key} block={b} blankTaxes={blankTaxes} notesLayout={notesMode} />
       ))}
       <SectionHeader title="ADMIN" />
       {model.admin.map((b) => (

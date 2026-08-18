@@ -10,6 +10,7 @@ const format_1 = require("./format");
 const completedPercents_1 = require("./completedPercents");
 const customerByAp_1 = require("./customerByAp");
 const exportXlsx_1 = require("./exportXlsx");
+const exportRound6Sheets_1 = require("./exportRound6Sheets");
 const fills_1 = require("./fills");
 const parsers_1 = require("./parsers");
 const payroll_1 = require("./payroll");
@@ -106,6 +107,24 @@ function runSelfTests() {
     check('pct free: text accessor', (0, format_1.percentText)((0, format_1.parsePercentInput)('  see notes  ')), 'see notes');
     check('pct free: number is not text', (0, format_1.isPercentText)(0.38), false);
     check('pct free: blank still null', (0, format_1.parsePercentInput)('   '), null);
+    check('NOTES WO note: full amount, PS %, % complete', (0, format_1.formatCrewLeadWoNote)({
+        workOrderOverride: null,
+        profitShare: 1159.2,
+        woPct: 0.4,
+        percent: 0.9,
+        percentCompletion: 0.9,
+        missingPercent: false,
+        manualPay: null,
+    }).text, 'w.o. $1,159.20 @40% PS & 90% complete');
+    check('NOTES WO note: missing % flags ? Complete', (0, format_1.formatCrewLeadWoNote)({
+        workOrderOverride: 1159.2,
+        profitShare: 0,
+        woPct: 0.4,
+        percent: null,
+        percentCompletion: 0,
+        missingPercent: true,
+        manualPay: null,
+    }), { text: 'w.o. $1,159.20 @40% PS & ? Complete', flagMissing: true });
     // --- Round 8 §2.4: SUBBED / SET RATE forgiving matching ----------------------
     check('subbed: plain', (0, format_1.matchesSubbedOut)('subbed out'), true);
     check('subbed: hyphenated + case', (0, format_1.matchesSubbedOut)('Subbed-out'), true);
@@ -309,6 +328,7 @@ function runSelfTests() {
     check('titleCase: directory casing wins + initial stripped', (0, payroll_1.titleCaseLeadName)('RENE SALAZAR M', [{ fullName: 'Rene Salazar M', firstName: 'Rene', lastName: 'Salazar M', active: true }], []), 'Rene Salazar');
     check('titleCase: split leads resolved independently', (0, payroll_1.titleCaseLeadName)('TED FRANK/RAFAEL AGUILAR', dir.concat([]), []), 'Ted Frank/Rafael Aguilar');
     check("titleCase: sub keeps its stored text", (0, payroll_1.titleCaseLeadName)("PEPE'S PAINTING LLC", [], ["Pepe's Painting LLC"]), "Pepe's Painting LLC");
+    check('titleCase: unmatched ALL CAPS still Title Case', (0, payroll_1.titleCaseLeadName)('CARLOS RUIZ CRUZ', [], []), 'Carlos Ruiz Cruz');
     // --- Round 4 §5.8: prevailing-wage rate chain --------------------------------------------------
     const pwSettings = {
         wageRates: [
@@ -441,6 +461,22 @@ function runSelfTests() {
     check('§9.1 helper with no hourlyRate on an HOURLY job → default', (0, payroll_1.resolveLineRate)('HILDA RUIZ', 'AP24000 T&M repair', true, r9).rate, 18);
     check('§9.1 SNRHA substring floors a $16 painter at 19.18', (0, payroll_1.resolveLineRate)('ANTONIO ZUNIGA', 'AP24393 SNRHA *SS* 210 N 16th', false, r9).rate, 19.18);
     check('§9.1 SNRHA never LOWERS a $25 painter', (0, payroll_1.resolveLineRate)('RAFAEL AGUILAR', 'AP24393 SNRHA *SS*', false, r9).rate, 25);
+    check('Carlos Ruiz Cruz HOURLY job → $25 (not the $18 PS/crew-lead rate)', (0, payroll_1.resolveLineRate)('Carlos Ruiz Cruz', 'AP24000 repair', true, {
+        wageRates: (0, settings_1.defaultSettings)().wageRates,
+        defaultWageRate: 18,
+        defaultCrewLeadRate: 18,
+        prevailingWagePatterns: ['SNRHA'],
+        prevailingMinRate: 19.18,
+        isCrewLead: true,
+    }).rate, 25);
+    check("Carlos Ruiz Cruz profit-share hours as lead → $18", (0, payroll_1.resolveLineRate)('Carlos Ruiz Cruz', 'AP24314 Ext', false, {
+        wageRates: (0, settings_1.defaultSettings)().wageRates,
+        defaultWageRate: 18,
+        defaultCrewLeadRate: 18,
+        prevailingWagePatterns: ['SNRHA'],
+        prevailingMinRate: 19.18,
+        isCrewLead: true,
+    }).rate, 18);
     check('§9.1 conditional rule beats the generic rates', (0, payroll_1.resolveLineRate)('HILDA RUIZ', 'AP24314 Ext', false, {
         ...r9,
         jobLeadNames: ['ANTONIO ZUNIGA'],
@@ -567,6 +603,7 @@ function runSelfTests() {
                     laborWagesSubs: 113.04,
                     mileage: 0,
                     sundries: 0,
+                    travel: 0,
                     plJobHeader: 'AP24314 Ext',
                     customerName: 'Aaron Ward',
                     plEntity: 'NV',
@@ -580,6 +617,7 @@ function runSelfTests() {
                     laborWagesSubs: 2081.09,
                     mileage: 0,
                     sundries: 0,
+                    travel: 0,
                     plJobHeader: 'AP24403 Lambrook',
                     customerName: 'CCSD',
                     plEntity: 'NV',
@@ -708,6 +746,7 @@ function runSelfTests() {
                         laborWagesSubs: 0,
                         mileage: 0,
                         sundries: 0,
+                        travel: 0,
                         plJobHeader: 'AP25000 Ext',
                         customerName: 'Cust',
                         plEntity: 'NV',
@@ -738,6 +777,117 @@ function runSelfTests() {
     });
     check('crew-owner lead: employee in "X\'s Crew" becomes a lead', ownerPreview.leads.map((l) => l.leadName), ['ANTONIO ZUNIGA']);
     check('crew-owner lead: not also an hourly painter', ownerPreview.painters.length, 0);
+    const hourlyPbj = {
+        ...ownerPbj,
+        customers: ownerPbj.customers.map((c) => ({
+            ...c,
+            jobs: c.jobs.map((j) => ({
+                ...j,
+                analysis: { ...j.analysis, hourly: true, percent: 'HOURLY', notes: 'punch list' },
+            })),
+        })),
+    };
+    const hourlyPreview = (0, payrollPreview_1.buildPayrollPreview)({
+        ...{
+            pbj: hourlyPbj,
+            enriched: ownerEnriched,
+            reportRows: [],
+            pl: {
+                byJob: new Map(),
+                duplicateColumns: [],
+                columnHeaders: [''],
+                accountRows: [],
+                entity: 'NV',
+                unmappedCogsRows: [],
+            },
+            directory: [
+                { fullName: 'Antonio Zuniga', firstName: 'Antonio', lastName: 'Zuniga', active: true },
+            ],
+            settings: ownerSettings,
+            payDate: new Date(2026, 6, 10),
+            edits: {},
+            qbHours: {},
+            knownEstimators: new Set(['MH']),
+            leadCtx: {
+                directory: [
+                    { fullName: 'Antonio Zuniga', firstName: 'Antonio', lastName: 'Zuniga', active: true },
+                ],
+                crewGroups: ["Antonio Zuniga's Crew"],
+                subcontractors: [],
+            },
+        },
+    });
+    const hourlyTs = hourlyPreview.leads[0]?.tsheets?.lines[0] ?? hourlyPreview.painters[0]?.lines[0];
+    check('hourly job: T-SHEETS uses the hourly-jobs rate, [Hourly] tag, and Pivot notes', [
+        hourlyTs?.hourlyJob,
+        hourlyTs?.rate,
+        hourlyTs?.jobLabel.includes('[Hourly]') === true,
+        hourlyTs?.jobLabel.includes('punch list') === true,
+    ], [true, 25, true, true]);
+    const carriedRow = (over) => ({
+        id: `bal:${over.apKey}`,
+        customer: 'Carried Cust',
+        job: `AP${over.apKey} Ext`,
+        estimator: 'MH',
+        woOverride: null,
+        woPct: 0.38,
+        percent: 1,
+        livePercent: 1,
+        percentOverride: false,
+        excludedFromPayroll: false,
+        notes: '',
+        colorHex: 'FFFF99',
+        ...over,
+    });
+    const carriedOnlyPreview = (0, payrollPreview_1.buildPayrollPreview)({
+        pbj: {
+            ...ownerPbj,
+            customers: [],
+            grandTotal: 0,
+            grandByDate: {},
+            balances: [
+                carriedRow({ apKey: '26000', crewLead: 'CARLOS RUIZ CRUZ', percent: 1 }),
+                carriedRow({ apKey: '26001', crewLead: 'CARLOS RUIZ CRUZ', excludedFromPayroll: true }),
+                carriedRow({ apKey: '26002', crewLead: 'CARLOS RUIZ CRUZ', percent: 'HOURLY' }),
+            ],
+        },
+        enriched: [],
+        reportRows: [],
+        pl: {
+            byJob: new Map([
+                [
+                    '26000',
+                    {
+                        income: 4000,
+                        materials: 100,
+                        laborWagesSubs: 50,
+                        mileage: 0,
+                        sundries: 25,
+                        travel: 10,
+                        plJobHeader: 'AP26000 Ext',
+                        customerName: 'Carried Cust',
+                        plEntity: 'NV',
+                    },
+                ],
+            ]),
+            duplicateColumns: [],
+            columnHeaders: [],
+            accountRows: [],
+            entity: 'NV',
+            unmappedCogsRows: [],
+        },
+        directory: [],
+        settings: { ...ownerSettings, painterRoster: [] },
+        payDate: new Date(2026, 6, 10),
+        edits: {},
+        qbHours: {},
+        knownEstimators: new Set(['MH']),
+        leadCtx: { directory: [], crewGroups: [], subcontractors: [] },
+    });
+    check('§6 lead with only carried jobs still gets a block', carriedOnlyPreview.leads.map((l) => l.leadName), ['CARLOS RUIZ CRUZ']);
+    check('§6 non-gray carried job joins the lead band; gray + HOURLY stay off', carriedOnlyPreview.leads[0].jobs.map((j) => j.apKey), ['26000']);
+    check('§8.3 sundries default onto Deductions/Sundries', [carriedOnlyPreview.leads[0].deductions, carriedOnlyPreview.leads[0].deductMemo], [25, 'Sundries (P&L)']);
+    check('§8.5 travel metric is on the carried job', carriedOnlyPreview.leads[0].jobs[0].travel, 10);
     // --- Round 5 §4: job-naming chain --------------------------------------------------------------
     check('baseApKey: suffixed', (0, jobNames_1.baseApKey)('24180-A'), '24180');
     check('baseApKey: multi-suffix', (0, jobNames_1.baseApKey)('21848-A5'), '21848');
@@ -1017,6 +1167,18 @@ function runSelfTests() {
     check('§3.1 manual pivot edit wins over the live link', [overriddenJob.percent, overriddenJob.livePercent, overriddenJob.percentOverride], [0.75, 0.9, true]);
     const seededJob = (0, pivotByJob_1.buildPivotByJob)(pbjInput({ enriched: ownerEnriched, edits: { [liveJobId]: { percentSeed: 0.6 } } })).customers[0].jobs[0].analysis;
     check('§3.1 no TimeNavi row → Slot A seed fills in', [seededJob.percent, seededJob.livePercent], [0.6, null]);
+    const hourlyFromSeed = (0, pivotByJob_1.buildPivotByJob)(pbjInput({
+        enriched: ownerEnriched,
+        reportRows: [tnRow('25000', 0.9)],
+        edits: { [liveJobId]: { percentSeed: 'HOURLY' } },
+    })).customers[0].jobs[0].analysis;
+    check('Slot A HOURLY seed classifies the job as hourly even when TimeNavi shows a %', [hourlyFromSeed.percent, hourlyFromSeed.hourly], [0.9, true]);
+    const psFromSeed = (0, pivotByJob_1.buildPivotByJob)(pbjInput({
+        enriched: ownerEnriched,
+        reportRows: [tnRow('25000', 'HOURLY')],
+        edits: { [liveJobId]: { percentSeed: 0.4 } },
+    })).customers[0].jobs[0].analysis;
+    check('Slot A percentage seed classifies the job as profit-share even when TimeNavi says HOURLY', [psFromSeed.percent, psFromSeed.hourly], ['HOURLY', false]);
     // §3.2 — the export writes a real cross-sheet formula.
     check('excelColumnLetter', [(0, exportXlsx_1.excelColumnLetter)(1), (0, exportXlsx_1.excelColumnLetter)(9), (0, exportXlsx_1.excelColumnLetter)(26), (0, exportXlsx_1.excelColumnLetter)(27)], ['A', 'I', 'Z', 'AA']);
     check('§3.2 INDEX/MATCH formula (no XLOOKUP)', (0, exportXlsx_1.timeNaviPercentFormula)({
@@ -1025,6 +1187,17 @@ function runSelfTests() {
         pctColumn: 'I',
         apCellRef: 'F5',
     }), `IFERROR(INDEX('TimeNavi Export'!I:I, MATCH(F5, 'TimeNavi Export'!H:H, 0)), "")`);
+    check('§13 percents filename spells Percentages, no % character', (0, exportXlsx_1.percentsExportFilename)(new Date(2026, 7, 14)), '08-14-2026 Percentages of Completion.xlsx');
+    check('§13 payroll filename has no %', (0, exportXlsx_1.payrollExportFilename)(new Date(2026, 7, 14), new Date(2026, 7, 8), new Date(2026, 7, 14)).includes('%'), false);
+    check("§10 Input #'s Hourly Pay / Deductions cells (first lead)", (0, exportRound6Sheets_1.inputNumbersCellRefs)(2), [
+        { hourlyCell: 'C10', deductCell: 'C11' },
+        { hourlyCell: 'C21', deductCell: 'C22' },
+    ]);
+    check("§10.1 sheet name apostrophe is doubled", (0, exportRound6Sheets_1.inputNumsSheetFormula)('C11'), { formula: `'Input #''s'!C11` });
+    check('§5 RF seed color is C4A484', settings_1.DEFAULT_LEGEND.find((l) => l.estimator === 'RF')?.color, 'C4A484');
+    const carlosWages = (0, settings_1.defaultSettings)().wageRates.find((w) => w.name === 'Carlos Ruiz Cruz');
+    check('Carlos Ruiz Cruz seeds: PS $18 / hourly $25 / crew-lead $18', [carlosWages?.rate, carlosWages?.hourlyRate, carlosWages?.crewLeadRate], [18, 25, 18]);
+    check('§11 inactive roster seeds 52 unique painters', new Set(settings_1.DEFAULT_PAINTER_ROSTER.map((p) => p.name)).size, 52);
     const failed = results.filter((r) => !r.pass);
     const label = `[% of Completion Builder self-test] ${results.length - failed.length}/${results.length} passed`;
     if (failed.length === 0) {

@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.ALL_MIGRATIONS = exports.MIGRATION_WAGE_SEEDS = exports.MIGRATION_DB_PATTERN = exports.MIGRATION_RF_COLOR = exports.LEGACY_PREVAILING_PATTERN = exports.DEFAULT_PREVAILING_MIN_RATE = exports.DEFAULT_PREVAILING_PATTERNS = exports.DEFAULT_SUBCONTRACTORS = exports.DEFAULT_MILEAGE_RATE = exports.DEFAULT_SALARIED = exports.DEFAULT_PAINTER_ROSTER = exports.DEFAULT_PL_ACCOUNT_MAPPING = exports.DEFAULT_DAILY_OT_HOURS_THRESHOLD = exports.DEFAULT_NV_DAILY_OT_RATE_THRESHOLD = exports.DEFAULT_PER_JOB_RATE_OVERRIDES = exports.DEFAULT_CONDITIONAL_RATE_RULES = exports.DEFAULT_CREW_LEAD_RATE = exports.DEFAULT_WAGE_RATE = exports.DEFAULT_WAGE_RATES = exports.ROUND8_WAGE_SEEDS = exports.DEFAULT_PROFIT_SHARE_PCT = exports.DEFAULT_PROFIT_SHARE = exports.DEFAULT_PIVOT_COLUMNS = exports.LEGACY_RF_COLOR = exports.DEFAULT_LEGEND = void 0;
+exports.ALL_MIGRATIONS = exports.MIGRATION_CARLOS_HOURLY = exports.MIGRATION_WAGE_SEEDS = exports.MIGRATION_DB_PATTERN = exports.MIGRATION_RF_COLOR = exports.LEGACY_PREVAILING_PATTERN = exports.DEFAULT_PREVAILING_MIN_RATE = exports.DEFAULT_PREVAILING_PATTERNS = exports.DEFAULT_SUBCONTRACTORS = exports.DEFAULT_MILEAGE_RATE = exports.DEFAULT_SALARIED = exports.DEFAULT_PAINTER_ROSTER = exports.DEFAULT_PL_ACCOUNT_MAPPING = exports.DEFAULT_DAILY_OT_HOURS_THRESHOLD = exports.DEFAULT_NV_DAILY_OT_RATE_THRESHOLD = exports.DEFAULT_PER_JOB_RATE_OVERRIDES = exports.DEFAULT_CONDITIONAL_RATE_RULES = exports.DEFAULT_CREW_LEAD_RATE = exports.DEFAULT_WAGE_RATE = exports.DEFAULT_WAGE_RATES = exports.ROUND8_WAGE_SEEDS = exports.DEFAULT_PROFIT_SHARE_PCT = exports.DEFAULT_PROFIT_SHARE = exports.DEFAULT_PIVOT_COLUMNS = exports.LEGACY_RF_COLOR = exports.DEFAULT_LEGEND = void 0;
 exports.mergeWageRateSeeds = mergeWageRateSeeds;
 exports.loadAppMode = loadAppMode;
 exports.saveAppMode = saveAppMode;
@@ -77,7 +77,7 @@ const BASE_WAGE_RATES = [
     { name: 'Armando Alfonso Marin', rate: 15 },
     { name: 'Calixto Efrain Climaco', rate: 19.18 },
     { name: 'Jesus Perez', rate: 19.18 },
-    { name: 'Carlos Ruiz Cruz', rate: 18 },
+    { name: 'Carlos Ruiz Cruz', rate: 18, hourlyRate: 25 },
     { name: 'Damian Vasquez', rate: 18 },
     { name: 'Daniel Gonzales Bonilla', rate: 18 },
     { name: 'Gertrudis Campoverde Anguiano', rate: 20 },
@@ -317,10 +317,12 @@ exports.LEGACY_PREVAILING_PATTERN = 'SNRHA *SS*';
 exports.MIGRATION_RF_COLOR = 'r8-rf-color';
 exports.MIGRATION_DB_PATTERN = 'r8-db-pattern';
 exports.MIGRATION_WAGE_SEEDS = 'r8-wage-seeds';
+exports.MIGRATION_CARLOS_HOURLY = 'r8-carlos-hourly-25';
 exports.ALL_MIGRATIONS = [
     exports.MIGRATION_RF_COLOR,
     exports.MIGRATION_DB_PATTERN,
     exports.MIGRATION_WAGE_SEEDS,
+    exports.MIGRATION_CARLOS_HOURLY,
 ];
 // v4: Round 3 payroll settings added. v3 legend/pivot values are migrated;
 // missing payroll sections get the seeds.
@@ -677,8 +679,8 @@ function parseSettings(raw) {
 }
 /**
  * Round 8 one-time data migrations, each gated by an id in `appliedMigrations`:
- * §5 RF `DA9694` → `C4A484`, §9.1 Davis-Bacon `SNRHA *SS*` → `SNRHA`, and the
- * §9.3 three-rate wage seeds merged by name.
+ * §5 RF `DA9694` → `C4A484`, §9.1 Davis-Bacon `SNRHA *SS*` → `SNRHA`, the
+ * §9.3 three-rate wage seeds merged by name, and Carlos Ruiz Cruz hourly $25.
  */
 function applySettingsMigrations(settings) {
     const done = new Set(settings.appliedMigrations);
@@ -714,6 +716,14 @@ function applySettingsMigrations(settings) {
                 : exports.DEFAULT_PER_JOB_RATE_OVERRIDES.map((r) => ({ ...r })),
         });
         done.add(exports.MIGRATION_WAGE_SEEDS);
+    }
+    if (!done.has(exports.MIGRATION_CARLOS_HOURLY)) {
+        patch({
+            wageRates: next.wageRates.map((row) => /^carlos\s+ruiz(\s+cruz)?$/i.test(row.name.trim()) && (row.hourlyRate === undefined || row.hourlyRate === 18)
+                ? { ...row, hourlyRate: 25 }
+                : row),
+        });
+        done.add(exports.MIGRATION_CARLOS_HOURLY);
     }
     return { ...next, appliedMigrations: [...done] };
 }

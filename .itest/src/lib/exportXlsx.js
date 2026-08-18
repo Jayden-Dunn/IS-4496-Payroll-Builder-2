@@ -275,9 +275,23 @@ const TN_HEADERS = [...TN_RAW_HEADERS, ...TN_APPENDED_HEADERS];
 const TN_HIDDEN_HEADERS = ['Attendees', 'Location', 'Description', 'QBO Job Name'];
 /** Round 4 §1.2 — horizontally centered columns, resolved by header name. */
 const TN_CENTERED_HEADERS = ['AP#', '% Completion', 'Estimator', 'Last % Paid', '$ Difference'];
-// Reference column widths (A–S) so screenshots line up. G (Description) stays
-// collapsed at 13 — the full text lives in the cell, wrap off.
-const TN_WIDTHS = [60, 11, 13, 13, 9, 13, 13, 6.5, 11.6, 9, 10, 39, 20, 12, 14, 10.6, 9, 12.4, 13];
+// Default column widths (A–S). Event and AP# are overwritten with autofit
+// below; Description is then scaled to ~60% of this stub (a 40% cut).
+const TN_WIDTHS = [36, 11, 13, 13, 9, 13, 13, 6.5, 11.6, 9, 10, 39, 20, 12, 14, 10.6, 9, 12.4, 13];
+const TN_EVENT_MAX = 36;
+const TN_DESC_SCALE = 0.6;
+/** Excel column width ≈ character count + pad, clamped. */
+function autofitColWidth(values, opts) {
+    const pad = opts?.pad ?? 1;
+    const min = opts?.min ?? 4;
+    const max = opts?.max ?? 80;
+    let longest = 0;
+    for (const v of values) {
+        if (v.length > longest)
+            longest = v.length;
+    }
+    return Math.min(max, Math.max(min, longest + pad));
+}
 /** 1-based sheet column number for a TimeNavi header. */
 function tnCol(header) {
     return TN_HEADERS.indexOf(header) + 1;
@@ -286,16 +300,21 @@ function buildTimeNaviSheet(wb, input, palette) {
     const ws = wb.addWorksheet(TIMENAVI_SHEET_NAME, {
         views: [{ state: 'frozen', ySplit: 1 }], // freeze at A2
     });
-    // Round 5 §2.1 — AP# best-fit: max(8, longest rendered AP# + 1).
     const apIdx = TN_HEADERS.indexOf('AP#');
+    const descIdx = TN_HEADERS.indexOf('Description');
     const included = input.rows.filter((row) => row.included);
-    let apWidth = 8;
-    for (const r of included) {
-        const len = (r.apKey ?? '').length + 1;
-        if (len > apWidth)
-            apWidth = len;
-    }
-    ws.columns = TN_WIDTHS.map((width, i) => ({ width: i === apIdx ? apWidth : width }));
+    const eventWidth = autofitColWidth(['Event', ...included.map((r) => r.event)], { min: 12, max: TN_EVENT_MAX });
+    const descWidth = Math.round(TN_WIDTHS[descIdx] * TN_DESC_SCALE * 10) / 10;
+    const apWidth = autofitColWidth(['AP#', ...included.map((r) => r.apKey ?? '')], { min: 4, max: 18 });
+    ws.columns = TN_WIDTHS.map((width, i) => {
+        if (i === 0)
+            return { width: eventWidth };
+        if (i === descIdx)
+            return { width: descWidth };
+        if (i === apIdx)
+            return { width: apWidth };
+        return { width };
+    });
     const centeredCols = TN_CENTERED_HEADERS.map(tnCol);
     // Header: the ENTIRE row (A1 → last populated header) is black with white
     // non-bold text — no green remains. Paint by column index so every header

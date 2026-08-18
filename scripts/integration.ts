@@ -626,7 +626,7 @@ check('block totals (reg+OT = actual, pay = Σ h×r)', [leoBlock.totalHours, leo
 check('weekly OT tag on the line label', leoBlock.lines[1].jobLabel.endsWith('[OT >40 hrs/wk]'), true);
 const juanB = preview.painters[0];
 check('unknown employee → fallback rate + flag', [juanB.lines[0].rate, juanB.lines[0].rateDefaulted], [18, true]);
-check('job display name on the line', juanB.lines[0].jobLabel, 'CCSD 5321 Lambrook Dr Int/Ext');
+check('job display name on the line', juanB.lines[0].jobLabel, 'CCSD 5321 Lambrook Dr Int/Ext [PS]');
 check('lines in first-encounter order', juanB.lines.map((l) => l.apKey), ['24403', '99999', '24450', '24500']);
 
 check(
@@ -845,6 +845,19 @@ async function testExport(): Promise<void> {
     (payWb.getWorksheet('NOTES') as ExcelJS.Worksheet).properties.tabColor?.argb,
     'FF000000',
   );
+  {
+    const notesWs = payWb.getWorksheet('NOTES') as ExcelJS.Worksheet;
+    const woNotes: string[] = [];
+    notesWs.eachRow((row) => {
+      const v = row.getCell(6).value;
+      if (typeof v === 'string' && v.startsWith('w.o. $')) woNotes.push(v);
+    });
+    check(
+      'NOTES col F uses w.o. $X @N% PS & % complete',
+      woNotes.length > 0 && woNotes.every((s) => /^w\.o\. \$[\d,.]+ @(\d+|\?)% PS & /.test(s)),
+      true,
+    );
+  }
   check(
     'tab color: Pivot by Job',
     (readBack.getWorksheet('Pivot by Job') as ExcelJS.Worksheet).properties.tabColor?.argb,
@@ -873,11 +886,11 @@ async function testExport(): Promise<void> {
   );
   check('hidden column data intact (Description)', String(tn.getCell('G3').value).includes('30% COMPLETE'), true);
   check('other columns not hidden', [1, 8, 14].map((c) => tn.getColumn(c).hidden === true), [false, false, false]);
-  // C-3: reference column widths; Round 5 §2.1 — AP# (H) best-fit ≥ 8.
+  // C-3: Event autofits (capped), Description ~40% narrower, AP# fits longest key.
   check(
     'column widths (A, B, G, H, L)',
     [1, 2, 7, 8, 12].map((c) => tn.getColumn(c).width),
-    [60, 11, 13, 8, 39],
+    [36, 11, 7.8, 6, 39],
   );
 
   // Only the 6 included rows are exported; row 2 = JS (24222) after sorting.

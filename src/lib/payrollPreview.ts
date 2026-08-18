@@ -261,6 +261,16 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
   for (const r of utJobs) {
     if (r.apKey && !utJobByAp.has(r.apKey)) utJobByAp.set(r.apKey, r);
   }
+  const nvJobByAp = new Map<string, ManualSectionRow>();
+  for (const r of nvBalanceJobs) {
+    if (r.apKey && !nvJobByAp.has(r.apKey)) nvJobByAp.set(r.apKey, r);
+  }
+  const pbjJobByAp = new Map<string, (typeof pbj.customers)[number]['jobs'][number]>();
+  for (const c of pbj.customers) {
+    for (const j of c.jobs) {
+      if (j.analysis.apKey && !pbjJobByAp.has(j.analysis.apKey)) pbjJobByAp.set(j.analysis.apKey, j);
+    }
+  }
   const carriedIsHourly = (row: ManualSectionRow): boolean =>
     isHourlyJob(row.percent, row.crewLead, `${row.customer} ${row.job}`);
 
@@ -336,6 +346,8 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     forceNonDb: boolean;
     /** Round 8 §9.1 — crew leads on this job, for the conditional rate rules. */
     leadNames: string[];
+    /** Pivot by Job Notes for this AP#. */
+    notes: string;
   }
   /** Round 8 §9.2 — one (job, day) bucket of an employee's hours. */
   interface EmpDayRow {
@@ -365,22 +377,28 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     }
     let j = list.find((x) => x.jobId === jobId);
     if (!j) {
-      const pbjJob = jobRowById.get(jobId);
-      // UT jobs have no pivot row — their analysis lives on the UT PAYROLL row.
+      const pbjJob = jobRowById.get(jobId) ?? (r.apKey ? pbjJobByAp.get(r.apKey) : undefined);
+      // UT / carried NV jobs have no pivot-tree row — analysis lives on the section row.
       const utRow = r.apKey ? utJobByAp.get(r.apKey) : undefined;
+      const nvRow = r.apKey ? nvJobByAp.get(r.apKey) : undefined;
       const eventTitle = r.apKey ? (eventByApKey.get(r.apKey)?.event ?? '') : '';
       const res = pbjJob?.analysis.crewLeadResolution;
+      const hourly =
+        pbjJob?.analysis.hourly ??
+        (utRow ? carriedIsHourly(utRow) : undefined) ??
+        (nvRow ? carriedIsHourly(nvRow) : undefined) ??
+        false;
       j = {
         jobId,
         apKey: r.apKey,
         customer: r.jobcode1,
         jobcode2: r.jobcode2,
         hours: 0,
-        hourly: pbjJob?.analysis.hourly ?? (utRow?.percent === 'HOURLY'),
+        hourly,
         colorHex:
           r.apKey === 'OFFICE'
             ? '4F81BD'
-            : (pbjJob?.colorHex ?? utRow?.colorHex ?? colorByEstimator.get(r.estimator) ?? null),
+            : (pbjJob?.colorHex ?? utRow?.colorHex ?? nvRow?.colorHex ?? colorByEstimator.get(r.estimator) ?? null),
         firstIndex: idx,
         lastDate: r.localDate,
         lastRowIndex: idx,
@@ -394,7 +412,10 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
               ? [pbjJob.analysis.crewLead]
               : utRow
                 ? leadNamesFromDisplay(utRow.crewLead)
-                : [],
+                : nvRow
+                  ? leadNamesFromDisplay(nvRow.crewLead)
+                  : [],
+        notes: pbjJob?.analysis.notes || utRow?.notes || nvRow?.notes || '',
       };
       list.push(j);
     }
@@ -634,11 +655,13 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       const dailyTag = segment
         ? `[Daily OT — ${dayLabel}: ${round2(hours)} hrs over ${settings.dailyOtHoursThreshold} @ 1.5× (rate < $${settings.nvDailyOtRateThreshold}, NV)]`
         : '';
-      const otTag = kind === 'weeklyOt' ? ' [OT >40 hrs/wk]' : kind === 'dailyOt' ? ` ${dailyTag}` : '';
+      const otTag = kind === 'weeklyOt' ? ' [OT >40 hrs/wk]' : kind === 'dailyOt' ? ' [Daily OT]' : '';
       const isOfficeLine = officeStyle || j.office;
+      const notesSuffix = !isOfficeLine && j.notes.trim() ? ` — ${j.notes.trim()}` : '';
+      const typeTag = isOfficeLine ? '' : j.hourly ? ' [Hourly]' : ' [PS]';
       const label = isOfficeLine
         ? `Office${otTag}`
-        : `${jobDisplayName(j.customer, j.jobcode2)}${j.hourly ? ' [hrly]' : ''}${otTag}`;
+        : `${jobDisplayName(j.customer, j.jobcode2)}${typeTag}${otTag}${notesSuffix}`;
       // §5.5 — office lines carry the week range (or "Allpro Office" inside a
       // mixed painter block) on the blue PO cell instead of an AP number.
       const poText = officeStyle ? `(${weekRange})` : j.office ? 'Allpro Office' : null;
@@ -676,6 +699,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
         dailyOtNote: kind === 'dailyOt' ? dailyTag : undefined,
         hourlyJob: j.hourly,
         colorHex: j.colorHex,
+        jobNotes: j.notes.trim() || undefined,
       });
     };
 
@@ -849,6 +873,16 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       if (splitWith <= 1) totalProfitShare = floorResult.pay;
     }
 
+    const pbjNotes = (() => {
+      if (apKey) {
+        const job = pbjJobByAp.get(apKey);
+        if (job?.analysis.notes) return job.analysis.notes;
+        const carried = utJobByAp.get(apKey) ?? nvJobByAp.get(apKey);
+        if (carried?.notes) return carried.notes;
+      }
+      return '';
+    })();
+
     return {
       jobRowId,
       apKey,
@@ -881,6 +915,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       missingFromPl,
       income,
       materials,
+      notes: pbjNotes,
     };
   };
 

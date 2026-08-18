@@ -101,7 +101,9 @@ function titleCaseLeadName(leadDisplay, directory, subcontractors) {
         const sub = subcontractors.find((s) => s.toUpperCase() === p.toUpperCase());
         if (sub)
             return sub;
-        return stripSingleLetterTokens(p);
+        // No directory hit — still Title Case so auto-added leads aren't ALL CAPS.
+        const titled = p.replace(/[A-Za-z]+(?:'[A-Za-z]+)?/g, (w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
+        return stripSingleLetterTokens(titled);
     })
         .join('/');
 }

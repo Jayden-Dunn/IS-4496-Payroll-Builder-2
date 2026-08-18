@@ -595,7 +595,7 @@ export interface HourlyLine {
   apKey: string | null;
   /** PO# cell text override (office lines: the "(M/D - M/D)" range or "Allpro Office"). */
   poText: string | null;
-  jobLabel: string; // display name (+ ' [hrly]' / ' [OT]' tags)
+  jobLabel: string; // display name (+ ' [Hourly]' / ' [PS]' / ' [Daily OT]' tags)
   hours: number;
   rate: number;
   rateDefaulted: boolean; // true when no configured wage rate was found
@@ -623,6 +623,8 @@ export interface HourlyLine {
   dailyOtNote?: string;
   hourlyJob: boolean;
   colorHex: string | null; // estimator fill for the PO# cell
+  /** Pivot by Job Notes, shown on the NOTES tab Job column. */
+  jobNotes?: string;
 }
 
 export interface HourlyBlock {
@@ -680,6 +682,8 @@ export interface PsJobColumn {
   missingFromPl: boolean;
   income: number;
   materials: number;
+  /** Pivot by Job Notes, shown on the NOTES materials Job column. */
+  notes: string;
 }
 
 export interface PsBlock {

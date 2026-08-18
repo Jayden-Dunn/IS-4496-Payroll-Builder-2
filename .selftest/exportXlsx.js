@@ -216,16 +216,19 @@ function assemblePayrollWorkbook(input) {
     wb.created = new Date();
     const shared = input.payrollPreviewAll ?? input.payrollPreview ?? null;
     const sharedInput = { ...input, payrollPreview: shared };
+    const leadList = shared?.leads ?? [];
+    const refs = (0, exportRound6Sheets_1.inputNumbersCellRefs)(leadList.length);
+    const refsByLeadKey = new Map(leadList.map((b, i) => [b.key, refs[i]]));
     (0, exportRound6Sheets_1.buildPlImportSheet)(wb, input.pl ?? null);
     if (input.plUt)
         (0, exportRound6Sheets_1.buildPlImportSheet)(wb, input.plUt, 'P&L by Job Import - UT');
     (0, exportRound6Sheets_1.buildManagementReportSheet)(wb, shared, input.defaultProfitSharePct ?? 0.38);
     if (input.payrollPreview)
-        buildPayrollPreviewSheet(wb, input.payrollPreview);
+        buildPayrollPreviewSheet(wb, input.payrollPreview, 'PAYROLL PREVIEW', refsByLeadKey);
     else
         wb.addWorksheet('PAYROLL PREVIEW');
     if (input.payrollPreviewUt) {
-        buildPayrollPreviewSheet(wb, input.payrollPreviewUt, 'Payroll Preview - UT');
+        buildPayrollPreviewSheet(wb, input.payrollPreviewUt, 'Payroll Preview - UT', refsByLeadKey);
     }
     (0, exportRound6Sheets_1.buildProfitshareOutputSheet)(wb, shared, input.defaultProfitSharePct ?? 0.38, input.mileageRate ?? 0.625);
     (0, exportRound6Sheets_1.buildInputNumbersSheet)(wb, shared);
@@ -272,9 +275,23 @@ const TN_HEADERS = [...TN_RAW_HEADERS, ...TN_APPENDED_HEADERS];
 const TN_HIDDEN_HEADERS = ['Attendees', 'Location', 'Description', 'QBO Job Name'];
 /** Round 4 §1.2 — horizontally centered columns, resolved by header name. */
 const TN_CENTERED_HEADERS = ['AP#', '% Completion', 'Estimator', 'Last % Paid', '$ Difference'];
-// Reference column widths (A–S) so screenshots line up. G (Description) stays
-// collapsed at 13 — the full text lives in the cell, wrap off.
-const TN_WIDTHS = [60, 11, 13, 13, 9, 13, 13, 6.5, 11.6, 9, 10, 39, 20, 12, 14, 10.6, 9, 12.4, 13];
+// Default column widths (A–S). Event and AP# are overwritten with autofit
+// below; Description is then scaled to ~60% of this stub (a 40% cut).
+const TN_WIDTHS = [36, 11, 13, 13, 9, 13, 13, 6.5, 11.6, 9, 10, 39, 20, 12, 14, 10.6, 9, 12.4, 13];
+const TN_EVENT_MAX = 36;
+const TN_DESC_SCALE = 0.6;
+/** Excel column width ≈ character count + pad, clamped. */
+function autofitColWidth(values, opts) {
+    const pad = opts?.pad ?? 1;
+    const min = opts?.min ?? 4;
+    const max = opts?.max ?? 80;
+    let longest = 0;
+    for (const v of values) {
+        if (v.length > longest)
+            longest = v.length;
+    }
+    return Math.min(max, Math.max(min, longest + pad));
+}
 /** 1-based sheet column number for a TimeNavi header. */
 function tnCol(header) {
     return TN_HEADERS.indexOf(header) + 1;
@@ -283,16 +300,21 @@ function buildTimeNaviSheet(wb, input, palette) {
     const ws = wb.addWorksheet(TIMENAVI_SHEET_NAME, {
         views: [{ state: 'frozen', ySplit: 1 }], // freeze at A2
     });
-    // Round 5 §2.1 — AP# best-fit: max(8, longest rendered AP# + 1).
     const apIdx = TN_HEADERS.indexOf('AP#');
+    const descIdx = TN_HEADERS.indexOf('Description');
     const included = input.rows.filter((row) => row.included);
-    let apWidth = 8;
-    for (const r of included) {
-        const len = (r.apKey ?? '').length + 1;
-        if (len > apWidth)
-            apWidth = len;
-    }
-    ws.columns = TN_WIDTHS.map((width, i) => ({ width: i === apIdx ? apWidth : width }));
+    const eventWidth = autofitColWidth(['Event', ...included.map((r) => r.event)], { min: 12, max: TN_EVENT_MAX });
+    const descWidth = Math.round(TN_WIDTHS[descIdx] * TN_DESC_SCALE * 10) / 10;
+    const apWidth = autofitColWidth(['AP#', ...included.map((r) => r.apKey ?? '')], { min: 4, max: 18 });
+    ws.columns = TN_WIDTHS.map((width, i) => {
+        if (i === 0)
+            return { width: eventWidth };
+        if (i === descIdx)
+            return { width: descWidth };
+        if (i === apIdx)
+            return { width: apWidth };
+        return { width };
+    });
     const centeredCols = TN_CENTERED_HEADERS.map(tnCol);
     // Header: the ENTIRE row (A1 → last populated header) is black with white
     // non-bold text — no green remains. Paint by column index so every header
@@ -854,7 +876,7 @@ const DEDUCT_RED = 'FFFF0000';
 const PP_FONT = 'Garamond';
 function buildPayrollPreviewSheet(wb, model, 
 // Round 8 §7.3 — `Payroll Preview - UT` renders through this exact writer.
-sheetName = 'PAYROLL PREVIEW') {
+sheetName = 'PAYROLL PREVIEW', inputRefsByLeadKey) {
     const ws = wb.addWorksheet(sheetName);
     ws.columns = [{ width: 22 }, { width: 41.4 }, { width: 32.4 }, { width: 16.2 }, { width: 9.4 }, { width: 12 }, { width: 12 }, { width: 12 }];
     const baseFont = { name: PP_FONT, size: 12 };
@@ -1049,10 +1071,20 @@ sheetName = 'PAYROLL PREVIEW') {
         ws.addRow([]);
         const totalRow = ws.addRow(['Total']).number;
         const mileNewRow = ws.addRow(['Mileage - New', block.mileageNew]).number;
-        const hourlyPayRow = ws.addRow(['Hourly Pay', block.hourlyPay]).number;
+        const hourlyPayRow = ws.addRow(['Hourly Pay']).number;
         const reimbRow = ws.addRow(['Reimbursements', block.reimbursements, block.reimbMemo]).number;
-        const deductRow = ws.addRow(['Deductions/Sundries', block.deductions, block.deductMemo]).number;
+        const deductRow = ws.addRow(['Deductions/Sundries']).number;
         const totalPayRow = ws.addRow(['Total Pay']).number;
+        const inputRef = inputRefsByLeadKey?.get(block.key);
+        if (inputRef) {
+            ws.getCell(`B${hourlyPayRow}`).value = (0, exportRound6Sheets_1.inputNumsSheetFormula)(inputRef.hourlyCell);
+            ws.getCell(`B${deductRow}`).value = (0, exportRound6Sheets_1.inputNumsSheetFormula)(inputRef.deductCell);
+        }
+        else {
+            ws.getCell(`B${hourlyPayRow}`).value = block.hourlyPay;
+            ws.getCell(`B${deductRow}`).value = block.deductions;
+        }
+        ws.getCell(`C${deductRow}`).value = block.deductMemo;
         ws.addRow([]);
         const incomeRow = ws.addRow(['Total Income', ...block.jobs.map((j) => j.income)]).number;
         const matRow = ws.addRow(['Materials', ...block.jobs.map((j) => j.materials)]).number;

@@ -766,6 +766,7 @@ function parsePl(wbd, opts = {}) {
     const incomeLabels = [...labelSet(mapping.income)];
     const mileageLabels = [...labelSet(mapping.mileage)];
     const sundriesLabels = [...labelSet(mapping.sundries)];
+    const travelLabels = [...labelSet(mapping.travel)];
     // The header row sits above the row whose column A reads "Income"; the QBO
     // export may carry 0–4 title rows above that header.
     let incomeRow = -1;
@@ -828,6 +829,7 @@ function parsePl(wbd, opts = {}) {
             laborWagesSubs: sumAt(laborLabels, jc.col),
             mileage: sumAt(mileageLabels, jc.col),
             sundries: sumAt(sundriesLabels, jc.col),
+            travel: sumAt(travelLabels, jc.col),
             plJobHeader: jc.header,
             customerName: jc.customerName,
             plEntity: entity,
@@ -843,6 +845,7 @@ function parsePl(wbd, opts = {}) {
                 laborWagesSubs: existing.laborWagesSubs + metrics.laborWagesSubs,
                 mileage: existing.mileage + metrics.mileage,
                 sundries: existing.sundries + metrics.sundries,
+                travel: existing.travel + metrics.travel,
                 plJobHeader: existing.plJobHeader,
                 customerName: existing.customerName || metrics.customerName,
                 plEntity: entity,

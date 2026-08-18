@@ -53,9 +53,12 @@ function pbjJobId(customer, jobcode2) {
 function isHourlyJob(percent, crewLead, jobText) {
     if (percent === 'HOURLY')
         return true;
+    if (percent && typeof percent === 'object' && percent.kind === 'text' && /hourly/i.test(percent.text)) {
+        return true;
+    }
     if (/^hourly$/i.test(crewLead.trim()))
         return true;
-    return /\bT\s*&\s*M\b|\[hrly\]/i.test(jobText);
+    return /\bT\s*&\s*M\b|\[hrly\]|\[hourly\]/i.test(jobText);
 }
 const byText = (a, b) => a.localeCompare(b, 'en', { sensitivity: 'base' });
 function buildPivotByJob(input) {
@@ -167,13 +170,22 @@ function buildPivotByJob(input) {
                     : match
                         ? livePercent
                         : (edit.percentSeed ?? null);
+            const typePercent = isOffice
+                ? null
+                : percentOverride
+                    ? edit.percent
+                    : edit.percentSeed !== undefined
+                        ? edit.percentSeed
+                        : percent;
             // Crew lead — from the matched event title (§3.2); OFFICE → HOURLY.
             const resolution = match
                 ? (0, payroll_1.resolveCrewLead)((0, payroll_1.extractLeadParenthetical)(match.row.event, knownEstimators), leadCtx)
                 : null;
             const crewLead = edit.crewLead !== undefined ? edit.crewLead : isOffice ? 'HOURLY' : (resolution?.display ?? '');
             const jobText = `${job.jobcode2} ${match?.row.event ?? ''}`;
-            const hourly = isHourlyJob(percent, crewLead, jobText);
+            // Payroll job type follows Slot A / a typed Pivot % (HOURLY vs a
+            // percentage). Live TimeNavi % still fills the displayed cell.
+            const hourly = isHourlyJob(typePercent, crewLead, jobText);
             // Round 6 §5.3 — WO% / WO Override blank by default; calendar patterns
             // are suggestions only (tooltips / click-to-accept). Slot A seeds via edits.
             const pctSrc = match ? (0, payroll_1.extractWoPct)(match.row.description) : null;
