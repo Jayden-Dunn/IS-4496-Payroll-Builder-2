@@ -8,6 +8,7 @@ import {
   parseDate,
   parseNumberLoose,
   parseTimesheet,
+  rowHasExclusionGray,
   type LastWeekPbjRow,
 } from './parsers';
 import type {
@@ -51,6 +52,8 @@ export interface CompletedPbjJob {
   percent: PercentValue;
   notes: string;
   hourly: boolean;
+  /** Round 8 §4.1 — row painted A6A6A6 below Grand Total: keep off payroll. */
+  excludedFromPayroll: boolean;
   byDate: Record<string, number>;
   total: number;
   employees: CompletedPbjEmployeeHours[];
@@ -367,6 +370,7 @@ function parsePivotByJobSheet(
   const jobs: CompletedPbjJob[] = [];
   let section: CompletedPbjSection = 'nv';
   let customer = '';
+  let customerRow = -1;
   let collectingEmployees = false;
   let currentJob: CompletedPbjJob | null = null;
 
@@ -402,6 +406,7 @@ function parsePivotByJobSheet(
     if (sec) {
       section = sec;
       customer = '';
+      customerRow = -1;
       collectingEmployees = false;
       currentJob = null;
       // Section header rows may repeat the analysis headers — skip this row.
@@ -451,6 +456,10 @@ function parsePivotByJobSheet(
         percent,
         notes: asString(cellAt(row, layout.notesCol)),
         hourly,
+        // §4.1 — the customer/job pair is painted as a unit; either half counts.
+        excludedFromPayroll:
+          rowHasExclusionGray(sheet, i, [0, layout.apCol]) ||
+          (customerRow >= 0 && rowHasExclusionGray(sheet, customerRow, [0])),
         byDate: hours.byDate,
         total: hours.total,
         employees: [],
@@ -458,6 +467,12 @@ function parsePivotByJobSheet(
       jobs.push(job);
       currentJob = job;
       collectingEmployees = true;
+      // §4.3 — below Grand Total every job carries its own customer row;
+      // consume the label so the next AP# cannot inherit this one's customer.
+      if (section !== 'nv') {
+        customer = '';
+        customerRow = -1;
+      }
       continue;
     }
 
@@ -477,6 +492,7 @@ function parsePivotByJobSheet(
 
     if (a && !isSkipLabel(a)) {
       customer = a;
+      customerRow = i;
       collectingEmployees = false;
       currentJob = null;
     }
@@ -502,6 +518,7 @@ function toLastWeekPbj(jobs: CompletedPbjJob[]): LastWeekPbjRow[] {
     woPct: j.woPct,
     percent: j.percent,
     notes: j.notes,
+    excludedFromPayroll: j.excludedFromPayroll,
   }));
 }
 

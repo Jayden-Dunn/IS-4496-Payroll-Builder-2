@@ -1,6 +1,6 @@
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
-import { isDarkColor } from './format';
+import { isDarkColor, percentExcelValue } from './format';
 import type { JobsByCrewModel } from './jobsByCrew';
 import type {
   SalesByCustMirrorRow,
@@ -22,9 +22,16 @@ import {
   buildSalesByCustMirrorSheet,
   buildSalesByRepMirrorSheet,
   buildTimesheetMirrorSheet,
+  inputNumbersCellRefs,
+  inputNumsSheetFormula,
 } from './exportRound6Sheets';
 import { weekdayShort } from './pivotByJob';
-import { dollarDiffIsFlagged, duplicateInQboValues, percentIsFlagged } from './timenavi';
+import {
+  dollarDiffIsFlagged,
+  duplicateInQboValues,
+  percentIsFlagged,
+  percentIsRedFlagged,
+} from './timenavi';
 import type {
   ExceptionGroup,
   HourlyBlock,
@@ -32,6 +39,7 @@ import type {
   LegendEntry,
   ManualSectionRow,
   PayrollPreviewModel,
+  PercentValue,
   PivotByJobModel,
   PivotModel,
   PlParseResult,
@@ -49,6 +57,9 @@ const GRAND_TOTAL_GRAY = 'FFD9D9D9';
 const PINK_FILL = 'FFFFC7CE';
 const PINK_TEXT = 'FF9C0006';
 
+// Round 8 §2.4 — a % Completion cell with no valid state.
+const RED_FILL = 'FFFF0000';
+
 // Reference formats: accounting style WITHOUT a $ symbol.
 const ACCOUNTING_FMT = '_(* #,##0.00_);_(* \\(#,##0.00\\);_(* "-"??_);_(@_)';
 const START_END_DATE_FMT = 'mm-dd-yy';
@@ -60,6 +71,78 @@ const FONT = 'Calibri';
 
 function solidFill(argb: string): ExcelJS.Fill {
   return { type: 'pattern', pattern: 'solid', fgColor: { argb } };
+}
+
+// Round 8 §4.1 — carried jobs painted this gray must not flow to payroll.
+const EXCLUSION_GRAY_HEX = 'A6A6A6';
+
+/** Text format, so AP# columns compare as text on both sides of a MATCH. */
+const TEXT_FMT = '@';
+
+/** 1-based column number → Excel letters ("H", "AA"). */
+export function excelColumnLetter(col: number): string {
+  let n = Math.max(1, Math.trunc(col));
+  let out = '';
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    out = String.fromCharCode(65 + rem) + out;
+    n = Math.floor((n - 1) / 26);
+  }
+  return out;
+}
+
+/**
+ * Round 8 §3.2 — cross-sheet live link for a `% of Completion` cell.
+ * INDEX/MATCH only (XLOOKUP is not safe in LibreOffice); the AP# columns on
+ * both sheets hold text so MATCH resolves. Duplicate AP# → first match.
+ */
+export function timeNaviPercentFormula(opts: {
+  sheetName: string;
+  apColumn: string;
+  pctColumn: string;
+  apCellRef: string;
+}): string {
+  const sheet = `'${opts.sheetName.replace(/'/g, "''")}'`;
+  return `IFERROR(INDEX(${sheet}!${opts.pctColumn}:${opts.pctColumn}, MATCH(${opts.apCellRef}, ${sheet}!${opts.apColumn}:${opts.apColumn}, 0)), "")`;
+}
+
+interface TimeNaviLink {
+  sheetName: string;
+  apColumn: string;
+  pctColumn: string;
+  /** AP#s actually present on the sheet — a formula is only worth writing for these. */
+  apKeys: Set<string>;
+}
+
+/**
+ * Resolve the TimeNavi Export link columns AT EXPORT TIME by header text, so
+ * reordering that sheet can never point the formulas at the wrong column.
+ */
+function resolveTimeNaviLink(wb: ExcelJS.Workbook): TimeNaviLink | null {
+  const ws = wb.getWorksheet(TIMENAVI_SHEET_NAME);
+  if (!ws) return null;
+  const header = ws.getRow(1);
+  let apCol = 0;
+  let pctCol = 0;
+  for (let c = 1; c <= header.cellCount; c++) {
+    const v = header.getCell(c).value;
+    const text = typeof v === 'string' ? v.trim() : '';
+    if (text === 'AP#' && apCol === 0) apCol = c;
+    else if (text === '% Completion' && pctCol === 0) pctCol = c;
+  }
+  if (apCol === 0 || pctCol === 0) return null;
+  const apKeys = new Set<string>();
+  for (let r = 2; r <= ws.rowCount; r++) {
+    const v = ws.getRow(r).getCell(apCol).value;
+    const text = typeof v === 'string' ? v.trim() : typeof v === 'number' ? String(v) : '';
+    if (text) apKeys.add(text);
+  }
+  return {
+    sheetName: TIMENAVI_SHEET_NAME,
+    apColumn: excelColumnLetter(apCol),
+    pctColumn: excelColumnLetter(pctCol),
+    apKeys,
+  };
 }
 
 /** ARGB text color that stays readable on a given 6-digit hex fill. */
@@ -98,10 +181,21 @@ export interface PayrollExportInput {
   payDate: Date | null;
   weekStart: Date | null;
   weekEnd: Date | null;
+  /** Slot B — the NV P&L. */
   pl?: PlParseResult | null;
+  /** Round 8 §7.2 — Slot C, the optional UT P&L. Its sheets are omitted when absent. */
+  plUt?: PlParseResult | null;
   /** P&L upload filename for PR Final Check legend cell. */
   plSourceFileName?: string | null;
+  /** The NV `PAYROLL PREVIEW` model. */
   payrollPreview?: PayrollPreviewModel | null;
+  /** Round 8 §7.3 — the `Payroll Preview - UT` model; null on an NV-only week. */
+  payrollPreviewUt?: PayrollPreviewModel | null;
+  /**
+   * Round 8 §7.3 — model backing the shared downstream sheets. Defaults to
+   * `payrollPreview`; pass `mergePayrollPreviews(nv, ut)` to show both entities.
+   */
+  payrollPreviewAll?: PayrollPreviewModel | null;
   payrollExceptions?: ExceptionGroup[] | null;
   /**
    * Canonical Jobs sheet rows (`PO#` + display name). When omitted, derived
@@ -140,8 +234,10 @@ const PERCENTS_TAB_COLORS = new Map<string, string>([
 
 const PAYROLL_TAB_COLORS = new Map<string, string>([
   ['P&L by Job Import', 'FFC4BD97'],
+  ['P&L by Job Import - UT', 'FFC4BD97'],
   ['Management Report Export', 'FF76933C'],
   ['PAYROLL PREVIEW', 'FFF79646'],
+  ['Payroll Preview - UT', 'FFF79646'],
   ['Profitshare Output', 'FF0070C0'],
   ["Input #'s", 'FFFF0000'],
   ['NOTES', 'FF000000'],
@@ -157,11 +253,15 @@ export type ExportInput = PercentsExportInput & {
   payrollExceptions?: ExceptionGroup[] | null;
 };
 
+/**
+ * Round 8 §13 — `MM-DD-YYYY Percentages of Completion.xlsx`. No `%` character
+ * anywhere: some sync/upload targets mangle it in filenames.
+ */
 export function percentsExportFilename(payDate: Date | null): string {
   const d = payDate ?? new Date();
   const mm = String(d.getMonth() + 1).padStart(2, '0');
   const dd = String(d.getDate()).padStart(2, '0');
-  return `% ${mm}-${dd}-${d.getFullYear()} % of Completion.xlsx`;
+  return `${mm}-${dd}-${d.getFullYear()} Percentages of Completion.xlsx`;
 }
 
 /** Alias — same as percentsExportFilename. */
@@ -219,36 +319,54 @@ export async function buildPercentsWorkbookBuffer(input: PercentsExportInput): P
 }
 
 /**
- * Round 6/7 — payroll workbook sheet order:
- * P&L by Job Import | Management Report Export | PAYROLL PREVIEW | Profitshare Output |
- * Input #'s | NOTES | FINAL PAYROLL BREAKDOWN | ►JOURNAL ENTRY◄ | JOBS |
+ * Round 6/7/8 — payroll workbook sheet order:
+ * P&L by Job Import | [P&L by Job Import - UT] | Management Report Export |
+ * PAYROLL PREVIEW | [Payroll Preview - UT] | Profitshare Output | Input #'s |
+ * NOTES | FINAL PAYROLL BREAKDOWN | ►JOURNAL ENTRY◄ | JOBS |
  * Inactive Employees | Payroll Exceptions | PR Final Check
+ *
+ * Round 8 §7.3 — the two bracketed UT sheets appear only when the week has UT
+ * uploads, so an NV-only week produces exactly the Round 7 workbook.
+ * Split from `buildPayrollWorkbookBuffer` so the sheet order is assertable
+ * without serializing a whole workbook.
  */
-export async function buildPayrollWorkbookBuffer(input: PayrollExportInput): Promise<ArrayBuffer> {
+export function assemblePayrollWorkbook(input: PayrollExportInput): ExcelJS.Workbook {
   const wb = new ExcelJS.Workbook();
   wb.created = new Date();
+  const shared = input.payrollPreviewAll ?? input.payrollPreview ?? null;
+  const sharedInput: PayrollExportInput = { ...input, payrollPreview: shared };
+  const leadList = shared?.leads ?? [];
+  const refs = inputNumbersCellRefs(leadList.length);
+  const refsByLeadKey = new Map(leadList.map((b, i) => [b.key, refs[i]!]));
 
   buildPlImportSheet(wb, input.pl ?? null);
-  buildManagementReportSheet(wb, input.payrollPreview ?? null, input.defaultProfitSharePct ?? 0.38);
-  if (input.payrollPreview) buildPayrollPreviewSheet(wb, input.payrollPreview);
+  if (input.plUt) buildPlImportSheet(wb, input.plUt, 'P&L by Job Import - UT');
+  buildManagementReportSheet(wb, shared, input.defaultProfitSharePct ?? 0.38);
+  if (input.payrollPreview) buildPayrollPreviewSheet(wb, input.payrollPreview, 'PAYROLL PREVIEW', refsByLeadKey);
   else wb.addWorksheet('PAYROLL PREVIEW');
+  if (input.payrollPreviewUt) {
+    buildPayrollPreviewSheet(wb, input.payrollPreviewUt, 'Payroll Preview - UT', refsByLeadKey);
+  }
   buildProfitshareOutputSheet(
     wb,
-    input.payrollPreview ?? null,
+    shared,
     input.defaultProfitSharePct ?? 0.38,
     input.mileageRate ?? 0.625,
   );
-  buildInputNumbersSheet(wb, input.payrollPreview ?? null);
-  buildNotesSheet(wb, input);
-  buildFinalPayrollSheet(wb, input);
+  buildInputNumbersSheet(wb, shared);
+  buildNotesSheet(wb, sharedInput);
+  buildFinalPayrollSheet(wb, sharedInput);
   buildJournalEntrySheet(wb);
-  buildJobsSheet(wb, input);
-  buildInactiveEmployeesSheet(wb, input);
+  buildJobsSheet(wb, sharedInput);
+  buildInactiveEmployeesSheet(wb, sharedInput);
   buildExceptionsSheet(wb, 'Payroll Exceptions', input.payrollExceptions ?? [], input.payDate);
   buildPrFinalCheckSheet(wb, input.pl ?? null, input.plSourceFileName ?? undefined);
   applyTabColors(wb, PAYROLL_TAB_COLORS);
+  return wb;
+}
 
-  return (await wb.xlsx.writeBuffer()) as ArrayBuffer;
+export async function buildPayrollWorkbookBuffer(input: PayrollExportInput): Promise<ArrayBuffer> {
+  return (await assemblePayrollWorkbook(input).xlsx.writeBuffer()) as ArrayBuffer;
 }
 
 /** @deprecated Prefer buildPercentsWorkbookBuffer. */
@@ -276,6 +394,8 @@ export async function exportWorkbook(input: ExportInput): Promise<void> {
 // Sheet 1 — TimeNavi Export (columns A–S)
 // ---------------------------------------------------------------------------
 
+const TIMENAVI_SHEET_NAME = 'TimeNavi Export';
+
 /** Columns that come straight from the raw TimeNavi export (A..G). */
 const TN_RAW_HEADERS = ['Event', 'Start Date', 'End Date', 'Calendar', 'Attendees', 'Location', 'Description'];
 /** Analysis columns the app appends after the raw export block. */
@@ -301,7 +421,7 @@ function tnCol(header: string): number {
 }
 
 function buildTimeNaviSheet(wb: ExcelJS.Workbook, input: ExportInput, palette: ReadonlyMap<string, string>): void {
-  const ws = wb.addWorksheet('TimeNavi Export', {
+  const ws = wb.addWorksheet(TIMENAVI_SHEET_NAME, {
     views: [{ state: 'frozen', ySplit: 1 }], // freeze at A2
   });
   // Round 5 §2.1 — AP# best-fit: max(8, longest rendered AP# + 1).
@@ -342,11 +462,12 @@ function buildTimeNaviSheet(wb: ExcelJS.Workbook, input: ExportInput, palette: R
 
   const dupInQbo = duplicateInQboValues(input.rows);
   const pctCol = tnCol('% Completion');
+  const apCol = tnCol('AP#');
   const inQboCol = tnCol('In QBO Time?');
   const diffCol = tnCol('$ Difference');
 
   for (const r of included) {
-    const percentCell = r.percent === null ? '' : r.percent;
+    const percentCell = percentExcelValue(r.percent);
     const row = ws.addRow([
       r.event,
       r.startDate ? excelDate(r.startDate) : '',
@@ -362,7 +483,7 @@ function buildTimeNaviSheet(wb: ExcelJS.Workbook, input: ExportInput, palette: R
       r.qboJobName,
       r.inQboTime,
       r.jobTotal, // number, or the literal text '#N/A'
-      r.apptivo ?? '', // blank when N is #N/A and not user-edited
+      r.apptivo ?? '', // §2.2 — blank unless the user typed a value
       r.dollarDiff ?? '', // blank when N is #N/A
       percentCell, // Q mirrors I — the office PDF reads this column
       r.invoiceDate ? excelDate(r.invoiceDate) : '',
@@ -372,6 +493,8 @@ function buildTimeNaviSheet(wb: ExcelJS.Workbook, input: ExportInput, palette: R
     row.getCell(2).numFmt = START_END_DATE_FMT;
     row.getCell(3).numFmt = START_END_DATE_FMT;
     row.getCell(18).numFmt = INVOICE_DATE_FMT;
+    // §3.2 — Pivot by Job MATCHes against this column; keep it text on both sides.
+    row.getCell(apCol).numFmt = TEXT_FMT;
     for (const col of [9, 11, 17]) {
       const cell = row.getCell(col);
       if (typeof cell.value === 'number') cell.numFmt = PCT_FMT;
@@ -407,7 +530,14 @@ function buildTimeNaviSheet(wb: ExcelJS.Workbook, input: ExportInput, palette: R
       cell.fill = solidFill(PINK_FILL);
       cell.font = { ...tnFont, color: { argb: PINK_TEXT } };
     };
-    if (percentIsFlagged(r.percent)) pink(pctCol);
+    // §2.4 — a missing/invalid % outranks the pink review style.
+    if (percentIsRedFlagged(r.percent)) {
+      const cell = row.getCell(pctCol);
+      cell.fill = solidFill(RED_FILL);
+      cell.font = { ...tnFont, color: { argb: WHITE }, bold: true };
+    } else if (percentIsFlagged(r.percent)) {
+      pink(pctCol);
+    }
     if (r.inQboTime === 'NotClockedIn' || dupInQbo.has(r.inQboTime.trim())) pink(inQboCol);
     if (dollarDiffIsFlagged(r.dollarDiff)) pink(diffCol);
   }
@@ -651,6 +781,42 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
 
   const totalCol = 1 + dateCount + 1;
   const qbCol = totalCol + 1;
+  const apColLetter = excelColumnLetter(analysisStart);
+  const link = resolveTimeNaviLink(wb);
+
+  /**
+   * Round 8 §3.2 — write `% of Completion` as a live cross-sheet reference to
+   * this week's TimeNavi value. Manual overrides (and AP#s the calendar never
+   * saw) export as VALUES: the formula would resolve to "" and lose them.
+   */
+  const writePercentCell = (
+    row: ExcelJS.Row,
+    opts: { apKey: string | null; percent: PercentValue; override: boolean },
+  ): void => {
+    const cell = row.getCell(pctComplCol);
+    const value = percentExcelValue(opts.percent);
+    const linked = !opts.override && link !== null && opts.apKey !== null && link.apKeys.has(opts.apKey);
+    if (linked && link) {
+      cell.value = {
+        formula: timeNaviPercentFormula({
+          sheetName: link.sheetName,
+          apColumn: link.apColumn,
+          pctColumn: link.pctColumn,
+          apCellRef: `${apColLetter}${row.number}`,
+        }),
+        result: value,
+      };
+      cell.numFmt = PCT_FMT; // the linked value is a fraction (text states ignore it)
+      return;
+    }
+    cell.value = value;
+    if (typeof value === 'number') cell.numFmt = PCT_FMT;
+  };
+
+  /** AP# stays text so the MATCH against TimeNavi Export resolves. */
+  const textApCell = (row: ExcelJS.Row): void => {
+    row.getCell(analysisStart).numFmt = TEXT_FMT;
+  };
 
   const centerAnalysis = (row: ExcelJS.Row): void => {
     for (let c = analysisStart; c < lastCol; c++) {
@@ -741,7 +907,7 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
         a.crewLead,
         a.hourly ? '-' : (a.woOverride ?? ''),
         a.hourly ? '-' : (a.woPct ?? ''),
-        a.percent === null ? '' : a.percent,
+        percentExcelValue(a.percent),
         '', // Round 7 — Notes data cleared; keep centered "Notes" header only
       ]);
       jRow.outlineLevel = 1;
@@ -761,6 +927,8 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
         paint(cell, { ...(job.colorHex ? { fill: 'FF' + job.colorHex } : {}), color, bold: true });
       }
       analysisFormats(jRow);
+      writePercentCell(jRow, { apKey: a.apKey, percent: a.percent, override: a.percentOverride });
+      textApCell(jRow);
       centerAnalysis(jRow);
       hoursBandBorder(jRow);
 
@@ -796,9 +964,12 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
     ws.addRow([]);
     headerBlock(title, false);
     for (const r of rows) {
+      // §4.1 — an excluded carried job is painted A6A6A6 across the pair, so
+      // next week's reader picks the signal back up from the fill.
+      const rowHex = r.excludedFromPayroll ? EXCLUSION_GRAY_HEX : r.colorHex;
       const cRow = ws.addRow([r.customer]);
       cRow.outlineLevel = 0;
-      fillRow(cRow, r.colorHex, true);
+      fillRow(cRow, rowHex, true);
       const jRow = ws.addRow([r.job]);
       jRow.outlineLevel = 1;
       const cells: (string | number)[] = [
@@ -808,20 +979,22 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
         r.crewLead,
         r.woOverride ?? '',
         r.woPct ?? '',
-        r.percent === null ? '' : r.percent === 'HOURLY' ? 'HOURLY' : r.percent,
+        percentExcelValue(r.percent),
         '', // Round 7 — clear BALANCES/UT Notes data; keep header label
       ];
       cells.forEach((v, i) => {
         jRow.getCell(analysisStart + i).value = v;
       });
-      fillRow(jRow, r.colorHex);
-      paint(jRow.getCell(1), { ...(r.colorHex ? { fill: 'FF' + r.colorHex, color: textOn(r.colorHex) } : {}), bold: true });
+      fillRow(jRow, rowHex);
+      paint(jRow.getCell(1), { ...(rowHex ? { fill: 'FF' + rowHex, color: textOn(rowHex) } : {}), bold: true });
       const notesCell = jRow.getCell(lastCol);
       paint(notesCell, {
-        ...(r.colorHex ? { fill: 'FF' + r.colorHex } : {}),
-        color: r.colorHex && isDarkColor(r.colorHex) ? 'FFFFC7C7' : DARK_RED,
+        ...(rowHex ? { fill: 'FF' + rowHex } : {}),
+        color: rowHex && isDarkColor(rowHex) ? 'FFFFC7C7' : DARK_RED,
       });
       analysisFormats(jRow);
+      writePercentCell(jRow, { apKey: r.apKey, percent: r.percent, override: r.percentOverride });
+      textApCell(jRow);
       centerAnalysis(jRow);
       for (let c = 1; c <= lastCol; c++) {
         cRow.getCell(c).border = {
@@ -857,8 +1030,14 @@ const DEDUCT_RED = 'FFFF0000';
 
 const PP_FONT = 'Garamond';
 
-function buildPayrollPreviewSheet(wb: ExcelJS.Workbook, model: PayrollPreviewModel): void {
-  const ws = wb.addWorksheet('PAYROLL PREVIEW');
+function buildPayrollPreviewSheet(
+  wb: ExcelJS.Workbook,
+  model: PayrollPreviewModel,
+  // Round 8 §7.3 — `Payroll Preview - UT` renders through this exact writer.
+  sheetName = 'PAYROLL PREVIEW',
+  inputRefsByLeadKey?: ReadonlyMap<string, { hourlyCell: string; deductCell: string }>,
+): void {
+  const ws = wb.addWorksheet(sheetName);
   ws.columns = [{ width: 22 }, { width: 41.4 }, { width: 32.4 }, { width: 16.2 }, { width: 9.4 }, { width: 12 }, { width: 12 }, { width: 12 }];
   const baseFont = { name: PP_FONT, size: 12 };
 
@@ -1040,7 +1219,12 @@ function buildPayrollPreviewSheet(wb: ExcelJS.Workbook, model: PayrollPreviewMod
       'Work Order Override',
       ...block.jobs.map((j) => (j.workOrderOverride !== null && j.workOrderOverride !== undefined ? j.workOrderOverride : '')),
     ]).number;
-    const pctRow = ws.addRow(['% Completion', ...block.jobs.map((j) => j.percentCompletion)]).number;
+    // Round 8 §8.1 — SUBBED / SET RATE show the state instead of a %; their
+    // chain cells stay blank so the payroll clerk types the pay in.
+    const pctRow = ws.addRow([
+      '% Completion',
+      ...block.jobs.map((j) => (j.manualPay ? j.manualPay : j.percentCompletion)),
+    ]).number;
     const laborRow = ws.addRow(['- Labor + Wages', ...block.jobs.map((j) => j.laborWages)]).number;
     const milesRow = ws.addRow(['-Mileage', ...block.jobs.map((j) => j.mileage)]).number;
     const halfRow = ws.addRow(['-½ Materials', ...block.jobs.map((j) => j.halfMaterials)]).number;
@@ -1052,26 +1236,47 @@ function buildPayrollPreviewSheet(wb: ExcelJS.Workbook, model: PayrollPreviewMod
     ws.addRow([]);
     const totalRow = ws.addRow(['Total']).number;
     const mileNewRow = ws.addRow(['Mileage - New', block.mileageNew]).number;
-    const hourlyPayRow = ws.addRow(['Hourly Pay', block.hourlyPay]).number;
+    const hourlyPayRow = ws.addRow(['Hourly Pay']).number;
     const reimbRow = ws.addRow(['Reimbursements', block.reimbursements, block.reimbMemo]).number;
-    const deductRow = ws.addRow(['Deductions/Sundries', block.deductions, block.deductMemo]).number;
+    const deductRow = ws.addRow(['Deductions/Sundries']).number;
     const totalPayRow = ws.addRow(['Total Pay']).number;
+    const inputRef = inputRefsByLeadKey?.get(block.key);
+    if (inputRef) {
+      ws.getCell(`B${hourlyPayRow}`).value = inputNumsSheetFormula(inputRef.hourlyCell);
+      ws.getCell(`B${deductRow}`).value = inputNumsSheetFormula(inputRef.deductCell);
+    } else {
+      ws.getCell(`B${hourlyPayRow}`).value = block.hourlyPay;
+      ws.getCell(`B${deductRow}`).value = block.deductions;
+    }
+    ws.getCell(`C${deductRow}`).value = block.deductMemo;
     ws.addRow([]);
     const incomeRow = ws.addRow(['Total Income', ...block.jobs.map((j) => j.income)]).number;
     const matRow = ws.addRow(['Materials', ...block.jobs.map((j) => j.materials)]).number;
+    // Round 8 §8.5 — informational, directly beneath Materials.
+    ws.addRow(['Travel', ...block.jobs.map((j) => j.travel)]);
     ws.addRow(['QB Labor-Wages-Subs', ...block.jobs.map((j) => j.laborWages)]);
     ws.addRow(['Mileage in Books', ...block.jobs.map((j) => j.mileage)]);
     const pctMatRow = ws.addRow(['% Materials']).number;
 
     for (let i = 0; i < jobCount; i++) {
       const L = colLetter(1 + i); // B, C, …
-      ws.getCell(`${L}${psRow}`).value = { formula: `${L}${incomeRow}*${L}${hdrRow}` };
+      const job = block.jobs[i];
       const tps = ws.getCell(`${L}${tpsRow}`);
-      // Round 6 §6.2 — (WO Override if set else Profit Share) − Labor − ½ Materials.
-      // % Completion and Mileage are display-only (not in the chain).
-      tps.value = {
-        formula: `IF(${L}${woRow}="",${L}${psRow},${L}${woRow})-${L}${laborRow}-${L}${halfRow}`,
-      };
+      if (job?.manualPay) {
+        // SUBBED / SET RATE — no auto share; leave the cells open for typing.
+        ws.getCell(`${L}${psRow}`).value = null;
+        tps.value = null;
+      } else {
+        ws.getCell(`${L}${psRow}`).value = { formula: `${L}${incomeRow}*${L}${hdrRow}` };
+        // Round 8 §8.1 (SUPERSEDES Round 6 §6.2 / Round 7 §21) — % Completion
+        // now multiplies BOTH branches of the base, not just the override.
+        // Mileage stays display-only (not a term).
+        tps.value = {
+          // N() so the blank-override cell compares as 0 — in Excel raw text
+          // sorts above every number, so a bare `>0` would take the WO branch.
+          formula: `IF(N(${L}${woRow})>0,${L}${woRow}*${L}${pctRow},${L}${psRow}*${L}${pctRow})-${L}${halfRow}-${L}${laborRow}`,
+        };
+      }
       tps.font = { ...baseFont, bold: true };
       ws.getCell(`${L}${pctMatRow}`).value = {
         formula: `IF(${L}${incomeRow}=0,0,${L}${matRow}/${L}${incomeRow})`,
@@ -1103,7 +1308,11 @@ function buildPayrollPreviewSheet(wb: ExcelJS.Workbook, model: PayrollPreviewMod
     } else {
       totalCell.value = 0;
     }
-    ws.getCell(`B${totalPayRow}`).value = { formula: `SUM(B${totalRow}:B${deductRow})` };
+    // Round 8 §8.2 — Total + Hourly + Reimbursements − Deductions/Sundries.
+    // Mileage - New is display-only, and deductions are entered positive.
+    ws.getCell(`B${totalPayRow}`).value = {
+      formula: `B${totalRow}+B${hourlyPayRow}+B${reimbRow}-B${deductRow}`,
+    };
     for (const rn of [totalRow, mileNewRow, hourlyPayRow, reimbRow, deductRow]) {
       ws.getCell(`B${rn}`).numFmt = ACCOUNTING_FMT;
       ws.getCell(`A${rn}`).font = { ...baseFont, bold: rn === totalRow };

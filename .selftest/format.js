@@ -5,7 +5,17 @@ exports.fmtDateShort = fmtDateShort;
 exports.fmtAccounting = fmtAccounting;
 exports.fmtJobTotal = fmtJobTotal;
 exports.fmtMoney = fmtMoney;
+exports.isPercentNumber = isPercentNumber;
+exports.isPercentState = isPercentState;
+exports.isPercentText = isPercentText;
+exports.percentText = percentText;
+exports.percentTextValue = percentTextValue;
+exports.percentIsValidState = percentIsValidState;
+exports.percentExcelValue = percentExcelValue;
 exports.fmtPercent = fmtPercent;
+exports.normalizeStateText = normalizeStateText;
+exports.matchesSubbedOut = matchesSubbedOut;
+exports.matchesSetRate = matchesSetRate;
 exports.fmtHours = fmtHours;
 exports.fmtHoursFixed = fmtHoursFixed;
 exports.round2 = round2;
@@ -52,13 +62,79 @@ function fmtMoney(v) {
     const s = Math.abs(r).toLocaleString('en-US');
     return (r < 0 ? '-$' : '$') + s;
 }
-/** 0.95 → "95%", 'HOURLY' → "HOURLY", null → "" */
+// ---------------------------------------------------------------------------
+// % Completion values (Round 8 §2.3 / §2.4)
+// ---------------------------------------------------------------------------
+const PERCENT_STATES = ['HOURLY', 'SUBBED', 'SET RATE'];
+/** True for a numeric fraction (0.38 = 38%). */
+function isPercentNumber(v) {
+    return typeof v === 'number';
+}
+/** True for one of the literal states: HOURLY, SUBBED, SET RATE. */
+function isPercentState(v) {
+    return typeof v === 'string' && PERCENT_STATES.includes(v);
+}
+/** True for a free-text value the user typed (Round 8 §2.3). */
+function isPercentText(v) {
+    return typeof v === 'object' && v !== null && v.kind === 'text';
+}
+/** The verbatim text of a free-text value; null for every other variant. */
+function percentText(v) {
+    return isPercentText(v) ? v.text : null;
+}
+/**
+ * Wrap text verbatim. Use `parsePercentInput` for anything a user typed — it
+ * canonicalizes percents and the HOURLY / SUBBED / SET RATE states first.
+ */
+function percentTextValue(text) {
+    return { kind: 'text', text };
+}
+/**
+ * §2.4 — a cell holds a "valid" state when it has a nonzero %, or reads
+ * HOURLY / SUBBED / SET RATE. Blank, 0% and free text are invalid (red).
+ */
+function percentIsValidState(v) {
+    if (isPercentState(v))
+        return true;
+    return isPercentNumber(v) && v !== 0;
+}
+/** What a % cell writes into a worksheet: the fraction, or its text. */
+function percentExcelValue(v) {
+    if (v === null)
+        return '';
+    if (isPercentNumber(v))
+        return v;
+    if (isPercentState(v))
+        return v;
+    return v.text;
+}
+/** 0.95 → "95%", 'HOURLY' → "HOURLY", free text verbatim, null → "" */
 function fmtPercent(v) {
     if (v === null)
         return '';
-    if (v === 'HOURLY')
-        return 'HOURLY';
+    if (isPercentState(v))
+        return v;
+    if (isPercentText(v))
+        return v.text;
     return `${Math.round(v * 100)}%`;
+}
+/**
+ * Lowercase, drop punctuation/hyphens and collapse whitespace so that
+ * "Subbed-out", "SUBBED  OUT" and "set rate." all reduce to a plain phrase.
+ */
+function normalizeStateText(text) {
+    return text
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim();
+}
+/** §2.4 — forgiving "subbed out" match (also plain "subbed"). */
+function matchesSubbedOut(text) {
+    return /\bsubbed\b/.test(normalizeStateText(text));
+}
+/** §2.4 — forgiving "set rate" match. */
+function matchesSetRate(text) {
+    return /\bset rate\b/.test(normalizeStateText(text));
 }
 /** Hours with at most 2 decimals: 4.26, 20.08, 8 */
 function fmtHours(h) {
@@ -107,18 +183,32 @@ function dateToIso(d) {
     const dd = String(d.getDate()).padStart(2, '0');
     return `${d.getFullYear()}-${mm}-${dd}`;
 }
-/** Parse user input for a % cell: "95", "95%", "0.95", "hourly", "-", "". */
+/**
+ * Parse user input for a % cell (Round 8 §2.3 — free text allowed).
+ *
+ * - percent-looking input ("38", "38%", ".38", "0.38") → fraction
+ * - "hourly" (any case) → HOURLY; "subbed out" → SUBBED; "set rate" → SET RATE
+ * - blank / "-" → null
+ * - anything else → the text, stored and exported verbatim
+ */
 function parsePercentInput(text) {
     const t = text.trim();
     if (!t || t === '-')
         return null;
+    const m = /^(-?(?:\d+(?:\.\d+)?|\.\d+))\s*(%?)$/.exec(t);
+    if (m) {
+        const n = Number(m[1]);
+        if (m[2] === '%')
+            return n / 100;
+        return n > 1 ? n / 100 : n;
+    }
     if (/hourly/i.test(t))
         return 'HOURLY';
-    const m = /^(-?\d+(?:\.\d+)?)\s*%?$/.exec(t);
-    if (!m)
-        return null;
-    const n = Number(m[1]);
-    return n > 1 ? n / 100 : n;
+    if (matchesSubbedOut(t))
+        return 'SUBBED';
+    if (matchesSetRate(t))
+        return 'SET RATE';
+    return { kind: 'text', text: t };
 }
 /** Parse user input for a money cell: "$2,095.00", "2095". Null when invalid/blank. */
 function parseMoneyInput(text) {

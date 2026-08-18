@@ -1,6 +1,7 @@
-import { useState, type CSSProperties } from 'react';
+import type { CSSProperties } from 'react';
 import { fmtAccounting, isDarkColor, parseMoneyInput, parsePercentInput } from '../lib/format';
 import type { HourlyBlock, PayrollEdit, PayrollPreviewModel, PsBlock, SalaryBlock } from '../lib/types';
+import { CellInput } from './CellInput';
 
 interface PayrollPreviewProps {
   model: PayrollPreviewModel | null; // null → P&L not uploaded
@@ -24,34 +25,27 @@ function NumCell({
   onCommit,
   pct,
   className,
+  placeholder,
 }: {
   value: number | null;
   onCommit: (n: number | null) => void;
   pct?: boolean;
   className?: string;
+  placeholder?: string;
 }): JSX.Element {
-  const [text, setText] = useState<string | null>(null);
   const display = value === null ? '' : pct ? `${Math.round(value * 100)}%` : value.toFixed(2);
   return (
-    <input
-      className={`cell-input text-right ${className ?? ''}`}
-      value={text ?? display}
-      onChange={(e) => setText(e.target.value)}
-      onFocus={() => setText(display)}
-      onBlur={() => {
-        if (text !== null && text !== display) {
-          if (pct) {
-            const p = parsePercentInput(text);
-            onCommit(typeof p === 'number' ? p : null);
-          } else {
-            onCommit(parseMoneyInput(text));
-          }
+    <CellInput
+      value={display}
+      className={`text-right ${className ?? ''}`}
+      placeholder={placeholder}
+      onCommit={(text) => {
+        if (pct) {
+          const p = parsePercentInput(text);
+          onCommit(typeof p === 'number' ? p : null);
+        } else {
+          onCommit(parseMoneyInput(text));
         }
-        setText(null);
-      }}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-        if (e.key === 'Escape') setText(null);
       }}
     />
   );
@@ -123,20 +117,35 @@ function HourlyBlockView({
               >
                 {l.poText ?? (l.apKey ? `AP${l.apKey}` : '')}
               </td>
-              <td className={`xcell text-[11px] ${dotted} ${bodyCls}`}>{l.jobLabel}</td>
-              <td className={`xcell text-center ${l.ot ? 'bg-yellow-100' : bodyCls} ${dotted}`}>
+              <td className={`xcell text-[11px] ${dotted} ${bodyCls}`} title={l.dailyOtNote}>
+                {l.jobLabel}
+              </td>
+              <td
+                className={`xcell text-center ${l.ot ? 'bg-yellow-100' : l.dailyOt ? 'bg-orange-100' : bodyCls} ${dotted}`}
+                title={l.dailyOtNote}
+              >
                 <NumCell value={l.hours} onCommit={(n) => onEdit(`hl:${l.id}`, { hours: n ?? 0 })} className="text-center" />
               </td>
               <td
-                className={`xcell text-center ${l.rateDefaulted ? 'bg-amber-50' : bodyCls} ${l.belowPrevailing ? 'bg-red-100' : ''} ${l.fromJobRule ? 'ring-1 ring-inset ring-sky-300' : ''} ${dotted}`}
+                className={`xcell text-center ${l.rateDefaulted ? 'bg-amber-50' : bodyCls} ${l.belowPrevailing ? 'bg-red-100' : ''} ${l.fromJobRule || l.fromPerJobOverride || l.fromConditionalRule ? 'ring-1 ring-inset ring-sky-300' : ''} ${dotted}`}
                 title={
                   l.belowPrevailing
-                    ? 'Davis-Bacon job paid below the Davis-Bacon rate'
-                    : l.fromJobRule
+                  ? 'Davis-Bacon job paid below the Davis-Bacon rate'
+                  : l.fromPerJobOverride
+                    ? l.ruleNote
+                      ? `Per-job rate override: ${l.ruleNote}`
+                      : 'Per-job rate override applied'
+                    : l.fromConditionalRule
                       ? l.ruleNote
-                        ? `Job-rate rule: ${l.ruleNote}`
-                        : 'Job-rate rule applied'
-                      : l.prevailing
+                        ? `Conditional rate rule: ${l.ruleNote}`
+                        : 'Conditional rate rule applied'
+                    : l.fromJobRule
+                    ? l.ruleNote
+                      ? `Job-rate rule: ${l.ruleNote}`
+                      : 'Job-rate rule applied'
+                    : l.fromCrewLeadRate
+                    ? "Crew-lead rate — the lead's own hours on a profit-share job"
+                    : l.prevailing
                         ? 'Davis-Bacon job — rate = max(resolved, Davis-Bacon rate)'
                         : l.rateDefaulted
                           ? 'No configured wage rate — default applied'
@@ -220,8 +229,11 @@ function PsBlockView({ block, onEdit }: { block: PsBlock; onEdit: PayrollPreview
         </tr>
         <tr>
           {label('Profit Share')}
+          {/* Round 8 §8.1 — SUBBED / SET RATE pay nothing automatically. */}
           {block.jobs.map((j) => (
-            <td key={j.jobRowId} className="xcell text-right">{`$${fmtAccounting(j.profitShare)}`}</td>
+            <td key={j.jobRowId} className="xcell text-right">
+              {j.manualPay ? '' : `$${fmtAccounting(j.profitShare)}`}
+            </td>
           ))}
         </tr>
         <tr>
@@ -235,8 +247,23 @@ function PsBlockView({ block, onEdit }: { block: PsBlock; onEdit: PayrollPreview
         <tr>
           {label('% Completion')}
           {block.jobs.map((j) => (
-            <td key={j.jobRowId} className="xcell text-right">
-              <NumCell pct value={j.percentCompletion} onCommit={(n) => onEdit(psKey(j.jobRowId), { percentCompletion: n ?? 0 })} />
+            <td
+              key={j.jobRowId}
+              className={`xcell text-right ${j.missingPercent && !j.manualPay ? 'bg-red-50' : ''}`}
+              title={
+                j.missingPercent && !j.manualPay
+                  ? 'No % of Completion on the grid — the chain pays 0 rather than assuming 100%'
+                  : undefined
+              }
+            >
+              {/* The state shows as a placeholder; typing a % converts the job
+                  back to the computed chain. */}
+              <NumCell
+                pct
+                value={j.manualPay ? null : j.percentCompletion}
+                placeholder={j.manualPay ?? undefined}
+                onCommit={(n) => onEdit(psKey(j.jobRowId), { percentCompletion: n ?? 0 })}
+              />
             </td>
           ))}
         </tr>
@@ -270,14 +297,16 @@ function PsBlockView({ block, onEdit }: { block: PsBlock; onEdit: PayrollPreview
           {block.jobs.map((j) => (
             <td
               key={j.jobRowId}
-              className={`xcell text-right ${j.totalProfitShare < 25 ? 'bg-amber-100' : ''} ${j.dbFloorApplied ? 'bg-sky-50 ring-1 ring-inset ring-sky-400' : ''}`}
+              className={`xcell text-right ${!j.manualPay && j.totalProfitShare < 25 ? 'bg-amber-100' : ''} ${j.dbFloorApplied ? 'bg-sky-50 ring-1 ring-inset ring-sky-400' : ''}`}
               title={
-                j.dbFloorApplied
-                  ? `Davis-Bacon floor: profit share ${j.dbFloorPriorPay?.toFixed(2) ?? '?'} < ${j.dbFloorHours ?? 0}h × floor ${j.dbFloor?.toFixed(2) ?? '?'}`
-                  : undefined
+                j.manualPay
+                  ? `${j.manualPay} — no auto profit share; enter the pay manually`
+                  : j.dbFloorApplied
+                    ? `Davis-Bacon floor: profit share ${j.dbFloorPriorPay?.toFixed(2) ?? '?'} < ${j.dbFloorHours ?? 0}h × floor ${j.dbFloor?.toFixed(2) ?? '?'}`
+                    : undefined
               }
             >
-              {fmtAccounting(j.totalProfitShare)}
+              {j.manualPay ? '' : fmtAccounting(j.totalProfitShare)}
             </td>
           ))}
         </tr>
@@ -302,7 +331,7 @@ function PsBlockView({ block, onEdit }: { block: PsBlock; onEdit: PayrollPreview
         <tr className="font-semibold">
           <td className="xcell w-44">Hourly Pay</td>
           <td className="xcell text-right" colSpan={block.jobs.length} style={HOURLY_PAY_YELLOW}>
-            {fmtAccounting(block.hourlyPay)}
+            <NumCell value={block.hourlyPay} onCommit={(n) => onEdit(`psb:${block.key}`, { hourlyPay: n ?? 0 })} />
           </td>
         </tr>
         <tr>
@@ -318,7 +347,13 @@ function PsBlockView({ block, onEdit }: { block: PsBlock; onEdit: PayrollPreview
         </tr>
         {/* §5.6 — double line between Deductions/Sundries and Total Pay. */}
         <tr className="border-b-4 border-double border-b-neutral-600">
-          {label('Deductions/Sundries')}
+          {/* Round 8 §8.2 — entered POSITIVE, subtracted from Total Pay. */}
+          <td
+            className="xcell w-44 font-medium"
+            title="Entered as a positive amount and subtracted from Total Pay. Defaults to the P&L sundries for these jobs."
+          >
+            Deductions/Sundries
+          </td>
           <td className="xcell text-right text-[#FF0000]">
             <NumCell value={block.deductions} onCommit={(n) => onEdit(`psb:${block.key}`, { deductions: n ?? 0 })} className="text-[#FF0000]" />
           </td>
@@ -346,6 +381,13 @@ function PsBlockView({ block, onEdit }: { block: PsBlock; onEdit: PayrollPreview
             <td key={j.jobRowId} className="xcell text-right">
               <NumCell value={j.materials} onCommit={(n) => onEdit(psKey(j.jobRowId), { materials: n ?? 0 })} />
             </td>
+          ))}
+        </tr>
+        {/* Round 8 §8.5 — informational, directly beneath Materials. */}
+        <tr>
+          {label('Travel')}
+          {block.jobs.map((j) => (
+            <td key={j.jobRowId} className="xcell text-right">{fmtAccounting(j.travel)}</td>
           ))}
         </tr>
         <tr>
@@ -385,20 +427,12 @@ function SummaryRow({ label, value, span = 1, bold }: { label: string; value: st
 }
 
 function MemoCell({ value, onCommit }: { value: string; onCommit: (t: string) => void }): JSX.Element {
-  const [text, setText] = useState<string | null>(null);
   return (
-    <input
-      className="cell-input italic text-neutral-600"
+    <CellInput
+      value={value}
+      onCommit={onCommit}
+      className="italic text-neutral-600"
       placeholder="memo…"
-      value={text ?? value}
-      onChange={(e) => setText(e.target.value)}
-      onBlur={() => {
-        if (text !== null && text !== value) onCommit(text);
-        setText(null);
-      }}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-      }}
     />
   );
 }

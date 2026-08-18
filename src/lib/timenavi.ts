@@ -1,5 +1,11 @@
 import { normalizeApInput } from './apkey';
-import { dateDiffDays, dateOnly } from './format';
+import {
+  dateDiffDays,
+  dateOnly,
+  matchesSetRate,
+  matchesSubbedOut,
+  percentIsValidState,
+} from './format';
 import { buildSalesIndex } from './joins';
 import type {
   EditsMap,
@@ -43,7 +49,8 @@ function extractStatusLines(description: string): StatusLine[] {
 
 /**
  * Select the status line for the pay date: exact match first, else the latest
- * line dated on or before the pay date. Parse % or HOURLY from that line only.
+ * line dated on or before the pay date. Parse % / HOURLY / SUBBED / SET RATE
+ * from that line only (Round 8 §2.4).
  */
 export function suggestPercent(
   description: string,
@@ -71,6 +78,10 @@ export function suggestPercent(
     if (n >= 0 && n <= 100) return { value: n / 100, line: selected.line };
   }
   if (/hourly/i.test(text)) return { value: 'HOURLY', line: selected.line };
+  // §2.4 — the slot where the % normally sits can instead read "subbed out"
+  // or "set rate"; both are valid states, not missing data.
+  if (matchesSubbedOut(text)) return { value: 'SUBBED', line: selected.line };
+  if (matchesSetRate(text)) return { value: 'SET RATE', line: selected.line };
   return { value: null, line: selected.line };
 }
 
@@ -164,12 +175,11 @@ export function buildReportRows(
     const matchedTotal = nvTotal ?? utTotal ?? 0;
     const jobTotal: JobTotalValue = jobTotalFound ? matchedTotal : '#N/A';
 
+    // Round 8 §2.2 — Apptivo $ is blank until someone types it; no auto-fill
+    // from the job-total lookup, so $ Difference stays blank too (and the
+    // Round 4 pink flag never fires off a blank pair).
     const apptivoEdited = edit.apptivo !== undefined;
-    const apptivo: number | null = apptivoEdited
-      ? (edit.apptivo ?? null)
-      : jobTotalFound
-        ? matchedTotal
-        : null;
+    const apptivo: number | null = apptivoEdited ? (edit.apptivo ?? null) : null;
 
     const dollarDiff =
       jobTotalFound && apptivo !== null ? matchedTotal - apptivo : null;
@@ -225,6 +235,20 @@ export function sortReportRows(rows: ReportRow[], estimatorOrder: string[]): Rep
 
 export { normalizeApInput };
 
+// Round 8 §2.3 — % Completion value helpers live in format.ts; re-exported here
+// so grid/export consumers can pull them from either module.
+export {
+  isPercentNumber,
+  isPercentState,
+  isPercentText,
+  matchesSetRate,
+  matchesSubbedOut,
+  percentExcelValue,
+  percentIsValidState,
+  percentText,
+  percentTextValue,
+} from './format';
+
 // ---------------------------------------------------------------------------
 // Round 4 §1.1 — pink review flags (shared by the grid and the export)
 // ---------------------------------------------------------------------------
@@ -233,6 +257,14 @@ export { normalizeApInput };
 export function percentIsFlagged(v: ReportRow['percent']): boolean {
   if (v === 'HOURLY') return true;
   return typeof v === 'number' && (v > 1 || v < 0);
+}
+
+/**
+ * Round 8 §2.4 — `% Completion` turns solid red (white bold text) when it holds
+ * no valid state: blank, 0%, or text that isn't HOURLY / SUBBED / SET RATE.
+ */
+export function percentIsRedFlagged(v: ReportRow['percent']): boolean {
+  return !percentIsValidState(v);
 }
 
 /**

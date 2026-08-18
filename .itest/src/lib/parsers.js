@@ -34,6 +34,7 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.readWorkbook = readWorkbook;
+exports.rowHasExclusionGray = rowHasExclusionGray;
 exports.parseDate = parseDate;
 exports.parseNumberLoose = parseNumberLoose;
 exports.parseTimesheet = parseTimesheet;
@@ -46,6 +47,8 @@ exports.parsePl = parsePl;
 exports.parseEmployeeList = parseEmployeeList;
 const XLSX = __importStar(require("xlsx"));
 const apkey_1 = require("./apkey");
+const fills_1 = require("./fills");
+const settings_1 = require("./settings");
 // ---------------------------------------------------------------------------
 // Workbook reading (SheetJS handles both .xlsx and .csv transparently)
 // ---------------------------------------------------------------------------
@@ -58,11 +61,61 @@ function readWorkbook(buffer) {
         const raw = ws
             ? XLSX.utils.sheet_to_json(ws, { header: 1, defval: null, raw: true, blankrows: true })
             : [];
-        return { name, rows: raw.map((r) => r.map(toCellValue)) };
+        return {
+            name,
+            rows: raw.map((r) => r.map(toCellValue)),
+            fills: ws ? readSheetFills(ws) : undefined,
+        };
     });
     if (sheets.length === 0)
         throw new Error('The file contains no sheets.');
     return { sheets };
+}
+/** Fills are only useful for hand-colored report sheets; skip enormous grids. */
+const MAX_FILL_CELLS = 400000;
+/**
+ * Round 8 §4.1 — per-cell foreground fills aligned to the `sheet_to_json`
+ * grid. Returns undefined when the file carries no styles (CSV, or a writer
+ * that never emitted fills) so callers can cheaply skip the lookup.
+ */
+function readSheetFills(ws) {
+    const ref = ws['!ref'];
+    if (!ref)
+        return undefined;
+    const range = XLSX.utils.decode_range(ref);
+    const cells = (range.e.r - range.s.r + 1) * (range.e.c - range.s.c + 1);
+    if (!Number.isFinite(cells) || cells <= 0 || cells > MAX_FILL_CELLS)
+        return undefined;
+    const grid = [];
+    let found = false;
+    for (let r = range.s.r; r <= range.e.r; r++) {
+        const row = [];
+        for (let c = range.s.c; c <= range.e.c; c++) {
+            const cell = ws[XLSX.utils.encode_cell({ r, c })];
+            const style = cell?.s;
+            const fg = style?.fgColor;
+            if (!fg || style?.patternType === 'none') {
+                row.push(null);
+                continue;
+            }
+            found = true;
+            row.push({
+                rgb: fg.rgb ?? null,
+                theme: fg.theme ?? null,
+                tint: fg.tint ?? null,
+                patternType: style?.patternType ?? null,
+            });
+        }
+        grid.push(row);
+    }
+    return found ? grid : undefined;
+}
+/** True when any of the given columns on this row carries the A6A6A6 gray. */
+function rowHasExclusionGray(sheet, rowIndex, cols) {
+    const fillRow = sheet.fills?.[rowIndex];
+    if (!fillRow)
+        return false;
+    return cols.some((c) => c !== undefined && (0, fills_1.isExclusionGray)(fillRow[c] ?? null));
 }
 /**
  * Text files (CSV) without a byte-order mark are decoded by SheetJS as
@@ -84,7 +137,8 @@ function readRaw(buffer) {
             // Not valid UTF-8 — fall through to the binary reader (cp1252 etc.).
         }
     }
-    return XLSX.read(bytes, { type: 'array', cellDates: true });
+    // cellStyles keeps `cell.s` so §4.1 can see the A6A6A6 exclusion fill.
+    return XLSX.read(bytes, { type: 'array', cellDates: true, cellStyles: true });
 }
 /**
  * QuickBooks exports leave literal strings like "=650" or "=(B2)+(B3)" in
@@ -560,18 +614,22 @@ function parseLastWeekPivotByJob(wbd) {
     const out = [];
     let section = 'pivot';
     let prevNonApText = '';
-    for (const row of sheet.rows) {
+    let prevNonApRow = -1;
+    for (let i = 0; i < sheet.rows.length; i++) {
+        const row = sheet.rows[i];
         if (!row || isEmptyRow(row))
             continue;
         const a = asString(row[0]);
         if (/^NV PAYROLL \(BALANCES\)/i.test(a)) {
             section = 'balances';
             prevNonApText = '';
+            prevNonApRow = -1;
             continue;
         }
         if (/^UT PAYROLL/i.test(a)) {
             section = 'ut';
             prevNonApText = '';
+            prevNonApRow = -1;
             continue;
         }
         const apRaw = cellAt(row, apCol);
@@ -579,8 +637,10 @@ function parseLastWeekPivotByJob(wbd) {
             continue; // repeated header rows
         const apKey = apRaw == null || apRaw === '' ? null : (0, apkey_1.normalizeApInput)(String(apRaw));
         if (!apKey) {
-            if (a && !/^(row labels|grand total|sum of hours|nv payroll)/i.test(a))
+            if (a && !/^(row labels|grand total|sum of hours|nv payroll)/i.test(a)) {
                 prevNonApText = a;
+                prevNonApRow = i;
+            }
             continue;
         }
         const wo = parseNumberLoose(cellAt(row, woCol));
@@ -596,29 +656,121 @@ function parseLastWeekPivotByJob(wbd) {
             woPct: typeof woPct === 'number' ? woPct : null,
             percent: parsePercentCell(cellAt(row, pctCol)),
             notes: asString(cellAt(row, notesCol)),
+            // §4.1 — the pair is painted as a unit; either half counts.
+            excludedFromPayroll: rowHasExclusionGray(sheet, i, [0, apCol]) ||
+                (prevNonApRow >= 0 && rowHasExclusionGray(sheet, prevNonApRow, [0])),
         });
+        // §4.3 — below Grand Total each job owns its customer row; consume the
+        // label so the next AP# cannot inherit this job's customer.
+        if (section !== 'pivot') {
+            prevNonApText = '';
+            prevNonApRow = -1;
+        }
     }
     return out;
 }
 // ---------------------------------------------------------------------------
 // Slot 8 — P&L "Profit and Loss by Customer" (QBO, wide layout)
 // ---------------------------------------------------------------------------
-/** Account rows summed per metric (trimmed, case-insensitive; missing = 0). */
-const PL_MATERIALS_ROWS = [
-    'equipment rental for jobs',
-    'job materials purchased',
-    'other job related costs',
-    'paint',
-    'sundries -',
-    'tools and small equipment',
-];
-const PL_LABOR_ROWS = ['employee labor', 'subcontractor labor', 'wages'];
-function parsePl(wbd) {
+/**
+ * Round 8 §7.1 — the widest number of QBO title rows we will scan past when
+ * looking for the header row. The Round 3/6/7 exports carry three (company /
+ * report name / date range); the new per-entity exports carry NONE — the
+ * header IS row 1 and `Income` sits at A2.
+ */
+const PL_MAX_TITLE_ROWS = 4;
+/**
+ * The header row is the nearest row at or above `Income` that actually carries
+ * job columns (headers with an AP number). Scanning for AP columns rather than
+ * counting title rows is what makes 0–4 title rows all work: with zero titles
+ * the very first row matches, and with three the two dateline/company rows in
+ * between are skipped because they carry no AP numbers.
+ */
+function findPlHeaderRow(rows, incomeRow) {
+    const stopAt = Math.max(0, incomeRow - (PL_MAX_TITLE_ROWS + 1));
+    for (let i = incomeRow - 1; i >= stopAt; i--) {
+        const r = rows[i];
+        if (!r)
+            continue;
+        for (let c = 1; c < r.length; c++) {
+            if ((0, apkey_1.extractApKey)(asString(r[c])))
+                return i;
+        }
+    }
+    return incomeRow - 1;
+}
+/** Lowercased, trimmed label set for one metric of the mapping. */
+function labelSet(labels) {
+    const out = new Set();
+    for (const l of labels) {
+        const t = l.trim().toLowerCase();
+        if (t)
+            out.add(t);
+    }
+    return out;
+}
+/** Section headers / roll-ups that are structure, never mappable accounts. */
+function isCogsStructureRow(label) {
+    return /^total\b/i.test(label) || /^cost of goods sold$/i.test(label) || /^cogs$/i.test(label);
+}
+/**
+ * Round 8 §7.1 — COGS rows the mapping never mentions. UT's `Reimbursements`
+ * lands here by design: the row exists in the file, feeds no metric, and would
+ * otherwise vanish without a trace.
+ */
+function findUnmappedCogsRows(rows, startRow, mapping) {
+    const mapped = labelSet([
+        ...mapping.income,
+        ...mapping.materials,
+        ...mapping.laborWagesSubs,
+        ...mapping.sundries,
+        ...mapping.travel,
+        ...mapping.mileage,
+    ]);
+    const out = [];
+    const seen = new Set();
+    let inCogs = false;
+    for (let i = startRow; i < rows.length; i++) {
+        const label = asString(rows[i]?.[0]);
+        if (!label)
+            continue;
+        if (/^cost of goods sold$/i.test(label) || /^cogs$/i.test(label)) {
+            inCogs = true;
+            continue;
+        }
+        if (!inCogs)
+            continue;
+        if (/^total cost of goods sold$/i.test(label) || /^total cogs$/i.test(label))
+            break;
+        // A new top-level section also ends COGS (defensive: some exports omit the total).
+        if (/^(gross profit|expenses|other income|other expenses|net income)$/i.test(label))
+            break;
+        if (isCogsStructureRow(label))
+            continue;
+        const key = label.toLowerCase();
+        if (mapped.has(key) || seen.has(key))
+            continue;
+        seen.add(key);
+        out.push(label);
+    }
+    return out;
+}
+function parsePl(wbd, opts = {}) {
     const sheet = wbd.sheets[0];
-    // The header row sits immediately above the row whose column A reads
-    // "Income" (title rows above it never do).
+    const entity = opts.entity ?? 'NV';
+    const mapping = opts.mapping ?? settings_1.DEFAULT_PL_ACCOUNT_MAPPING[entity];
+    // Round 3 §2 kept sundries inside `materials`; the Round 8 payroll chain
+    // un-folds them (see plMetricsByJob), so the legacy summary stays as-is.
+    const materialsLabels = [...labelSet([...mapping.materials, ...mapping.sundries])];
+    const laborLabels = [...labelSet(mapping.laborWagesSubs)];
+    const incomeLabels = [...labelSet(mapping.income)];
+    const mileageLabels = [...labelSet(mapping.mileage)];
+    const sundriesLabels = [...labelSet(mapping.sundries)];
+    const travelLabels = [...labelSet(mapping.travel)];
+    // The header row sits above the row whose column A reads "Income"; the QBO
+    // export may carry 0–4 title rows above that header.
     let incomeRow = -1;
-    for (let i = 1; i < sheet.rows.length; i++) {
+    for (let i = 0; i < sheet.rows.length; i++) {
         const r = sheet.rows[i];
         if (r && asString(r[0]).toLowerCase() === 'income') {
             incomeRow = i;
@@ -628,7 +780,8 @@ function parsePl(wbd) {
     if (incomeRow < 1) {
         throw new Error('Could not find the "Income" row. Expected a raw QBO "Profit and Loss by Customer" export (jobs as columns, accounts as rows).');
     }
-    const headerRow = sheet.rows[incomeRow - 1];
+    const headerRowIndex = findPlHeaderRow(sheet.rows, incomeRow);
+    const headerRow = sheet.rows[headerRowIndex];
     // Job columns: header matches the AP regex; "Total …" and customer columns
     // without an AP are skipped (they roll up jobs anyway). Track the nearest
     // preceding customer header for Round 5 §4 step 5 naming.
@@ -671,13 +824,15 @@ function parsePl(wbd) {
     const duplicateColumns = [];
     for (const jc of jobCols) {
         const metrics = {
-            income: valueAt('total income', jc.col),
-            materials: sumAt(PL_MATERIALS_ROWS, jc.col),
-            laborWagesSubs: sumAt(PL_LABOR_ROWS, jc.col),
-            mileage: valueAt('mileage expense', jc.col),
-            sundries: valueAt('sundries -', jc.col),
+            income: sumAt(incomeLabels, jc.col),
+            materials: sumAt(materialsLabels, jc.col),
+            laborWagesSubs: sumAt(laborLabels, jc.col),
+            mileage: sumAt(mileageLabels, jc.col),
+            sundries: sumAt(sundriesLabels, jc.col),
+            travel: sumAt(travelLabels, jc.col),
             plJobHeader: jc.header,
             customerName: jc.customerName,
+            plEntity: entity,
         };
         const existing = byJob.get(jc.apKey);
         if (existing) {
@@ -690,8 +845,10 @@ function parsePl(wbd) {
                 laborWagesSubs: existing.laborWagesSubs + metrics.laborWagesSubs,
                 mileage: existing.mileage + metrics.mileage,
                 sundries: existing.sundries + metrics.sundries,
+                travel: existing.travel + metrics.travel,
                 plJobHeader: existing.plJobHeader,
                 customerName: existing.customerName || metrics.customerName,
+                plEntity: entity,
             });
         }
         else {
@@ -723,7 +880,14 @@ function parsePl(wbd) {
         }
         accountRows.push({ label, values });
     }
-    return { byJob, duplicateColumns, columnHeaders, accountRows };
+    return {
+        byJob,
+        duplicateColumns,
+        columnHeaders,
+        accountRows,
+        entity,
+        unmappedCogsRows: findUnmappedCogsRows(sheet.rows, incomeRow, mapping),
+    };
 }
 // ---------------------------------------------------------------------------
 // Slot 9 — Employee Name List (QB Time employee directory)

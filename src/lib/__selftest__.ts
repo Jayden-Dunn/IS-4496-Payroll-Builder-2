@@ -3,14 +3,33 @@
  * dev server starts (see main.tsx) and logs pass/fail to the console.
  */
 import { extractApKey, normalizeApInput, timesheetApKey } from './apkey';
-import { dateDiffDays, isDarkColor, parsePercentInput } from './format';
+import {
+  dateDiffDays,
+  isDarkColor,
+  isPercentText,
+  matchesSetRate,
+  matchesSubbedOut,
+  parsePercentInput,
+  percentText,
+} from './format';
 import {
   findPbjHeaderRow,
   parseCompletedPercentsWorkbook,
 } from './completedPercents';
-import { parseDate, parseNumberLoose } from './parsers';
+import { customerByApFromSalesSummary } from './customerByAp';
+import { excelColumnLetter, percentsExportFilename, payrollExportFilename, timeNaviPercentFormula } from './exportXlsx';
+import { inputNumbersCellRefs, inputNumsSheetFormula } from './exportRound6Sheets';
+import { isExclusionGray, resolveThemeTintToRgb } from './fills';
+import type { SalesByCustMirrorRow } from './mirrorTabs';
+import {
+  parseDate,
+  parseLastWeekPivotByJob,
+  parseNumberLoose,
+  type LastWeekPbjRow,
+} from './parsers';
 import {
   applyDavisBaconLeadFloor,
+  computeTotalPay,
   computeTotalProfitShare,
   extractLeadParenthetical,
   extractWoOverride,
@@ -20,6 +39,7 @@ import {
   profitSharePctFor,
   resolveCrewLead,
   resolveLineRate,
+  splitDailyOvertime,
   splitLeadCandidates,
   splitOvertime,
   stripSingleLetterTokens,
@@ -29,7 +49,15 @@ import {
 } from './payroll';
 import { buildPayrollPreview } from './payrollPreview';
 import { buildPrFinalCheckRows } from './prFinalCheck';
-import { formatTimeNaviRow, parseTimeNaviRowRef } from './pivotByJob';
+import {
+  buildPivotByJob,
+  carriedSectionFor,
+  EMPTY_MANUAL_STATE,
+  formatTimeNaviRow,
+  parseTimeNaviRowRef,
+  pbjJobId,
+  type PivotByJobInput,
+} from './pivotByJob';
 import { orderLeadFirst } from './pivot';
 import { applyPivotView, EMPTY_PIVOT_VIEW } from './pivotView';
 import {
@@ -38,19 +66,22 @@ import {
   jobDisplayPair,
   type JobDisplaySources,
 } from './jobNames';
-import { defaultSettings } from './settings';
+import { defaultSettings, DEFAULT_LEGEND, DEFAULT_PAINTER_ROSTER } from './settings';
 import {
   dollarDiffIsFlagged,
   duplicateInQboValues,
   estimatorFromTitle,
   extractTitleInitials,
   percentIsFlagged,
+  percentIsRedFlagged,
   suggestPercent,
 } from './timenavi';
 import type {
   CellValue,
   DirectoryEmployee,
   EnrichedTimesheetRow,
+  ManualSectionRow,
+  PercentValue,
   PivotByJobModel,
   PivotModel,
   PlParseResult,
@@ -71,6 +102,9 @@ export function runSelfTests(): boolean {
     const e = JSON.stringify(expected);
     results.push({ name, pass: a === e, detail: a === e ? undefined : `expected ${e}, got ${a}` });
   };
+  /** Trim float noise so money comparisons survive JSON round-tripping. */
+  const round2ish = (n: number | null): number | null =>
+    n === null ? null : Math.round(n * 1e6) / 1e6;
 
   // --- apKey extraction -----------------------------------------------------
   check('apKey: plain', extractApKey('AP24314 Ext'), '24314');
@@ -159,6 +193,60 @@ export function runSelfTests(): boolean {
   check('pct input: 0.95', parsePercentInput('0.95'), 0.95);
   check('pct input: hourly', parsePercentInput('Hourly'), 'HOURLY');
   check('pct input: dash', parsePercentInput('-'), null);
+
+  // --- Round 8 §2.3: % Completion free text ------------------------------------
+  check('pct free: 38%', parsePercentInput('38%'), 0.38);
+  check('pct free: .38', parsePercentInput('.38'), 0.38);
+  check('pct free: 38', parsePercentInput('38'), 0.38);
+  check('pct free: 0% stays zero', parsePercentInput('0%'), 0);
+  check('pct free: hourly any case', parsePercentInput('hOuRlY'), 'HOURLY');
+  check('pct free: arbitrary text kept verbatim', parsePercentInput('waiting on Jose'), {
+    kind: 'text',
+    text: 'waiting on Jose',
+  });
+  check('pct free: text predicate', isPercentText(parsePercentInput('see notes')), true);
+  check('pct free: text accessor', percentText(parsePercentInput('  see notes  ')), 'see notes');
+  check('pct free: number is not text', isPercentText(0.38), false);
+  check('pct free: blank still null', parsePercentInput('   '), null);
+
+  // --- Round 8 §2.4: SUBBED / SET RATE forgiving matching ----------------------
+  check('subbed: plain', matchesSubbedOut('subbed out'), true);
+  check('subbed: hyphenated + case', matchesSubbedOut('Subbed-out'), true);
+  check('subbed: double space + caps', matchesSubbedOut('SUBBED  OUT'), true);
+  check('subbed: inside a status line', matchesSubbedOut('7/10/26 subbed out to Pepe'), true);
+  check('subbed: unrelated text', matchesSubbedOut('substitute crew'), false);
+  check('set rate: trailing period', matchesSetRate('set rate.'), true);
+  check('set rate: caps + extra spaces', matchesSetRate('  SET   RATE  '), true);
+  check('set rate: hyphenated', matchesSetRate('Set-Rate'), true);
+  check('set rate: unrelated text', matchesSetRate('rate set by Jodi'), false);
+  check('pct input: subbed out → SUBBED', parsePercentInput('Subbed-out'), 'SUBBED');
+  check('pct input: set rate → SET RATE', parsePercentInput('set rate.'), 'SET RATE');
+  check(
+    '%: description "subbed out" on the selected line',
+    suggestPercent('7/10/26 subbed out to Pepe', day(7, 10, 2026)).value,
+    'SUBBED',
+  );
+  check(
+    '%: description "set rate" on the selected line',
+    suggestPercent('7/10/26 Set Rate - no % tracking', day(7, 10, 2026)).value,
+    'SET RATE',
+  );
+  check(
+    '%: a real % on the line still wins over subbed wording',
+    suggestPercent('7/10/26 30% complete, rest subbed out', day(7, 10, 2026)).value,
+    0.3,
+  );
+
+  // --- Round 8 §2.4: invalid-% red predicate ----------------------------------
+  check('red %: blank', percentIsRedFlagged(null), true);
+  check('red %: zero', percentIsRedFlagged(0), true);
+  check('red %: free text', percentIsRedFlagged({ kind: 'text', text: '??' }), true);
+  check('red %: valid fraction', percentIsRedFlagged(0.38), false);
+  check('red %: over 100% is valid (pink, not red)', percentIsRedFlagged(1.5), false);
+  check('red %: HOURLY', percentIsRedFlagged('HOURLY'), false);
+  check('red %: SUBBED', percentIsRedFlagged('SUBBED'), false);
+  check('red %: SET RATE', percentIsRedFlagged('SET RATE'), false);
+  check('red %: cleared by a manual edit', percentIsRedFlagged(parsePercentInput('38%')), false);
 
   // --- title initials ----------------------------------------------------------------
   check('initials: (XC)', extractTitleInitials('♦Int 13k (XC) Regina Conrad, AP24180-A (Daniel)'), 'XC');
@@ -403,6 +491,7 @@ export function runSelfTests(): boolean {
     'Ted Frank/Rafael Aguilar',
   );
   check("titleCase: sub keeps its stored text", titleCaseLeadName("PEPE'S PAINTING LLC", [], ["Pepe's Painting LLC"]), "Pepe's Painting LLC");
+  check('titleCase: unmatched ALL CAPS still Title Case', titleCaseLeadName('CARLOS RUIZ CRUZ', [], []), 'Carlos Ruiz Cruz');
 
   // --- Round 4 §5.8: prevailing-wage rate chain --------------------------------------------------
   const pwSettings = {
@@ -442,40 +531,92 @@ export function runSelfTests(): boolean {
     { rate: 18, defaulted: true, prevailing: false },
   );
 
-  // --- Round 6 §6.2: profit-share chain ----------------------------------------------------------
-  check(
-    '§6.2 Antonio: PS − labor − ½mat → 200.165',
+  // --- Round 8 §8.1: profit-share chain (supersedes Round 6 §6.2) --------------------------------
+  const antonioChain = (percent: PercentValue): ReturnType<typeof computeTotalProfitShare> =>
     computeTotalProfitShare({
       profitShare: 432,
       workOrderOverride: null,
       laborWages: 188.11,
       halfMaterials: 43.725,
-      percentCompletion: 1,
+      percent,
       mileage: 12.5,
-    }),
-    200.165,
-  );
+    });
+  check('§8.1 Antonio @100%: reproduces the Round 6 anchor 200.165', antonioChain(1).total, 200.165);
   check(
-    '§6.2 % Completion + mileage do not change TPS',
-    computeTotalProfitShare({
-      profitShare: 432,
-      workOrderOverride: null,
-      laborWages: 188.11,
-      halfMaterials: 43.725,
-      percentCompletion: 0.5,
-      mileage: 999,
-    }),
-    200.165,
+    '§8.1 Antonio @50%: base term halves (432*.5 − 188.11 − 43.725)',
+    round2ish(antonioChain(0.5).total),
+    round2ish(432 * 0.5 - 188.11 - 43.725),
   );
+  check('§8.1 mileage is displayed, never a term', antonioChain(1).base, 432);
   check(
-    '§6.2 WO override wins when set',
+    '§8.1 WO override multiplies by % too',
     computeTotalProfitShare({
       profitShare: 432,
       workOrderOverride: 500,
       laborWages: 100,
       halfMaterials: 50,
+      percent: 0.5,
     }),
+    { total: 100, base: 500, percentCompletion: 0.5, manualPay: null, missingPercent: false },
+  );
+  check(
+    '§8.1 WO override @100% = Round 6 behaviour',
+    computeTotalProfitShare({
+      profitShare: 432,
+      workOrderOverride: 500,
+      laborWages: 100,
+      halfMaterials: 50,
+      percent: 1,
+    }).total,
     350,
+  );
+  for (const state of ['SUBBED', 'SET RATE'] as const) {
+    const r = computeTotalProfitShare({
+      profitShare: 432,
+      workOrderOverride: null,
+      laborWages: 188.11,
+      halfMaterials: 43.725,
+      percent: state,
+    });
+    check(`§8.1 ${state}: blank total + manualPay flag`, [r.total, r.manualPay, r.missingPercent], [
+      null,
+      state,
+      false,
+    ]);
+  }
+  const blankPct = antonioChain(null);
+  check(
+    '§8.1 blank % → pays 0 of the base (never 100%) + missingPercent',
+    [blankPct.percentCompletion, blankPct.missingPercent, round2ish(blankPct.total)],
+    [0, true, round2ish(-188.11 - 43.725)],
+  );
+  check(
+    '§8.1 free text % → treated as blank',
+    computeTotalProfitShare({
+      profitShare: 432,
+      workOrderOverride: null,
+      laborWages: 0,
+      halfMaterials: 0,
+      percent: { kind: 'text', text: 'see notes' },
+    }),
+    { total: 0, base: 432, percentCompletion: 0, manualPay: null, missingPercent: true },
+  );
+
+  // --- Round 8 §8.2: Total Pay subtracts Deductions/Sundries -------------------------------------
+  check(
+    '§8.2 deductions are entered positive and SUBTRACTED',
+    computeTotalPay({ total: 1000, hourlyPay: 200, reimbursements: 50, deductions: 75 }),
+    1175,
+  );
+  check(
+    '§8.2 no deductions → total + hourly + reimbursements',
+    computeTotalPay({ total: 1000, hourlyPay: 200, reimbursements: 50, deductions: 0 }),
+    1250,
+  );
+  check(
+    '§8.2 deductions can push pay below the profit share',
+    computeTotalPay({ total: 500, hourlyPay: 0, reimbursements: 0, deductions: 120 }),
+    380,
   );
 
   // --- Round 6 §7.1 Branch 1 + §7.2 job rules ----------------------------------------------------
@@ -542,6 +683,196 @@ export function runSelfTests(): boolean {
     false,
   );
 
+  // --- Round 8 §9.1: three crew-lead rates -------------------------------------------------------
+  const r9 = {
+    wageRates: [
+      { name: 'Antonio Zuniga', rate: 16, hourlyRate: 27, crewLeadRate: 21 },
+      { name: 'Rafael Aguilar', rate: 25 },
+      { name: 'Hilda Ruiz', rate: 16 },
+    ],
+    defaultWageRate: 18,
+    defaultCrewLeadRate: 18,
+    prevailingWagePatterns: ['SNRHA'],
+    prevailingMinRate: 19.18,
+  };
+  check(
+    '§9.1 lead on an HOURLY job → hourly-jobs rate',
+    resolveLineRate('ANTONIO ZUNIGA', 'AP24000 T&M repair', true, { ...r9, isCrewLead: true }).rate,
+    27,
+  );
+  check(
+    "§9.1 lead's T-SHEETS on a profit-share job → crew-lead rate",
+    resolveLineRate('ANTONIO ZUNIGA', 'AP24314 Ext', false, { ...r9, isCrewLead: true }),
+    { rate: 21, defaulted: false, prevailing: false, fromCrewLeadRate: true },
+  );
+  check(
+    '§9.1 lead without a crewLeadRate falls back to the global 18',
+    resolveLineRate('RAFAEL AGUILAR', 'AP24314 Ext', false, { ...r9, isCrewLead: true }).rate,
+    18,
+  );
+  check(
+    '§9.1 helper on a profit-share job → their painter rate',
+    resolveLineRate('ANTONIO ZUNIGA', 'AP24314 Ext', false, r9).rate,
+    16,
+  );
+  check(
+    '§9.1 helper with no hourlyRate on an HOURLY job → default',
+    resolveLineRate('HILDA RUIZ', 'AP24000 T&M repair', true, r9).rate,
+    18,
+  );
+  check(
+    '§9.1 SNRHA substring floors a $16 painter at 19.18',
+    resolveLineRate('ANTONIO ZUNIGA', 'AP24393 SNRHA *SS* 210 N 16th', false, r9).rate,
+    19.18,
+  );
+  check(
+    '§9.1 SNRHA never LOWERS a $25 painter',
+    resolveLineRate('RAFAEL AGUILAR', 'AP24393 SNRHA *SS*', false, r9).rate,
+    25,
+  );
+  check(
+    '§9.1 conditional rule beats the generic rates',
+    resolveLineRate('HILDA RUIZ', 'AP24314 Ext', false, {
+      ...r9,
+      jobLeadNames: ['ANTONIO ZUNIGA'],
+      conditionalRateRules: [
+        {
+          id: 'c1',
+          person: 'Hilda Ruiz',
+          rate: 23,
+          condition: { kind: 'onSameJobAsLead' as const, leadName: 'Antonio Zuniga' },
+          note: "Hilda on Antonio's jobs",
+        },
+      ],
+    }),
+    {
+      rate: 23,
+      defaulted: false,
+      prevailing: false,
+      fromConditionalRule: true,
+      ruleNote: "Hilda on Antonio's jobs",
+    },
+  );
+  check(
+    '§9.1 conditional rule needs the named lead on the job',
+    resolveLineRate('HILDA RUIZ', 'AP24314 Ext', false, {
+      ...r9,
+      jobLeadNames: ['TED FRANK'],
+      conditionalRateRules: [
+        {
+          id: 'c1',
+          person: 'Hilda Ruiz',
+          rate: 23,
+          condition: { kind: 'onSameJobAsLead' as const, leadName: 'Antonio Zuniga' },
+          note: '',
+        },
+      ],
+    }).rate,
+    16,
+  );
+  const perJobSettings = {
+    ...r9,
+    apKey: '24314',
+    jobRateRules: [
+      { id: 'j1', apKey: '24314', rate: 22, employeeNames: [] as string[], includeSuffixes: true, note: 'job rule' },
+    ],
+    perJobRateOverrides: [
+      { id: 'o1', person: 'Hilda Ruiz', apKeyPattern: '24314', rate: 26, note: 'Hilda AP24314' },
+    ],
+  };
+  check(
+    '§9.1 per-job override outranks the job-scoped rule',
+    resolveLineRate('HILDA RUIZ', 'AP24314 Ext', false, perJobSettings),
+    { rate: 26, defaulted: false, prevailing: false, fromPerJobOverride: true, ruleNote: 'Hilda AP24314' },
+  );
+  check(
+    '§9.1 someone else on the same job still gets the job rule',
+    resolveLineRate('RAFAEL AGUILAR', 'AP24314 Ext', false, perJobSettings).rate,
+    22,
+  );
+  check(
+    '§9.1 DB max-wrap sits above the per-job override',
+    resolveLineRate('HILDA RUIZ', 'AP24393 SNRHA *SS*', false, {
+      ...perJobSettings,
+      apKey: '24393',
+      perJobRateOverrides: [
+        { id: 'o1', person: 'Hilda Ruiz', apKeyPattern: '24393', rate: 15, note: 'below DB' },
+      ],
+    }).rate,
+    19.18,
+  );
+
+  // --- Round 8 §9.2: NV daily overtime -----------------------------------------------------------
+  const nvDay = splitDailyOvertime(
+    [{ jobId: 'a', date: day2(7, 1), hours: 10, rowIndex: 0, eligible: true }],
+    8,
+  );
+  check(
+    '§9.2 10-hr NV day at $16 → 8 straight + 2 @ 1.5×',
+    [nvDay.totalOtHours, nvDay.otByJob.get('a'), nvDay.segments[0]?.dayHours],
+    [2, 2, 10],
+  );
+  const utDay = splitDailyOvertime(
+    [{ jobId: 'a', date: day2(7, 1), hours: 10, rowIndex: 0, eligible: false }],
+    8,
+  );
+  check('§9.2 same day in UT → no split', [utDay.totalOtHours, utDay.segments.length], [0, 0]);
+  const richPainter = splitDailyOvertime(
+    [{ jobId: 'a', date: day2(7, 1), hours: 10, rowIndex: 0, eligible: false }],
+    8,
+  );
+  check('§9.2 NV painter at/above $18 → no daily OT', richPainter.totalOtHours, 0);
+  const eightHourDay = splitDailyOvertime(
+    [{ jobId: 'a', date: day2(7, 1), hours: 8, rowIndex: 0, eligible: true }],
+    8,
+  );
+  check('§9.2 exactly 8 hrs → none', eightHourDay.totalOtHours, 0);
+  const twoJobDay = splitDailyOvertime(
+    [
+      { jobId: 'a', date: day2(7, 1), hours: 6, rowIndex: 0, eligible: true },
+      { jobId: 'b', date: day2(7, 1), hours: 5, rowIndex: 1, eligible: true },
+    ],
+    8,
+  );
+  check(
+    '§9.2 overage lands on the day’s LAST job',
+    [twoJobDay.totalOtHours, twoJobDay.otByJob.get('b'), twoJobDay.otByJob.get('a')],
+    [3, 3, undefined],
+  );
+  const mixedDay = splitDailyOvertime(
+    [
+      { jobId: 'nv', date: day2(7, 1), hours: 8, rowIndex: 0, eligible: true },
+      { jobId: 'ut', date: day2(7, 1), hours: 4, rowIndex: 1, eligible: false },
+    ],
+    8,
+  );
+  check('§9.2 UT hours consume the overage but never become OT', mixedDay.totalOtHours, 0);
+  // 45-hr week with 5 hrs already paid as daily OT → the weekly rule adds none.
+  const weekWithDailyOt = splitOvertime(
+    [
+      { jobId: 'a', hours: 40, lastDate: day2(7, 1), lastRowIndex: 0 },
+      { jobId: 'b', hours: 5, lastDate: day2(7, 3), lastRowIndex: 4 },
+    ],
+    { dailyOtHours: 5 },
+  );
+  check(
+    '§9.2 no double-count: daily OT consumes the >40 overage',
+    [weekWithDailyOt.otJobId, weekWithDailyOt.otHours],
+    [null, 0],
+  );
+  const weekPartialDailyOt = splitOvertime(
+    [
+      { jobId: 'a', hours: 40, lastDate: day2(7, 1), lastRowIndex: 0 },
+      { jobId: 'b', hours: 8, lastDate: day2(7, 3), lastRowIndex: 4 },
+    ],
+    { dailyOtHours: 5 },
+  );
+  check(
+    '§9.2 remaining >40 hours still pay weekly OT',
+    [weekPartialDailyOt.otJobId, weekPartialDailyOt.otHours],
+    ['b', 3],
+  );
+
   // --- Round 6 §7.1 Branch 2: crew-lead Davis-Bacon floor ----------------------------------------
   check(
     '§7.1 Branch 2: 10h DB, chain 100 → 191.80 + floorApplied',
@@ -604,9 +935,11 @@ export function runSelfTests(): boolean {
           materials: 35.74,
           laborWagesSubs: 113.04,
           mileage: 0,
-          sundries: 0,
-          plJobHeader: 'AP24314 Ext',
+            sundries: 0,
+            travel: 0,
+            plJobHeader: 'AP24314 Ext',
           customerName: 'Aaron Ward',
+          plEntity: 'NV',
         },
       ],
       [
@@ -617,8 +950,10 @@ export function runSelfTests(): boolean {
           laborWagesSubs: 2081.09,
           mileage: 0,
           sundries: 0,
+          travel: 0,
           plJobHeader: 'AP24403 Lambrook',
           customerName: 'CCSD',
+          plEntity: 'NV',
         },
       ],
     ]),
@@ -628,6 +963,8 @@ export function runSelfTests(): boolean {
       { label: 'Total Income', values: [null, null, 650, 9000] },
       { label: 'Employee Labor', values: [null, null, 113.04, 2081.09] },
     ],
+    entity: 'NV',
+    unmappedCogsRows: [],
   };
   const prRows = buildPrFinalCheckRows(plForPr);
   check('buildPrFinalCheckRows length', prRows.length, 2);
@@ -641,6 +978,8 @@ export function runSelfTests(): boolean {
     duplicateColumns: [],
     columnHeaders: [],
     accountRows: [],
+    entity: 'NV',
+    unmappedCogsRows: [],
   }).length, 0);
 
   // --- Round 7 §20.1: crew-group owner becomes a lead --------------------------------------------
@@ -708,6 +1047,8 @@ export function runSelfTests(): boolean {
               woPctSuggestion: null,
               woPctSuggestionSource: null,
               percent: 0.5,
+              livePercent: 0.5,
+              percentOverride: false,
               notes: '',
               hourly: false,
               sub: false,
@@ -724,6 +1065,7 @@ export function runSelfTests(): boolean {
     grandTotal: 8,
     balances: [],
     utPayroll: [],
+    unresolvedCarriedCustomers: [],
   };
   const ownerSettings = defaultSettings();
   ownerSettings.salariedRoster = [];
@@ -742,14 +1084,18 @@ export function runSelfTests(): boolean {
             laborWagesSubs: 0,
             mileage: 0,
             sundries: 0,
+            travel: 0,
             plJobHeader: 'AP25000 Ext',
             customerName: 'Cust',
+            plEntity: 'NV',
           },
         ],
       ]),
       duplicateColumns: [],
       columnHeaders: ['', 'AP25000 Ext'],
       accountRows: [{ label: 'Total Income', values: [null, 1000] }],
+      entity: 'NV',
+      unmappedCogsRows: [],
     },
     directory: [
       { fullName: 'Antonio Zuniga', firstName: 'Antonio', lastName: 'Zuniga', active: true },
@@ -776,6 +1122,87 @@ export function runSelfTests(): boolean {
     'crew-owner lead: not also an hourly painter',
     ownerPreview.painters.length,
     0,
+  );
+
+  const carriedRow = (over: Partial<ManualSectionRow> & { apKey: string; crewLead: string }): ManualSectionRow => ({
+    id: `bal:${over.apKey}`,
+    customer: 'Carried Cust',
+    job: `AP${over.apKey} Ext`,
+    estimator: 'MH',
+    woOverride: null,
+    woPct: 0.38,
+    percent: 1,
+    livePercent: 1,
+    percentOverride: false,
+    excludedFromPayroll: false,
+    notes: '',
+    colorHex: 'FFFF99',
+    ...over,
+  });
+  const carriedOnlyPreview = buildPayrollPreview({
+    pbj: {
+      ...ownerPbj,
+      customers: [],
+      grandTotal: 0,
+      grandByDate: {},
+      balances: [
+        carriedRow({ apKey: '26000', crewLead: 'CARLOS RUIZ CRUZ', percent: 1 }),
+        carriedRow({ apKey: '26001', crewLead: 'CARLOS RUIZ CRUZ', excludedFromPayroll: true }),
+        carriedRow({ apKey: '26002', crewLead: 'CARLOS RUIZ CRUZ', percent: 'HOURLY' }),
+      ],
+    },
+    enriched: [],
+    reportRows: [],
+    pl: {
+      byJob: new Map([
+        [
+          '26000',
+          {
+            income: 4000,
+            materials: 100,
+            laborWagesSubs: 50,
+            mileage: 0,
+            sundries: 25,
+            travel: 10,
+            plJobHeader: 'AP26000 Ext',
+            customerName: 'Carried Cust',
+            plEntity: 'NV',
+          },
+        ],
+      ]),
+      duplicateColumns: [],
+      columnHeaders: [],
+      accountRows: [],
+      entity: 'NV',
+      unmappedCogsRows: [],
+    },
+    directory: [],
+    settings: { ...ownerSettings, painterRoster: [] },
+    payDate: new Date(2026, 6, 10),
+    edits: {},
+    qbHours: {},
+    knownEstimators: new Set(['MH']),
+    leadCtx: { directory: [], crewGroups: [], subcontractors: [] },
+  });
+  check(
+    '§6 lead with only carried jobs still gets a block',
+    carriedOnlyPreview.leads.map((l) => l.leadName),
+    ['CARLOS RUIZ CRUZ'],
+  );
+  check(
+    '§6 non-gray carried job joins the lead band; gray + HOURLY stay off',
+    carriedOnlyPreview.leads[0].jobs.map((j) => j.apKey),
+    ['26000'],
+  );
+  check(
+    '§8.3 sundries default onto Deductions/Sundries',
+    [carriedOnlyPreview.leads[0].deductions, carriedOnlyPreview.leads[0].deductMemo],
+    [25, 'Sundries (P&L)'],
+  );
+  check(
+    '§8.5 travel metric is on the carried job',
+    carriedOnlyPreview.leads[0].jobs[0].travel,
+    10,
   );
 
   // --- Round 5 §4: job-naming chain --------------------------------------------------------------
@@ -905,6 +1332,324 @@ export function runSelfTests(): boolean {
     'slot A: missing Pivot by Job sheet',
     'error' in missPbj ? missPbj.error : '',
     "This file has no 'Pivot by Job' sheet — export it from the %'s process first",
+  );
+
+  // --- Round 8 §4.1: the A6A6A6 exclusion fill ---------------------------------
+  check(
+    'fills: theme 0 + tint −0.35 resolves to A6A6A6',
+    resolveThemeTintToRgb(0, -0.3499862666707358),
+    'A6A6A6',
+  );
+  check('fills: theme 0, no tint stays white', resolveThemeTintToRgb(0, 0), 'FFFFFF');
+  check('fills: literal ARGB gray', isExclusionGray({ rgb: 'FFA6A6A6', patternType: 'solid' }), true);
+  check('fills: literal RGB gray (no alpha)', isExclusionGray({ rgb: 'A6A6A6' }), true);
+  check(
+    'fills: theme-encoded gray',
+    isExclusionGray({ theme: 0, tint: -0.3499862666707358, patternType: 'solid' }),
+    true,
+  );
+  check('fills: near-miss inside ±2 tolerance', isExclusionGray({ rgb: 'FFA5A7A6' }), true);
+  check('fills: a different gray is not the flag', isExclusionGray({ rgb: 'FFD9D9D9' }), false);
+  check('fills: yellow legend fill is not the flag', isExclusionGray({ rgb: 'FFFFFF99' }), false);
+  check('fills: no fill', isExclusionGray(null), false);
+
+  // Last-week reader: the painted pair round-trips as excludedFromPayroll.
+  const grayWb: WorkbookData = {
+    sheets: [
+      {
+        name: 'Pivot by Job',
+        rows: [
+          ['Row Labels', 'AP#', 'Estimator', 'Crew Lead', '% of Completion', 'Notes'],
+          ['NV PAYROLL (BALANCES)'],
+          ['Aaron Ward'],
+          ['AP24314 Ext', '24314', 'MH', 'CARLOS', 0.5, ''],
+          ['Regina Conrad'],
+          ['AP24180 Int', '24180', 'MH', 'DANIEL', 0.5, ''],
+        ],
+        fills: [
+          [],
+          [],
+          [{ theme: 0, tint: -0.3499862666707358, patternType: 'solid' }],
+          [{ theme: 0, tint: -0.3499862666707358, patternType: 'solid' }],
+          [],
+          [],
+        ],
+      },
+    ],
+  };
+  const grayRows = parseLastWeekPivotByJob(grayWb);
+  check(
+    '§4.1 last-week reader flags the theme-gray pair',
+    grayRows.map((r) => [r.apKey, r.excludedFromPayroll]),
+    [
+      ['24314', true],
+      ['24180', false],
+    ],
+  );
+  check(
+    '§4.3 each carried row keeps its own customer label',
+    grayRows.map((r) => r.customer),
+    ['Aaron Ward', 'Regina Conrad'],
+  );
+
+  // --- Round 8 §3/§4: pivot-by-job wiring --------------------------------------
+  const pbjSettings = defaultSettings();
+  const pbjInput = (over: Partial<PivotByJobInput>): PivotByJobInput => ({
+    enriched: [],
+    reportRows: [],
+    settings: pbjSettings,
+    leadCtx: { directory: [], crewGroups: [], subcontractors: [] },
+    knownEstimators: new Set(['MH', 'RF']),
+    payDate: new Date(2026, 6, 10),
+    edits: {},
+    qbHours: {},
+    lastWeekPbj: null,
+    balancesState: EMPTY_MANUAL_STATE,
+    utState: EMPTY_MANUAL_STATE,
+    pl: null,
+    nvTotals: null,
+    utTotals: null,
+    nvSales: null,
+    utSales: null,
+    ...over,
+  });
+  const carryRow = (over: Partial<LastWeekPbjRow>): LastWeekPbjRow => ({
+    section: 'balances',
+    customer: '',
+    job: 'AP00000 Int',
+    apKey: '00000',
+    estimator: 'MH',
+    crewLead: '',
+    woOverride: null,
+    woPct: null,
+    percent: 0.5,
+    notes: '',
+    excludedFromPayroll: false,
+    ...over,
+  });
+  const tnRow = (apKey: string, percent: PercentValue, over: Partial<ReportRow> = {}): ReportRow => ({
+    id: `tn-${apKey}`,
+    eventIndex: 0,
+    included: true,
+    event: `AP${apKey} Int`,
+    startDate: null,
+    endDate: null,
+    calendar: 'AllPro Painters',
+    attendees: '',
+    location: '',
+    description: '',
+    apKey,
+    percent,
+    suggestedSourceLine: null,
+    estimator: 'MH',
+    lastPaid: null,
+    qboJobName: '',
+    inQboTime: '',
+    jobTotal: '#N/A',
+    jobTotalFound: false,
+    apptivo: null,
+    apptivoEdited: false,
+    dollarDiff: null,
+    invoiceDate: null,
+    dateDiff: null,
+    titleInitials: null,
+    ...over,
+  });
+
+  // §4.2 — RF is Reno, NV: estimator outranks the source calendar.
+  check('§4.2 carriedSectionFor: RF from UT → balances', carriedSectionFor('ut', 'RF'), 'balances');
+  check('§4.2 carriedSectionFor: lowercase rf', carriedSectionFor('ut', ' rf '), 'balances');
+  check('§4.2 carriedSectionFor: other estimator keeps UT', carriedSectionFor('ut', 'MH'), 'ut');
+  const rfModel = buildPivotByJob(
+    pbjInput({
+      lastWeekPbj: [
+        carryRow({ section: 'ut', apKey: '24777', job: 'AP24777 Reno Int', estimator: 'RF' }),
+        carryRow({ section: 'ut', apKey: '24888', job: 'AP24888 Provo Int', estimator: 'MH' }),
+      ],
+    }),
+  );
+  check(
+    '§4.2 RF carried job lands in NV BALANCES',
+    [rfModel.balances.map((r) => r.apKey), rfModel.utPayroll.map((r) => r.apKey)],
+    [['24777'], ['24888']],
+  );
+
+  // §4.3 — each carried job resolves its OWN customer by AP key.
+  const salesByCust: SalesByCustMirrorRow[] = [
+    { text: 'Aaron Ward', value: null, apKey: '', jobTotal: null },
+    { text: '   AP24314 Ext', value: 650, apKey: '24314', jobTotal: 650 },
+    { text: '   Total Aaron Ward', value: 650, apKey: '', jobTotal: null },
+    { text: 'Regina Conrad', value: null, apKey: '', jobTotal: null },
+    { text: '   AP24180 Int', value: 900, apKey: '24180', jobTotal: 900 },
+    { text: 'CCSD', value: null, apKey: '', jobTotal: null },
+    { text: '   AP24403 Int/Ext', value: 1200, apKey: '24403', jobTotal: 1200 },
+  ];
+  const custMap = customerByApFromSalesSummary(salesByCust);
+  check(
+    '§4.3 resolver: AP → owning customer header',
+    [custMap.get('24314'), custMap.get('24180'), custMap.get('24403')],
+    ['Aaron Ward', 'Regina Conrad', 'CCSD'],
+  );
+  check('§4.3 resolver: Total rows never become customers', custMap.has(''), false);
+  const carriedCustomers = buildPivotByJob(
+    pbjInput({
+      nvSalesByCust: salesByCust,
+      // Last week's sheet leaked ONE name onto every carried row — the bug.
+      lastWeekPbj: [
+        carryRow({ apKey: '24314', job: 'AP24314 Ext', customer: 'Aaron Ward' }),
+        carryRow({ apKey: '24180', job: 'AP24180 Int', customer: 'Aaron Ward' }),
+        carryRow({ apKey: '24403', job: 'AP24403 Int/Ext', customer: 'Aaron Ward' }),
+      ],
+    }),
+  );
+  check(
+    '§4.3 three carried APs → three distinct customers',
+    carriedCustomers.balances.map((r) => r.customer),
+    ['Aaron Ward', 'Regina Conrad', 'CCSD'],
+  );
+  check(
+    '§4.3 distinct customer count',
+    new Set(carriedCustomers.balances.map((r) => r.customer)).size,
+    3,
+  );
+  const carriedUnresolved = buildPivotByJob(
+    pbjInput({
+      nvSalesByCust: salesByCust,
+      lastWeekPbj: [carryRow({ apKey: '29999', job: 'AP29999 Int', customer: 'Raw Carried Name' })],
+    }),
+  );
+  check(
+    '§4.3 unresolved → keep raw name + raise an exception',
+    [carriedUnresolved.balances[0].customer, carriedUnresolved.unresolvedCarriedCustomers],
+    ['Raw Carried Name', ['29999']],
+  );
+
+  // §3.3 — carried rows show the CURRENT week's TimeNavi %, not last week's.
+  const carriedLive = buildPivotByJob(
+    pbjInput({
+      reportRows: [tnRow('24222', 0.9)],
+      lastWeekPbj: [
+        carryRow({ apKey: '24222', job: 'AP24222 Int', percent: 0.6, notes: '*PAID 60% LAST WK*' }),
+      ],
+    }),
+  );
+  check(
+    '§3.3 carried % = this week TimeNavi (0.9), not last week (0.6)',
+    [carriedLive.balances[0].percent, carriedLive.balances[0].livePercent, carriedLive.balances[0].percentOverride],
+    [0.9, 0.9, false],
+  );
+  const carriedSubbed = buildPivotByJob(
+    pbjInput({
+      reportRows: [tnRow('24222', 'SUBBED')],
+      lastWeekPbj: [carryRow({ apKey: '24222', job: 'AP24222 Int', percent: 0.6 })],
+    }),
+  );
+  check('§3.3 SUBBED flows through the link verbatim', carriedSubbed.balances[0].percent, 'SUBBED');
+  const carriedNoLink = buildPivotByJob(
+    pbjInput({ lastWeekPbj: [carryRow({ apKey: '24222', job: 'AP24222 Int', percent: 0.6 })] }),
+  );
+  check('§3.3 no TimeNavi row → carried value stays', carriedNoLink.balances[0].percent, 0.6);
+  const carriedOverride = buildPivotByJob(
+    pbjInput({
+      reportRows: [tnRow('24222', 0.9)],
+      lastWeekPbj: [carryRow({ apKey: '24222', job: 'AP24222 Int', percent: 0.6 })],
+      balancesState: { added: [], deleted: [], edits: { 'balances:24222': { percent: 0.75 } } },
+    }),
+  );
+  check(
+    '§3.1 manual carried edit wins and is marked',
+    [carriedOverride.balances[0].percent, carriedOverride.balances[0].percentOverride],
+    [0.75, true],
+  );
+  check(
+    '§4.1 carried gray flag round-trips into the model',
+    buildPivotByJob(
+      pbjInput({
+        lastWeekPbj: [carryRow({ apKey: '24222', job: 'AP24222 Int', excludedFromPayroll: true })],
+      }),
+    ).balances[0].excludedFromPayroll,
+    true,
+  );
+
+  // §3.1 — main pivot job rows link to TimeNavi too; Slot A is only a seed.
+  const liveJobId = pbjJobId('Cust', 'AP25000 Ext');
+  const liveJob = buildPivotByJob(
+    pbjInput({
+      enriched: ownerEnriched,
+      reportRows: [tnRow('25000', 0.9)],
+      edits: { [liveJobId]: { percentSeed: 0.6 } },
+    }),
+  ).customers[0].jobs[0].analysis;
+  check(
+    '§3.1 pivot % = this week TimeNavi, not the Slot A seed',
+    [liveJob.percent, liveJob.livePercent, liveJob.percentOverride],
+    [0.9, 0.9, false],
+  );
+  const overriddenJob = buildPivotByJob(
+    pbjInput({
+      enriched: ownerEnriched,
+      reportRows: [tnRow('25000', 0.9)],
+      edits: { [liveJobId]: { percentSeed: 0.6, percent: 0.75 } },
+    }),
+  ).customers[0].jobs[0].analysis;
+  check(
+    '§3.1 manual pivot edit wins over the live link',
+    [overriddenJob.percent, overriddenJob.livePercent, overriddenJob.percentOverride],
+    [0.75, 0.9, true],
+  );
+  const seededJob = buildPivotByJob(
+    pbjInput({ enriched: ownerEnriched, edits: { [liveJobId]: { percentSeed: 0.6 } } }),
+  ).customers[0].jobs[0].analysis;
+  check(
+    '§3.1 no TimeNavi row → Slot A seed fills in',
+    [seededJob.percent, seededJob.livePercent],
+    [0.6, null],
+  );
+
+  // §3.2 — the export writes a real cross-sheet formula.
+  check(
+    'excelColumnLetter',
+    [excelColumnLetter(1), excelColumnLetter(9), excelColumnLetter(26), excelColumnLetter(27)],
+    ['A', 'I', 'Z', 'AA'],
+  );
+  check(
+    '§3.2 INDEX/MATCH formula (no XLOOKUP)',
+    timeNaviPercentFormula({
+      sheetName: 'TimeNavi Export',
+      apColumn: 'H',
+      pctColumn: 'I',
+      apCellRef: 'F5',
+    }),
+    `IFERROR(INDEX('TimeNavi Export'!I:I, MATCH(F5, 'TimeNavi Export'!H:H, 0)), "")`,
+  );
+  check(
+    '§13 percents filename spells Percentages, no % character',
+    percentsExportFilename(new Date(2026, 7, 14)),
+    '08-14-2026 Percentages of Completion.xlsx',
+  );
+  check(
+    '§13 payroll filename has no %',
+    payrollExportFilename(new Date(2026, 7, 14), new Date(2026, 7, 8), new Date(2026, 7, 14)).includes('%'),
+    false,
+  );
+  check(
+    "§10 Input #'s Hourly Pay / Deductions cells (first lead)",
+    inputNumbersCellRefs(2),
+    [
+      { hourlyCell: 'C10', deductCell: 'C11' },
+      { hourlyCell: 'C21', deductCell: 'C22' },
+    ],
+  );
+  check(
+    "§10.1 sheet name apostrophe is doubled",
+    inputNumsSheetFormula('C11'),
+    { formula: `'Input #''s'!C11` },
+  );
+  check('§5 RF seed color is C4A484', DEFAULT_LEGEND.find((l) => l.estimator === 'RF')?.color, 'C4A484');
+  check(
+    '§11 inactive roster seeds 52 unique painters',
+    new Set(DEFAULT_PAINTER_ROSTER.map((p) => p.name)).size,
+    52,
   );
 
   const failed = results.filter((r) => !r.pass);

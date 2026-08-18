@@ -4,9 +4,29 @@
 
 export type CellValue = string | number | boolean | Date | null;
 
+/**
+ * Round 8 §4.1 — a cell's foreground fill as the reader found it. Excel stores
+ * hand-picked swatches as `theme` + `tint`, not as a literal color, so both
+ * encodings are kept (see `fills.ts`).
+ */
+export interface CellFill {
+  /** Literal color when the file carries one ("FFA6A6A6" / "A6A6A6"). */
+  rgb?: string | null;
+  /** Theme color index (0 = Background 1 / window). */
+  theme?: number | null;
+  /** Theme tint in [-1, 1]; −0.35 darkens white to A6A6A6. */
+  tint?: number | null;
+  patternType?: string | null;
+}
+
 export interface SheetData {
   name: string;
   rows: CellValue[][];
+  /**
+   * Per-cell fills aligned to `rows` — only present when the reader captured
+   * styles and the sheet actually had any.
+   */
+  fills?: (CellFill | null)[][];
 }
 
 export interface WorkbookData {
@@ -52,8 +72,27 @@ export interface TimesheetParseResult {
   lunchRemoved: number;
 }
 
-/** % Completion cell: fraction (0.95), the literal HOURLY, or blank. */
-export type PercentValue = number | 'HOURLY' | null;
+/**
+ * Round 8 §2.3 — free-text `% Completion` value. Anything the user typed that
+ * is not a percent, HOURLY, SUBBED or SET RATE is kept (and exported) verbatim.
+ */
+export interface PercentText {
+  kind: 'text';
+  text: string;
+}
+
+/**
+ * % Completion cell: fraction (0.95), one of the literal states
+ * (HOURLY / SUBBED / SET RATE), free text, or blank.
+ *
+ * Use the helpers in `format.ts` (`isPercentNumber`, `isPercentText`,
+ * `percentText`, `percentIsValidState`, `percentExcelValue`) instead of
+ * matching on the union members by hand.
+ */
+export type PercentValue = number | 'HOURLY' | 'SUBBED' | 'SET RATE' | PercentText | null;
+
+/** The literal (non-numeric, non-text) `% Completion` states. */
+export type PercentState = 'HOURLY' | 'SUBBED' | 'SET RATE';
 
 /** Last-week "% Completion" values we can carry forward. */
 export type PrevPercent = number | 'HOURLY';
@@ -127,9 +166,9 @@ export interface ReportRow {
   inQboTime: string; // M
   jobTotal: JobTotalValue; // N
   jobTotalFound: boolean;
-  apptivo: number | null; // O (editable; blank when N is #N/A)
+  apptivo: number | null; // O (editable; §2.2 — blank until typed, never auto-filled)
   apptivoEdited: boolean;
-  dollarDiff: number | null; // P = N − O (blank when N is #N/A)
+  dollarDiff: number | null; // P = N − O (blank while O is blank or N is #N/A)
   invoiceDate: Date | null; // R
   dateDiff: number | null; // S = whole days R − B
   titleInitials: string | null; // (XX) from the event title, for mismatch check
@@ -144,10 +183,14 @@ export interface PlJobMetrics {
   materials: number; // equipment + job materials + other job costs + paint + sundries + tools
   laborWagesSubs: number; // Employee Labor + Subcontractor Labor + Wages
   mileage: number; // Mileage Expense
-  sundries: number; // the 'Sundries -' row alone (double-count hint, §6.8)
+  sundries: number; // the 'Sundries -' / 'Sundries' row (feeds Deductions, not materials)
+  /** Round 8 §8.5 — Travel Expenses / Travel Expense; informational. */
+  travel: number;
   plJobHeader: string; // the raw column header text
   /** Round 5 §4 step 5 — nearest preceding non-Total, non-AP customer header. */
   customerName: string;
+  /** Round 8 §7.1 — which upload slot this column came from. */
+  plEntity: EntityCode;
 }
 
 export interface PlParseResult {
@@ -158,6 +201,13 @@ export interface PlParseResult {
   columnHeaders: string[];
   /** Round 7 — full account tree in file order; values aligned to columnHeaders. */
   accountRows: { label: string; values: (number | null)[] }[];
+  /** Round 8 §7.1 — the entity whose slot produced this file. */
+  entity: EntityCode;
+  /**
+   * Round 8 §7.1 — Cost of Goods Sold rows the Settings mapping does not
+   * mention, so a new QBO account can never silently drop out of the math.
+   */
+  unmappedCogsRows: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -201,9 +251,42 @@ export interface WageRateEntry {
   rate: number;
   /** Optional different rate on hourly (T&M) jobs. */
   hourlyRate?: number;
+  /**
+   * Round 8 §9.1 — a crew lead's rate on their OWN timesheet hours when the
+   * job is a profit-share job. Falls back to `AppSettings.defaultCrewLeadRate`.
+   */
+  crewLeadRate?: number;
+}
+
+/**
+ * Round 8 §9.1 — person-scoped rate that only applies while that person works
+ * a job led by `condition.leadName`.
+ */
+export interface ConditionalRateRule {
+  id: string;
+  person: string;
+  condition: { kind: 'onSameJobAsLead'; leadName: string };
+  rate: number;
+  note?: string;
+}
+
+/**
+ * Round 8 §9.1 — person-scoped per-job rate. `apKeyPattern` is a substring
+ * match against the AP key (so '24097' also covers change-order suffixes).
+ * Distinct from `JobRateRule` (Round 6 §7.2), which is job-scoped.
+ */
+export interface PerJobRateOverride {
+  id: string;
+  person: string;
+  apKeyPattern: string;
+  rate: number;
+  note?: string;
 }
 
 export type SalarySection = 'ADMIN' | 'ESTIMATORS' | 'MANAGER SALARY';
+
+/** Round 6 §2.1 / Round 8 §7.3 — which company a row belongs to. */
+export type EntityCode = 'NV' | 'UT';
 
 /** Salaried roster entry (§7.3). */
 export interface SalariedEntry {
@@ -211,6 +294,32 @@ export interface SalariedEntry {
   section: SalarySection;
   role: string;
   amount: number; // weekly
+  /** Round 8 §7.3 — owning entity; legacy rows migrate to 'NV'. */
+  entity: EntityCode;
+}
+
+/**
+ * Round 8 §7.1 — P&L account labels that feed each derived metric, per entity.
+ * Matching is by account-row label. Sundries is deliberately NOT part of
+ * `materials` (Round 8 §8.3 supersedes Round 3 §2).
+ */
+export interface PlAccountMapping {
+  income: string[];
+  materials: string[];
+  laborWagesSubs: string[];
+  sundries: string[];
+  travel: string[];
+  mileage: string[];
+}
+
+/**
+ * Round 8 §11 — the painter roster with an active flag. `note` carries display
+ * metadata from the source list (crew name, `*split*`, `{Reno}`).
+ */
+export interface PainterRosterEntry {
+  name: string;
+  active: boolean;
+  note?: string;
 }
 
 export interface AppSettings {
@@ -221,6 +330,20 @@ export interface AppSettings {
   defaultProfitSharePct: number; // fraction; seed 0.38
   wageRates: WageRateEntry[];
   defaultWageRate: number; // seed 18
+  /** Round 8 §9.1 — fallback crew-lead rate on own PS-job hours; seed 18. */
+  defaultCrewLeadRate: number;
+  /** Round 8 §9.1 — "person X earns Y while on lead Z's job" rules. */
+  conditionalRateRules: ConditionalRateRule[];
+  /** Round 8 §9.1 — person + AP# rate overrides (person-scoped). */
+  perJobRateOverrides: PerJobRateOverride[];
+  /** Round 8 §9.2 — NV daily-OT applies only at/below this base rate; seed 18. */
+  nvDailyOtRateThreshold: number;
+  /** Round 8 §9.2 — hours per day before daily OT starts; seed 8. */
+  dailyOtHoursThreshold: number;
+  /** Round 8 §7.1 — P&L account labels per metric, per entity. */
+  plAccountMapping: Record<EntityCode, PlAccountMapping>;
+  /** Round 8 §11 — painter roster with Active/Inactive flags. */
+  painterRoster: PainterRosterEntry[];
   salariedRoster: SalariedEntry[];
   mileageRate: number; // $/mile; seed 0.625
   /** Round 6 §7.3 — office mileage rate (PS footer); seed 0.50. */
@@ -232,6 +355,11 @@ export interface AppSettings {
   prevailingMinRate: number;
   /** Round 6 §7.2 — negotiated job-specific $/hr rules. */
   jobRateRules: JobRateRule[];
+  /**
+   * One-time data migrations already applied to this settings blob (e.g.
+   * 'r8-rf-color'). Persisted so each runs exactly once per stored settings.
+   */
+  appliedMigrations: string[];
 }
 
 /** Round 6 §7.2 — job-specific pay rule. */
@@ -342,7 +470,15 @@ export interface JobAnalysis {
   /** Calendar @ NN% PS suggestion (tooltip only). */
   woPctSuggestion: number | null;
   woPctSuggestionSource: string | null;
-  percent: PercentValue; // live mirror of the TimeNavi grid value
+  /** Effective % — the manual override when set, else `livePercent`. */
+  percent: PercentValue;
+  /**
+   * Round 8 §3.1 — THIS week's TimeNavi Export `% Completion` for the same
+   * AP#. Null when no included calendar row matches.
+   */
+  livePercent: PercentValue;
+  /** True when a manual pivot edit replaced the live TimeNavi value. */
+  percentOverride: boolean;
   notes: string;
   hourly: boolean; // job is hourly (vs piece-rate)
   sub: boolean; // paid to a subcontractor
@@ -391,7 +527,18 @@ export interface ManualSectionRow {
   crewLead: string;
   woOverride: number | null;
   woPct: number | null;
+  /** Effective % — the manual override when set, else `livePercent`. */
   percent: PercentValue;
+  /** Round 8 §3.1/§3.3 — THIS week's TimeNavi `% Completion` for this AP#. */
+  livePercent: PercentValue;
+  /** True when a manual edit on this row replaced the live TimeNavi value. */
+  percentOverride: boolean;
+  /**
+   * Round 8 §4.1 — the A6A6A6 gray flag: this job must NOT flow to payroll.
+   * Seeded from last week's fill, toggleable in-app, painted on export so the
+   * signal round-trips into next week's seed.
+   */
+  excludedFromPayroll: boolean;
   notes: string;
   colorHex: string | null;
 }
@@ -405,6 +552,11 @@ export interface PivotByJobModel {
   grandTotal: number;
   balances: ManualSectionRow[];
   utPayroll: ManualSectionRow[];
+  /**
+   * Round 8 §4.3 — carried AP#s whose customer resolved from neither the Sales
+   * by Customer Summary uploads nor the P&L header structure.
+   */
+  unresolvedCarriedCustomers: string[];
 }
 
 /** Sparse user edits on Pivot by Job rows (keyed by PbjJobRow.id). */
@@ -413,8 +565,16 @@ export interface PbjJobEdit {
   crewLead?: string;
   woOverride?: number | null;
   woPct?: number | null;
-  /** Seeded from completed %'s (Slot A) or last-week carry; otherwise mirrors TimeNavi. */
+  /**
+   * Round 8 §3.1 — MANUAL % override. Wins over the live TimeNavi value; set
+   * to `undefined` to relink the cell.
+   */
   percent?: PercentValue;
+  /**
+   * Seed from completed %'s (Slot A). Used only when this week's TimeNavi grid
+   * has no row for the AP# — never outranks the live link or a manual edit.
+   */
+  percentSeed?: PercentValue;
   notes?: string;
   /** Round 6 §7.1 — when true, force non–Davis-Bacon even if the job text matches a pattern. */
   dbOverride?: boolean;
@@ -447,7 +607,20 @@ export interface HourlyLine {
   fromJobRule?: boolean;
   /** Optional note from the matched job rule. */
   ruleNote?: string;
+  /** Round 8 §9.1 — rate came from a person + AP# override. */
+  fromPerJobOverride?: boolean;
+  /** Round 8 §9.1 — rate came from a "person on lead Z's job" rule. */
+  fromConditionalRule?: boolean;
+  /** Round 8 §9.1 — the lead's own crew-lead rate on a profit-share job. */
+  fromCrewLeadRate?: boolean;
+  /** Weekly (>40 hrs/wk) overtime line. */
   ot: boolean;
+  /** Round 8 §9.2 — NV daily-overtime line (hours past 8 in one day). */
+  dailyOt?: boolean;
+  /** "7/14" — the day the daily-OT hours came from. */
+  dailyOtDate?: string;
+  /** Full `[Daily OT — …]` tag text, reused for the cell tooltip. */
+  dailyOtNote?: string;
   hourlyJob: boolean;
   colorHex: string | null; // estimator fill for the PO# cell
 }
@@ -477,11 +650,23 @@ export interface PsJobColumn {
   woPct: number | null;
   profitShare: number; // income × woPct
   workOrderOverride: number | null; // blank unless typed (Round 6 §6.2)
-  percentCompletion: number; // fraction (HOURLY jobs excluded from PS blocks) — displayed, not in TPS chain
+  /** Fraction actually used by the §8.1 chain (0 when blank/invalid). */
+  percentCompletion: number;
+  /** Round 8 §8.1 — the raw `% of Completion` cell, states and all. */
+  percent: PercentValue;
+  /** Round 8 §8.1 — SUBBED / SET RATE: no auto profit share, pay entered by hand. */
+  manualPay: 'SUBBED' | 'SET RATE' | null;
+  /** Round 8 §8.1 — blank/invalid % on a piece-rate job; the chain paid 0. */
+  missingPercent: boolean;
   laborWages: number;
   mileage: number; // displayed, not in TPS chain
+  /** Round 8 §8.5 — P&L travel, informational only. */
+  travel: number;
+  /** Round 8 §8.3 — P&L sundries; seeds Deductions/Sundries, not materials. */
+  sundries: number;
   halfMaterials: number;
-  totalProfitShare: number; // (WO Override|PS) − labor − ½materials (Round 6 §6.2)
+  /** Round 8 §8.1 — base × %Completion − labor − ½materials (0 when manual). */
+  totalProfitShare: number;
   splitWith: number; // 1 = no split
   totalAfterSplit: number;
   /** Round 6 §7.1 Branch 2 — Davis-Bacon floor raised this lead's per-job pay. */
@@ -509,8 +694,12 @@ export interface PsBlock {
   hourlyPay: number; // own T-SHEETS gross
   reimbursements: number; // editable
   reimbMemo: string;
-  deductions: number; // editable (negative)
+  /** Round 8 §8.2 — entered POSITIVE and SUBTRACTED from Total Pay. */
+  deductions: number;
   deductMemo: string;
+  /** Round 8 §8.3 — Σ P&L sundries, the default this block's deductions used. */
+  sundriesDefault: number;
+  /** Round 8 §8.2 — Total + Hourly Pay + Reimbursements − Deductions. */
   totalPay: number;
   tsheets: HourlyBlock | null; // the lead's own hourly block
 }
@@ -545,6 +734,8 @@ export interface InactiveEmployeeBlock {
 }
 
 export interface PayrollPreviewModel {
+  /** Round 8 §7.3 — which entity this model was built from. */
+  entity: EntityCode;
   title: string;
   /** "M/D - M/D" week range (office PO cells, salary date-range lines). */
   weekRange: string;
@@ -559,6 +750,32 @@ export interface PayrollPreviewModel {
   /** §4.10 — full inactive tab (directory + absent leads/subs). */
   inactiveEmployees: InactiveEmployeeBlock[];
   inactiveZeroHours: string[]; // §5.7 — *-inactive directory names without hours (exceptions)
+  /**
+   * Round 8 §9.4 — leads that resolved from input data with no crew
+   * profit-share % on file, auto-added at the seeded default. Building the
+   * preview stays pure: the App layer persists these to the shared settings
+   * store, which is what makes the auto-add stick.
+   */
+  newLeadsToAdd: NewLeadDefault[];
+  /** Round 8 §9.2 — every daily-OT chunk applied this week (exceptions/tags). */
+  dailyOtNotes: DailyOtNote[];
+}
+
+/** Round 8 §9.4 — a crew lead the preview auto-added to the WO% map. */
+export interface NewLeadDefault {
+  /** Title Case display name, as it should be stored in Settings. */
+  lead: string;
+  pct: number;
+}
+
+/** Round 8 §9.2 — one applied daily-OT chunk, for tags and exceptions. */
+export interface DailyOtNote {
+  employeeName: string;
+  /** "7/14" */
+  date: string;
+  hours: number;
+  rate: number;
+  jobLabel: string;
 }
 
 /** Sparse edits for Payroll Preview (keyed by block/line ids). */
@@ -574,6 +791,8 @@ export interface PayrollEdit {
   mileage?: number;
   halfMaterials?: number;
   mileageNew?: number;
+  /** Round 8 §10.2 — override the lead's computed T-SHEETS hourly pay. */
+  hourlyPay?: number;
   reimbursements?: number;
   reimbMemo?: string;
   deductions?: number;

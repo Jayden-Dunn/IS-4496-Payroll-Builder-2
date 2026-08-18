@@ -1,4 +1,4 @@
-import type { JobTotalValue, PercentValue } from './types';
+import type { JobTotalValue, PercentState, PercentText, PercentValue } from './types';
 
 /** M/D/YYYY */
 export function fmtDate(d: Date | null | undefined): string {
@@ -36,11 +36,84 @@ export function fmtMoney(v: number): string {
   return (r < 0 ? '-$' : '$') + s;
 }
 
-/** 0.95 → "95%", 'HOURLY' → "HOURLY", null → "" */
+// ---------------------------------------------------------------------------
+// % Completion values (Round 8 §2.3 / §2.4)
+// ---------------------------------------------------------------------------
+
+const PERCENT_STATES: readonly PercentState[] = ['HOURLY', 'SUBBED', 'SET RATE'];
+
+/** True for a numeric fraction (0.38 = 38%). */
+export function isPercentNumber(v: PercentValue): v is number {
+  return typeof v === 'number';
+}
+
+/** True for one of the literal states: HOURLY, SUBBED, SET RATE. */
+export function isPercentState(v: PercentValue): v is PercentState {
+  return typeof v === 'string' && (PERCENT_STATES as readonly string[]).includes(v);
+}
+
+/** True for a free-text value the user typed (Round 8 §2.3). */
+export function isPercentText(v: PercentValue): v is PercentText {
+  return typeof v === 'object' && v !== null && v.kind === 'text';
+}
+
+/** The verbatim text of a free-text value; null for every other variant. */
+export function percentText(v: PercentValue): string | null {
+  return isPercentText(v) ? v.text : null;
+}
+
+/**
+ * Wrap text verbatim. Use `parsePercentInput` for anything a user typed — it
+ * canonicalizes percents and the HOURLY / SUBBED / SET RATE states first.
+ */
+export function percentTextValue(text: string): PercentText {
+  return { kind: 'text', text };
+}
+
+/**
+ * §2.4 — a cell holds a "valid" state when it has a nonzero %, or reads
+ * HOURLY / SUBBED / SET RATE. Blank, 0% and free text are invalid (red).
+ */
+export function percentIsValidState(v: PercentValue): boolean {
+  if (isPercentState(v)) return true;
+  return isPercentNumber(v) && v !== 0;
+}
+
+/** What a % cell writes into a worksheet: the fraction, or its text. */
+export function percentExcelValue(v: PercentValue): string | number {
+  if (v === null) return '';
+  if (isPercentNumber(v)) return v;
+  if (isPercentState(v)) return v;
+  return v.text;
+}
+
+/** 0.95 → "95%", 'HOURLY' → "HOURLY", free text verbatim, null → "" */
 export function fmtPercent(v: PercentValue): string {
   if (v === null) return '';
-  if (v === 'HOURLY') return 'HOURLY';
+  if (isPercentState(v)) return v;
+  if (isPercentText(v)) return v.text;
   return `${Math.round(v * 100)}%`;
+}
+
+/**
+ * Lowercase, drop punctuation/hyphens and collapse whitespace so that
+ * "Subbed-out", "SUBBED  OUT" and "set rate." all reduce to a plain phrase.
+ */
+export function normalizeStateText(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+/** §2.4 — forgiving "subbed out" match (also plain "subbed"). */
+export function matchesSubbedOut(text: string): boolean {
+  return /\bsubbed\b/.test(normalizeStateText(text));
+}
+
+/** §2.4 — forgiving "set rate" match. */
+export function matchesSetRate(text: string): boolean {
+  return /\bset rate\b/.test(normalizeStateText(text));
 }
 
 /** Hours with at most 2 decimals: 4.26, 20.08, 8 */
@@ -98,15 +171,29 @@ export function dateToIso(d: Date): string {
   return `${d.getFullYear()}-${mm}-${dd}`;
 }
 
-/** Parse user input for a % cell: "95", "95%", "0.95", "hourly", "-", "". */
+/**
+ * Parse user input for a % cell (Round 8 §2.3 — free text allowed).
+ *
+ * - percent-looking input ("38", "38%", ".38", "0.38") → fraction
+ * - "hourly" (any case) → HOURLY; "subbed out" → SUBBED; "set rate" → SET RATE
+ * - blank / "-" → null
+ * - anything else → the text, stored and exported verbatim
+ */
 export function parsePercentInput(text: string): PercentValue {
   const t = text.trim();
   if (!t || t === '-') return null;
+
+  const m = /^(-?(?:\d+(?:\.\d+)?|\.\d+))\s*(%?)$/.exec(t);
+  if (m) {
+    const n = Number(m[1]);
+    if (m[2] === '%') return n / 100;
+    return n > 1 ? n / 100 : n;
+  }
+
   if (/hourly/i.test(t)) return 'HOURLY';
-  const m = /^(-?\d+(?:\.\d+)?)\s*%?$/.exec(t);
-  if (!m) return null;
-  const n = Number(m[1]);
-  return n > 1 ? n / 100 : n;
+  if (matchesSubbedOut(t)) return 'SUBBED';
+  if (matchesSetRate(t)) return 'SET RATE';
+  return { kind: 'text', text: t };
 }
 
 /** Parse user input for a money cell: "$2,095.00", "2095". Null when invalid/blank. */

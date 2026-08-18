@@ -1,12 +1,20 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.DEFAULT_PREVAILING_MIN_RATE = exports.DEFAULT_PREVAILING_PATTERNS = exports.DEFAULT_SUBCONTRACTORS = exports.DEFAULT_MILEAGE_RATE = exports.DEFAULT_SALARIED = exports.DEFAULT_WAGE_RATE = exports.DEFAULT_WAGE_RATES = exports.DEFAULT_PROFIT_SHARE_PCT = exports.DEFAULT_PROFIT_SHARE = exports.DEFAULT_PIVOT_COLUMNS = exports.DEFAULT_LEGEND = void 0;
+exports.ALL_MIGRATIONS = exports.MIGRATION_WAGE_SEEDS = exports.MIGRATION_DB_PATTERN = exports.MIGRATION_RF_COLOR = exports.LEGACY_PREVAILING_PATTERN = exports.DEFAULT_PREVAILING_MIN_RATE = exports.DEFAULT_PREVAILING_PATTERNS = exports.DEFAULT_SUBCONTRACTORS = exports.DEFAULT_MILEAGE_RATE = exports.DEFAULT_SALARIED = exports.DEFAULT_PAINTER_ROSTER = exports.DEFAULT_PL_ACCOUNT_MAPPING = exports.DEFAULT_DAILY_OT_HOURS_THRESHOLD = exports.DEFAULT_NV_DAILY_OT_RATE_THRESHOLD = exports.DEFAULT_PER_JOB_RATE_OVERRIDES = exports.DEFAULT_CONDITIONAL_RATE_RULES = exports.DEFAULT_CREW_LEAD_RATE = exports.DEFAULT_WAGE_RATE = exports.DEFAULT_WAGE_RATES = exports.ROUND8_WAGE_SEEDS = exports.DEFAULT_PROFIT_SHARE_PCT = exports.DEFAULT_PROFIT_SHARE = exports.DEFAULT_PIVOT_COLUMNS = exports.LEGACY_RF_COLOR = exports.DEFAULT_LEGEND = void 0;
+exports.mergeWageRateSeeds = mergeWageRateSeeds;
 exports.loadAppMode = loadAppMode;
 exports.saveAppMode = saveAppMode;
 exports.ensureDefaultPivotColumns = ensureDefaultPivotColumns;
 exports.defaultSettings = defaultSettings;
+exports.parseSettings = parseSettings;
+exports.applySettingsMigrations = applySettingsMigrations;
 exports.loadSettings = loadSettings;
+exports.hasLocalSettings = hasLocalSettings;
 exports.saveSettings = saveSettings;
+exports.probeSettingsStore = probeSettingsStore;
+exports.fetchAppSettings = fetchAppSettings;
+exports.persistAppSettings = persistAppSettings;
+exports.clearAppSettings = clearAppSettings;
 exports.loadSavedDirectory = loadSavedDirectory;
 exports.cacheDirectoryLocally = cacheDirectoryLocally;
 exports.saveDirectory = saveDirectory;
@@ -33,8 +41,10 @@ exports.DEFAULT_LEGEND = [
     { estimator: 'TE', color: 'C4D79B' },
     { estimator: 'XC', color: '95B3D7' },
     { estimator: 'ND', color: '4472C4' },
-    { estimator: 'RF', color: 'DA9694' },
+    { estimator: 'RF', color: 'C4A484' },
 ];
+/** Round 8 §5 — the RF fill this seed replaced; migrated once on load. */
+exports.LEGACY_RF_COLOR = 'DA9694';
 /** Default pivot estimator column order (separate from legend row-sort order). */
 exports.DEFAULT_PIVOT_COLUMNS = ['MH', 'PG', 'XC', 'ND', 'TE', 'RF'];
 /**
@@ -59,7 +69,7 @@ exports.DEFAULT_PROFIT_SHARE = [
     { lead: 'Alvaro Reyes', pct: 0.4 },
 ];
 exports.DEFAULT_PROFIT_SHARE_PCT = 0.38;
-exports.DEFAULT_WAGE_RATES = [
+const BASE_WAGE_RATES = [
     { name: 'Adriana Lopez Barajas', rate: 25, hourlyRate: 20 },
     { name: 'Ana Bedoya Melgar', rate: 20 },
     { name: 'Antonio Zuniga', rate: 18, hourlyRate: 25 },
@@ -91,18 +101,201 @@ exports.DEFAULT_WAGE_RATES = [
     { name: 'Sandra Hermosillo', rate: 18 },
     { name: 'Tyler Dunn', rate: 15 },
 ];
+/**
+ * Round 8 §9.1/§9.3 — three-rate seeds ("hourly" = hourlyRate, "PS" = rate,
+ * "crew-lead" = crewLeadRate). Merged by name into BASE_WAGE_RATES: matching
+ * names are patched field-by-field, new names are appended. SEEDS ONLY —
+ * fully editable in Settings, never referenced as constants by rate logic.
+ */
+exports.ROUND8_WAGE_SEEDS = [
+    { name: 'Adriana Lopez Barajas', rate: 25, hourlyRate: 20 },
+    { name: 'Antonio Zuniga', rate: 18, hourlyRate: 25, crewLeadRate: 18 },
+    { name: 'Carlos Ruiz Cruz', rate: 18, hourlyRate: 25, crewLeadRate: 18 },
+    { name: 'Damian Vasquez', rate: 18, hourlyRate: 18 },
+    { name: 'Daniel Gonzales Bonilla', rate: 18, hourlyRate: 20 },
+    { name: 'Henry Limay Flores', rate: 18 },
+    { name: 'Jose Santos Hernandez Favela', rate: 18, hourlyRate: 20 },
+    { name: 'Martin Ealey', rate: 18, hourlyRate: 18 },
+    { name: 'Miguel Martin', rate: 20, hourlyRate: 20 },
+    { name: 'Natividad Ortega', rate: 25, hourlyRate: 23.75 },
+    { name: 'Rafael Aguilar Echevarria', rate: 18, hourlyRate: 30 },
+    { name: 'Rene Salazar', rate: 18, hourlyRate: 16 },
+    { name: 'Samuel Brewster', rate: 18 },
+    { name: 'Sergio Viera', rate: 18, hourlyRate: 18 },
+    { name: 'Thomas Slater', rate: 18, hourlyRate: 20 },
+    { name: 'Tomas Huerta', rate: 18, hourlyRate: 25 },
+    { name: 'Xavier Green', rate: 18, hourlyRate: 18 },
+];
+/** Name key for wage-map merges (case/whitespace-insensitive). */
+function wageKey(name) {
+    return name.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+/**
+ * Merge seed rows into a wage list BY NAME: matching rows are patched, unknown
+ * names are appended. Never duplicates a row.
+ *
+ * `mode` decides what happens to a field the matched row already has:
+ * - `seedWins` (building the seed list) — the seed value replaces it.
+ * - `fillMissing` (migrating someone's saved settings) — only absent fields are
+ *   filled, so a hand-edited rate survives.
+ */
+function mergeWageRateSeeds(current, seeds, mode = 'seedWins') {
+    const out = current.map((e) => ({ ...e }));
+    const indexByName = new Map(out.map((e, i) => [wageKey(e.name), i]));
+    for (const seed of seeds) {
+        const at = indexByName.get(wageKey(seed.name));
+        if (at === undefined) {
+            out.push({ ...seed });
+            indexByName.set(wageKey(seed.name), out.length - 1);
+            continue;
+        }
+        const row = out[at];
+        out[at] =
+            mode === 'seedWins'
+                ? { ...row, ...seed, name: row.name }
+                : {
+                    ...row,
+                    ...(row.hourlyRate === undefined && seed.hourlyRate !== undefined
+                        ? { hourlyRate: seed.hourlyRate }
+                        : {}),
+                    ...(row.crewLeadRate === undefined && seed.crewLeadRate !== undefined
+                        ? { crewLeadRate: seed.crewLeadRate }
+                        : {}),
+                };
+    }
+    return out;
+}
+exports.DEFAULT_WAGE_RATES = mergeWageRateSeeds(BASE_WAGE_RATES, exports.ROUND8_WAGE_SEEDS);
 exports.DEFAULT_WAGE_RATE = 18;
+/** Round 8 §9.1 — fallback lead rate on own timesheet hours on PS jobs. */
+exports.DEFAULT_CREW_LEAD_RATE = 18;
+/** Round 8 §9.1 — seeded conditional rate rules. */
+exports.DEFAULT_CONDITIONAL_RATE_RULES = [
+    {
+        id: 'cond-henry-limay-flores-miguel-martin',
+        person: 'Henry Limay Flores',
+        condition: { kind: 'onSameJobAsLead', leadName: 'Miguel Martin' },
+        rate: 20,
+        note: '$20/hr on Miguel Martin jobs',
+    },
+];
+/** Round 8 §9.1 — seeded person + AP# rate overrides. */
+exports.DEFAULT_PER_JOB_RATE_OVERRIDES = [
+    {
+        id: 'perjob-samuel-brewster-24097',
+        person: 'Samuel Brewster',
+        apKeyPattern: '24097',
+        rate: 30,
+        note: '$30/hr on AP24097',
+    },
+];
+/** Round 8 §9.2 — daily-OT thresholds (logic lives in the payroll engine). */
+exports.DEFAULT_NV_DAILY_OT_RATE_THRESHOLD = 18;
+exports.DEFAULT_DAILY_OT_HOURS_THRESHOLD = 8;
+/**
+ * Round 8 §7.1 — per-entity P&L account label mapping. Sundries stays OUT of
+ * materials (§8.3 supersedes Round 3 §2).
+ */
+exports.DEFAULT_PL_ACCOUNT_MAPPING = {
+    NV: {
+        income: ['Total Income'],
+        materials: [
+            'Equipment Rental for Jobs',
+            'Job Materials Purchased',
+            'Other Job Related Costs',
+            'Paint',
+            'Tools and Small Equipment',
+        ],
+        laborWagesSubs: ['Employee Labor', 'Subcontractor Labor', 'Wages'],
+        sundries: ['Sundries -'],
+        travel: ['Travel Expenses'],
+        mileage: ['Mileage Expense'],
+    },
+    UT: {
+        income: ['Total Income'],
+        materials: ['Equipment Rental for Jobs', 'Job Materials', 'Paint', 'Tools & Small Equipment'],
+        laborWagesSubs: ['Employee Labor', 'Subcontractors', 'Wages'],
+        sundries: ['Sundries'],
+        travel: ['Travel Expense'],
+        mileage: [],
+    },
+};
+/**
+ * Round 8 §11 — painters seeded INACTIVE. `{Reno}` (and similar) display
+ * metadata is stored as `note`, never in `name`. Seed data — fully editable.
+ */
+exports.DEFAULT_PAINTER_ROSTER = [
+    'Angel Chavez',
+    'Artemio Rios Escobar',
+    'Axel Angel Garcia Torres',
+    'Calixto Efrain Climaco',
+    'Cesar Lopez Molina',
+    'Christian Estrada',
+    'Danaell Bing',
+    'Denuan David Martinez Bonilla',
+    'Eddy Huerta Burgos',
+    'Eduardo Martinez Guzman',
+    'Edward Prieto',
+    'Efrain Gutierrez-Salazar',
+    'Elvira Barragan Bautista',
+    'Enrique Guevara Rivera',
+    'Expectacion Garcia',
+    'Ezequiel Rodriguez',
+    'Gledy Silva Callan',
+    'Gustavo Rodriguez',
+    'Gustavo Ventura Santos',
+    'Isaac Ramirez',
+    'Jayton Johnson-Bustamante',
+    'Jesus Ochoa',
+    'Jesus Perez',
+    'Jonathan Rodriguez Gonzalez',
+    'Jose Belen Delgado',
+    'Jose Garcia Diaz',
+    'Jose Guardado',
+    'Jose Gustavo Amaya Hernandez',
+    'Jose Martinez Sanchez',
+    'Jose Rodriguez',
+    'Juan Salazar',
+    'Justin Fuentes {Reno}',
+    'Lismark Prieto Claudio',
+    'Luis Perez',
+    'Luis Vargas Montor',
+    'Marlon Giron',
+    'Mauricio Garcia Partida',
+    'Miguel Almanza Munoz',
+    'Miguel Rebollar Bocanegra',
+    'Miguel Rodriguez',
+    'Patricio Marcelo Acosta',
+    'Ramon Torres Barragan',
+    'Randolfo Lopez',
+    'Rene Meraz {Reno}',
+    'Roman Tamayo',
+    'Samuel Hernandez',
+    'Steven Adams {Reno}',
+    'Ted Frank',
+    'Victor Escobar',
+    'Welder Padilla Guevara',
+    'Yadira Rios Tatara',
+    'Zachary Dunn',
+].map((raw) => {
+    const meta = /\{[^}]*\}|\*[^*]*\*/.exec(raw);
+    return {
+        name: raw.replace(/\s*(\{[^}]*\}|\*[^*]*\*)\s*/g, ' ').trim(),
+        active: false,
+        ...(meta ? { note: meta[0] } : {}),
+    };
+});
 exports.DEFAULT_SALARIED = [
-    { name: 'Jodi Dunn', section: 'ADMIN', role: 'Manager Salary', amount: 865 },
-    { name: 'Jason Thompson', section: 'ESTIMATORS', role: 'Salary', amount: 1200 },
-    { name: 'Paul Good', section: 'ESTIMATORS', role: 'Commissions', amount: 1600 },
-    { name: 'Ryan Frey', section: 'ESTIMATORS', role: 'Commercial Estimator', amount: 1442 },
-    { name: 'Terry Emry', section: 'ESTIMATORS', role: 'Commissions', amount: 1442 },
-    { name: 'Xavier Cuellar', section: 'ESTIMATORS', role: 'Commercial Estimator', amount: 1200 },
-    { name: 'Charles Mike Holden', section: 'MANAGER SALARY', role: 'Manager Salary', amount: 2500 },
-    { name: 'Maria Donofrio', section: 'MANAGER SALARY', role: 'Manager Salary', amount: 1650 },
-    { name: 'Nathan Dunn', section: 'MANAGER SALARY', role: 'Manager Salary', amount: 1000 },
-    { name: 'Kristina Benson', section: 'MANAGER SALARY', role: 'Manager Salary', amount: 150 },
+    { name: 'Jodi Dunn', section: 'ADMIN', role: 'Manager Salary', amount: 865, entity: 'NV' },
+    { name: 'Jason Thompson', section: 'ESTIMATORS', role: 'Salary', amount: 1200, entity: 'NV' },
+    { name: 'Paul Good', section: 'ESTIMATORS', role: 'Commissions', amount: 1600, entity: 'NV' },
+    { name: 'Ryan Frey', section: 'ESTIMATORS', role: 'Commercial Estimator', amount: 1442, entity: 'NV' },
+    { name: 'Terry Emry', section: 'ESTIMATORS', role: 'Commissions', amount: 1442, entity: 'NV' },
+    { name: 'Xavier Cuellar', section: 'ESTIMATORS', role: 'Commercial Estimator', amount: 1200, entity: 'NV' },
+    { name: 'Charles Mike Holden', section: 'MANAGER SALARY', role: 'Manager Salary', amount: 2500, entity: 'NV' },
+    { name: 'Maria Donofrio', section: 'MANAGER SALARY', role: 'Manager Salary', amount: 1650, entity: 'NV' },
+    { name: 'Nathan Dunn', section: 'MANAGER SALARY', role: 'Manager Salary', amount: 1000, entity: 'NV' },
+    { name: 'Kristina Benson', section: 'MANAGER SALARY', role: 'Manager Salary', amount: 150, entity: 'NV' },
 ];
 exports.DEFAULT_MILEAGE_RATE = 0.625;
 exports.DEFAULT_SUBCONTRACTORS = [
@@ -110,9 +303,25 @@ exports.DEFAULT_SUBCONTRACTORS = [
     'Color Enterprises LLC',
     'Merino Custom Painting',
 ];
-/** Round 4 §5.8 — prevailing-wage (Davis-Bacon) job patterns + minimum rate. */
-exports.DEFAULT_PREVAILING_PATTERNS = ['SNRHA *SS*'];
+/**
+ * Round 4 §5.8 / Round 8 §9.1 — prevailing-wage (Davis-Bacon) job patterns +
+ * minimum rate. Broadened from `SNRHA *SS*` to the bare `SNRHA` substring so
+ * every SNRHA job matches regardless of the `*SS*` marker.
+ */
+exports.DEFAULT_PREVAILING_PATTERNS = ['SNRHA'];
 exports.DEFAULT_PREVAILING_MIN_RATE = 19.18;
+/** The narrow Round 4 pattern replaced by `SNRHA`; migrated once on load. */
+exports.LEGACY_PREVAILING_PATTERN = 'SNRHA *SS*';
+// One-time settings migrations (Round 8). Each id is recorded in
+// AppSettings.appliedMigrations so it never runs twice on the same blob.
+exports.MIGRATION_RF_COLOR = 'r8-rf-color';
+exports.MIGRATION_DB_PATTERN = 'r8-db-pattern';
+exports.MIGRATION_WAGE_SEEDS = 'r8-wage-seeds';
+exports.ALL_MIGRATIONS = [
+    exports.MIGRATION_RF_COLOR,
+    exports.MIGRATION_DB_PATTERN,
+    exports.MIGRATION_WAGE_SEEDS,
+];
 // v4: Round 3 payroll settings added. v3 legend/pivot values are migrated;
 // missing payroll sections get the seeds.
 const STORAGE_KEY = 'pct-completion-builder.settings.v4';
@@ -175,6 +384,16 @@ function defaultSettings() {
         defaultProfitSharePct: exports.DEFAULT_PROFIT_SHARE_PCT,
         wageRates: exports.DEFAULT_WAGE_RATES.map((e) => ({ ...e })),
         defaultWageRate: exports.DEFAULT_WAGE_RATE,
+        defaultCrewLeadRate: exports.DEFAULT_CREW_LEAD_RATE,
+        conditionalRateRules: exports.DEFAULT_CONDITIONAL_RATE_RULES.map((r) => ({
+            ...r,
+            condition: { ...r.condition },
+        })),
+        perJobRateOverrides: exports.DEFAULT_PER_JOB_RATE_OVERRIDES.map((r) => ({ ...r })),
+        nvDailyOtRateThreshold: exports.DEFAULT_NV_DAILY_OT_RATE_THRESHOLD,
+        dailyOtHoursThreshold: exports.DEFAULT_DAILY_OT_HOURS_THRESHOLD,
+        plAccountMapping: clonePlAccountMapping(exports.DEFAULT_PL_ACCOUNT_MAPPING),
+        painterRoster: exports.DEFAULT_PAINTER_ROSTER.map((p) => ({ ...p })),
         salariedRoster: exports.DEFAULT_SALARIED.map((e) => ({ ...e })),
         mileageRate: exports.DEFAULT_MILEAGE_RATE,
         officeMileageRate: 0.5,
@@ -182,7 +401,20 @@ function defaultSettings() {
         prevailingWagePatterns: [...exports.DEFAULT_PREVAILING_PATTERNS],
         prevailingMinRate: exports.DEFAULT_PREVAILING_MIN_RATE,
         jobRateRules: [],
+        // Fresh settings already carry every Round 8 seed.
+        appliedMigrations: [...exports.ALL_MIGRATIONS],
     };
+}
+function clonePlAccountMapping(src) {
+    const one = (m) => ({
+        income: [...m.income],
+        materials: [...m.materials],
+        laborWagesSubs: [...m.laborWagesSubs],
+        sundries: [...m.sundries],
+        travel: [...m.travel],
+        mileage: [...m.mileage],
+    });
+    return { NV: one(src.NV), UT: one(src.UT) };
 }
 function parseLegend(raw) {
     if (typeof raw !== 'object' || raw === null || !Array.isArray(raw.legend)) {
@@ -245,6 +477,9 @@ function parsePayroll(raw) {
                     name: x.name,
                     rate: x.rate,
                     ...(typeof x.hourlyRate === 'number' && Number.isFinite(x.hourlyRate) ? { hourlyRate: x.hourlyRate } : {}),
+                    ...(typeof x.crewLeadRate === 'number' && Number.isFinite(x.crewLeadRate)
+                        ? { crewLeadRate: x.crewLeadRate }
+                        : {}),
                 });
             }
         }
@@ -254,6 +489,75 @@ function parsePayroll(raw) {
     if (typeof r.defaultWageRate === 'number' && Number.isFinite(r.defaultWageRate)) {
         out.defaultWageRate = r.defaultWageRate;
     }
+    if (typeof r.defaultCrewLeadRate === 'number' && Number.isFinite(r.defaultCrewLeadRate)) {
+        out.defaultCrewLeadRate = r.defaultCrewLeadRate;
+    }
+    if (typeof r.nvDailyOtRateThreshold === 'number' && Number.isFinite(r.nvDailyOtRateThreshold)) {
+        out.nvDailyOtRateThreshold = r.nvDailyOtRateThreshold;
+    }
+    if (typeof r.dailyOtHoursThreshold === 'number' && Number.isFinite(r.dailyOtHoursThreshold)) {
+        out.dailyOtHoursThreshold = r.dailyOtHoursThreshold;
+    }
+    if (Array.isArray(r.conditionalRateRules)) {
+        const rules = [];
+        for (const e of r.conditionalRateRules) {
+            if (typeof e !== 'object' || e === null)
+                continue;
+            const x = e;
+            const cond = x.condition;
+            if (typeof x.person !== 'string' || typeof x.rate !== 'number' || !Number.isFinite(x.rate))
+                continue;
+            if (!cond || cond.kind !== 'onSameJobAsLead' || typeof cond.leadName !== 'string')
+                continue;
+            rules.push({
+                id: typeof x.id === 'string' && x.id ? x.id : `cond-${rules.length}`,
+                person: x.person,
+                condition: { kind: 'onSameJobAsLead', leadName: cond.leadName },
+                rate: x.rate,
+                ...(typeof x.note === 'string' ? { note: x.note } : {}),
+            });
+        }
+        out.conditionalRateRules = rules;
+    }
+    if (Array.isArray(r.perJobRateOverrides)) {
+        const rules = [];
+        for (const e of r.perJobRateOverrides) {
+            if (typeof e !== 'object' || e === null)
+                continue;
+            const x = e;
+            if (typeof x.person !== 'string' || typeof x.apKeyPattern !== 'string')
+                continue;
+            if (typeof x.rate !== 'number' || !Number.isFinite(x.rate))
+                continue;
+            rules.push({
+                id: typeof x.id === 'string' && x.id ? x.id : `perjob-${rules.length}`,
+                person: x.person,
+                apKeyPattern: x.apKeyPattern,
+                rate: x.rate,
+                ...(typeof x.note === 'string' ? { note: x.note } : {}),
+            });
+        }
+        out.perJobRateOverrides = rules;
+    }
+    const mapping = parsePlAccountMapping(r.plAccountMapping);
+    if (mapping)
+        out.plAccountMapping = mapping;
+    if (Array.isArray(r.painterRoster)) {
+        const list = [];
+        for (const e of r.painterRoster) {
+            if (typeof e !== 'object' || e === null)
+                continue;
+            const x = e;
+            if (typeof x.name !== 'string' || x.name.trim() === '')
+                continue;
+            list.push({
+                name: x.name,
+                active: x.active === true,
+                ...(typeof x.note === 'string' && x.note !== '' ? { note: x.note } : {}),
+            });
+        }
+        out.painterRoster = list;
+    }
     if (Array.isArray(r.salariedRoster)) {
         const list = [];
         for (const e of r.salariedRoster) {
@@ -262,7 +566,14 @@ function parsePayroll(raw) {
                 (x.section === 'ADMIN' || x.section === 'ESTIMATORS' || x.section === 'MANAGER SALARY') &&
                 typeof x.amount === 'number' &&
                 Number.isFinite(x.amount)) {
-                list.push({ name: x.name, section: x.section, role: typeof x.role === 'string' ? x.role : '', amount: x.amount });
+                list.push({
+                    name: x.name,
+                    section: x.section,
+                    role: typeof x.role === 'string' ? x.role : '',
+                    amount: x.amount,
+                    // Round 8 §7.3 — pre-Round-8 rows have no entity; they are NV.
+                    entity: x.entity === 'UT' ? 'UT' : 'NV',
+                });
             }
         }
         if (list.length > 0)
@@ -307,19 +618,113 @@ function parsePayroll(raw) {
         }
         out.jobRateRules = rules;
     }
+    if (Array.isArray(r.appliedMigrations)) {
+        out.appliedMigrations = r.appliedMigrations.filter((s) => typeof s === 'string');
+    }
+    else {
+        // Pre-Round-8 blob: nothing has been migrated yet.
+        out.appliedMigrations = [];
+    }
     return out;
+}
+/** Validate a persisted `plAccountMapping`; unknown metrics/entities are dropped. */
+function parsePlAccountMapping(raw) {
+    if (typeof raw !== 'object' || raw === null)
+        return null;
+    const src = raw;
+    const metrics = ['income', 'materials', 'laborWagesSubs', 'sundries', 'travel', 'mileage'];
+    const one = (entity) => {
+        const e = src[entity];
+        if (typeof e !== 'object' || e === null)
+            return null;
+        const rec = e;
+        const fallback = exports.DEFAULT_PL_ACCOUNT_MAPPING[entity];
+        const out = {};
+        for (const m of metrics) {
+            const v = rec[m];
+            out[m] = Array.isArray(v)
+                ? v.filter((s) => typeof s === 'string' && s.trim() !== '')
+                : [...fallback[m]];
+        }
+        return out;
+    };
+    const nv = one('NV');
+    const ut = one('UT');
+    if (!nv && !ut)
+        return null;
+    return {
+        NV: nv ?? clonePlAccountMapping(exports.DEFAULT_PL_ACCOUNT_MAPPING).NV,
+        UT: ut ?? clonePlAccountMapping(exports.DEFAULT_PL_ACCOUNT_MAPPING).UT,
+    };
+}
+/**
+ * Validate any persisted settings payload (localStorage or the shared store)
+ * and fill every missing section from the seeds. Returns null when the payload
+ * is not a settings object at all. Round 8 migrations are applied here, so both
+ * storage paths heal identically.
+ */
+function parseSettings(raw) {
+    const legend = parseLegend(raw);
+    if (!legend)
+        return null;
+    const pivotColumnOrder = ensureDefaultPivotColumns(parsePivotOrder(raw) ?? [...exports.DEFAULT_PIVOT_COLUMNS]);
+    return applySettingsMigrations({
+        ...defaultSettings(),
+        ...parsePayroll(raw),
+        legend,
+        pivotColumnOrder,
+    });
+}
+/**
+ * Round 8 one-time data migrations, each gated by an id in `appliedMigrations`:
+ * §5 RF `DA9694` → `C4A484`, §9.1 Davis-Bacon `SNRHA *SS*` → `SNRHA`, and the
+ * §9.3 three-rate wage seeds merged by name.
+ */
+function applySettingsMigrations(settings) {
+    const done = new Set(settings.appliedMigrations);
+    let next = settings;
+    const patch = (p) => {
+        next = { ...next, ...p };
+    };
+    if (!done.has(exports.MIGRATION_RF_COLOR)) {
+        // Only the exact old seed moves; a custom RF pick is left alone.
+        patch({
+            legend: next.legend.map((l) => l.estimator === 'RF' && l.color.toUpperCase() === exports.LEGACY_RF_COLOR ? { ...l, color: 'C4A484' } : l),
+        });
+        done.add(exports.MIGRATION_RF_COLOR);
+    }
+    if (!done.has(exports.MIGRATION_DB_PATTERN)) {
+        const broadened = [];
+        for (const p of next.prevailingWagePatterns) {
+            const v = p.trim() === exports.LEGACY_PREVAILING_PATTERN ? 'SNRHA' : p;
+            if (!broadened.includes(v))
+                broadened.push(v);
+        }
+        patch({ prevailingWagePatterns: broadened });
+        done.add(exports.MIGRATION_DB_PATTERN);
+    }
+    if (!done.has(exports.MIGRATION_WAGE_SEEDS)) {
+        patch({
+            wageRates: mergeWageRateSeeds(next.wageRates, exports.ROUND8_WAGE_SEEDS, 'fillMissing'),
+            conditionalRateRules: next.conditionalRateRules.length > 0
+                ? next.conditionalRateRules
+                : exports.DEFAULT_CONDITIONAL_RATE_RULES.map((r) => ({ ...r, condition: { ...r.condition } })),
+            perJobRateOverrides: next.perJobRateOverrides.length > 0
+                ? next.perJobRateOverrides
+                : exports.DEFAULT_PER_JOB_RATE_OVERRIDES.map((r) => ({ ...r })),
+        });
+        done.add(exports.MIGRATION_WAGE_SEEDS);
+    }
+    return { ...next, appliedMigrations: [...done] };
 }
 function loadSettings() {
     try {
         // v4 first; fall back to v3 (legend/pivot only) so users keep palette edits.
         const raw = localStorage.getItem(STORAGE_KEY) ?? localStorage.getItem(STORAGE_KEY_V3);
         if (raw) {
-            const parsed = JSON.parse(raw);
-            const legend = parseLegend(parsed);
-            if (legend) {
-                const pivotColumnOrder = ensureDefaultPivotColumns(parsePivotOrder(parsed) ?? [...exports.DEFAULT_PIVOT_COLUMNS]);
-                return { ...defaultSettings(), ...parsePayroll(parsed), legend, pivotColumnOrder };
-            }
+            const parsed = parseSettings(JSON.parse(raw));
+            if (parsed)
+                return parsed;
         }
     }
     catch {
@@ -327,12 +732,112 @@ function loadSettings() {
     }
     return defaultSettings();
 }
+/** True when this browser has its own saved settings (drives the §1 push-up). */
+function hasLocalSettings() {
+    try {
+        return (localStorage.getItem(STORAGE_KEY) !== null || localStorage.getItem(STORAGE_KEY_V3) !== null);
+    }
+    catch {
+        return false;
+    }
+}
 function saveSettings(settings) {
     try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
     }
     catch {
         // localStorage unavailable — settings just won't persist.
+    }
+}
+async function probeSettingsStore() {
+    try {
+        const res = await fetch('/api/settings', { cache: 'no-store' });
+        if (res.status === 503)
+            return 'unconfigured';
+        if (res.status === 404)
+            return 'empty';
+        if (!res.ok)
+            return 'error';
+        // Dev/static hosts answer unknown paths with index.html — that is not a store.
+        try {
+            await res.json();
+        }
+        catch {
+            return 'unconfigured';
+        }
+        return 'ready';
+    }
+    catch {
+        return 'error';
+    }
+}
+/** Accept either the `{ settings, savedAt }` envelope or a bare AppSettings blob. */
+function parseStoredSettings(raw) {
+    if (typeof raw === 'object' && raw !== null && 'settings' in raw) {
+        return parseSettings(raw.settings);
+    }
+    return parseSettings(raw);
+}
+/**
+ * Load the shared Settings (Vercel Blob via /api). This is what lets a cleared
+ * browser or incognito window see the same saved Settings.
+ */
+async function fetchAppSettings() {
+    try {
+        const res = await fetch('/api/settings', { cache: 'no-store' });
+        if (res.ok)
+            return parseStoredSettings((await res.json()));
+    }
+    catch {
+        // fall through
+    }
+    // Local vite / static fallback (not used for cross-device on Vercel).
+    try {
+        const res = await fetch('/app-settings.json', { cache: 'no-store' });
+        if (res.ok)
+            return parseStoredSettings((await res.json()));
+    }
+    catch {
+        // ignore
+    }
+    return null;
+}
+/** Write the current Settings to the shared store (last write wins). */
+async function persistAppSettings(settings) {
+    const payload = { settings, savedAt: new Date().toISOString() };
+    try {
+        const res = await fetch('/api/settings', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        if (res.ok)
+            return { ok: true };
+        let message = `Could not sync Settings (HTTP ${res.status}).`;
+        try {
+            const body = (await res.json());
+            if (body.message)
+                message = body.message;
+        }
+        catch {
+            // ignore
+        }
+        return { ok: false, status: res.status, message };
+    }
+    catch {
+        return {
+            ok: false,
+            status: 0,
+            message: 'Shared sync unavailable — your Settings are still saved in this browser. Cross-device sync is optional.',
+        };
+    }
+}
+async function clearAppSettings() {
+    try {
+        await fetch('/api/settings', { method: 'DELETE' });
+    }
+    catch {
+        // ignore
     }
 }
 // ---------------------------------------------------------------------------

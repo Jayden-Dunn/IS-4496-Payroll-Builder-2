@@ -1,11 +1,19 @@
 import { addDays, dateOnly, fmtDate, fmtHours } from './format';
-import type { EnrichedTimesheetRow, ExceptionGroup, ExceptionItem, ReportRow } from './types';
+import type {
+  EnrichedTimesheetRow,
+  ExceptionGroup,
+  ExceptionItem,
+  PivotByJobModel,
+  ReportRow,
+} from './types';
 
 export interface ExceptionsInput {
   reportRows: ReportRow[];
   enriched: EnrichedTimesheetRow[];
   lunchRemoved: number;
   payDate: Date | null;
+  /** Round 8 §4.3 — supplies the carried jobs whose customer never resolved. */
+  pivotByJob?: PivotByJobModel | null;
 }
 
 /** Total item count across groups (drives the "Exceptions (n)" tab badge). */
@@ -166,7 +174,17 @@ export function buildExceptions(input: ExceptionsInput): ExceptionGroup[] {
       .map((r) => ({ message: `AP ${r.apKey} — "${r.event}"`, rowId: r.id })),
   });
 
-  // 9. Lunch rows removed.
+  // 9. Carried jobs whose customer could not be resolved (Round 8 §4.3).
+  groups.push({
+    key: 'carriedCustomer',
+    title: 'Carried job customer not resolved',
+    note: 'No AP# match in either Sales by Customer Summary and none in the P&L header structure — the carried name is left as-is.',
+    items: (input.pivotByJob?.unresolvedCarriedCustomers ?? []).map((apKey) => ({
+      message: `AP ${apKey} — customer not resolved for carried job ${apKey}`,
+    })),
+  });
+
+  // 10. Lunch rows removed.
   groups.push({
     key: 'lunch',
     title: 'Lunch rows removed',

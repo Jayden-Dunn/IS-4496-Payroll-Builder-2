@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.normalizeApInput = void 0;
+exports.percentTextValue = exports.percentText = exports.percentIsValidState = exports.percentExcelValue = exports.matchesSubbedOut = exports.matchesSetRate = exports.isPercentText = exports.isPercentState = exports.isPercentNumber = exports.normalizeApInput = void 0;
 exports.suggestPercent = suggestPercent;
 exports.extractTitleInitials = extractTitleInitials;
 exports.estimatorFromTitle = estimatorFromTitle;
@@ -8,6 +8,7 @@ exports.reportRowId = reportRowId;
 exports.buildReportRows = buildReportRows;
 exports.sortReportRows = sortReportRows;
 exports.percentIsFlagged = percentIsFlagged;
+exports.percentIsRedFlagged = percentIsRedFlagged;
 exports.duplicateInQboValues = duplicateInQboValues;
 exports.dollarDiffIsFlagged = dollarDiffIsFlagged;
 const apkey_1 = require("./apkey");
@@ -40,7 +41,8 @@ function extractStatusLines(description) {
 }
 /**
  * Select the status line for the pay date: exact match first, else the latest
- * line dated on or before the pay date. Parse % or HOURLY from that line only.
+ * line dated on or before the pay date. Parse % / HOURLY / SUBBED / SET RATE
+ * from that line only (Round 8 §2.4).
  */
 function suggestPercent(description, payDate) {
     const statusLines = extractStatusLines(description);
@@ -63,6 +65,12 @@ function suggestPercent(description, payDate) {
     }
     if (/hourly/i.test(text))
         return { value: 'HOURLY', line: selected.line };
+    // §2.4 — the slot where the % normally sits can instead read "subbed out"
+    // or "set rate"; both are valid states, not missing data.
+    if ((0, format_1.matchesSubbedOut)(text))
+        return { value: 'SUBBED', line: selected.line };
+    if ((0, format_1.matchesSetRate)(text))
+        return { value: 'SET RATE', line: selected.line };
     return { value: null, line: selected.line };
 }
 /** First "(XX)" group of 2–3 uppercase letters in an event title. */
@@ -120,12 +128,11 @@ function buildReportRows(events, edits, deps, payDate) {
         const jobTotalFound = nvTotal !== undefined || utTotal !== undefined;
         const matchedTotal = nvTotal ?? utTotal ?? 0;
         const jobTotal = jobTotalFound ? matchedTotal : '#N/A';
+        // Round 8 §2.2 — Apptivo $ is blank until someone types it; no auto-fill
+        // from the job-total lookup, so $ Difference stays blank too (and the
+        // Round 4 pink flag never fires off a blank pair).
         const apptivoEdited = edit.apptivo !== undefined;
-        const apptivo = apptivoEdited
-            ? (edit.apptivo ?? null)
-            : jobTotalFound
-                ? matchedTotal
-                : null;
+        const apptivo = apptivoEdited ? (edit.apptivo ?? null) : null;
         const dollarDiff = jobTotalFound && apptivo !== null ? matchedTotal - apptivo : null;
         const dateDiff = invoiceDate && ev.startDate ? (0, format_1.dateDiffDays)(invoiceDate, ev.startDate) : null;
         return {
@@ -175,6 +182,18 @@ function sortReportRows(rows, estimatorOrder) {
     })
         .map((x) => x.r);
 }
+// Round 8 §2.3 — % Completion value helpers live in format.ts; re-exported here
+// so grid/export consumers can pull them from either module.
+var format_2 = require("./format");
+Object.defineProperty(exports, "isPercentNumber", { enumerable: true, get: function () { return format_2.isPercentNumber; } });
+Object.defineProperty(exports, "isPercentState", { enumerable: true, get: function () { return format_2.isPercentState; } });
+Object.defineProperty(exports, "isPercentText", { enumerable: true, get: function () { return format_2.isPercentText; } });
+Object.defineProperty(exports, "matchesSetRate", { enumerable: true, get: function () { return format_2.matchesSetRate; } });
+Object.defineProperty(exports, "matchesSubbedOut", { enumerable: true, get: function () { return format_2.matchesSubbedOut; } });
+Object.defineProperty(exports, "percentExcelValue", { enumerable: true, get: function () { return format_2.percentExcelValue; } });
+Object.defineProperty(exports, "percentIsValidState", { enumerable: true, get: function () { return format_2.percentIsValidState; } });
+Object.defineProperty(exports, "percentText", { enumerable: true, get: function () { return format_2.percentText; } });
+Object.defineProperty(exports, "percentTextValue", { enumerable: true, get: function () { return format_2.percentTextValue; } });
 // ---------------------------------------------------------------------------
 // Round 4 §1.1 — pink review flags (shared by the grid and the export)
 // ---------------------------------------------------------------------------
@@ -183,6 +202,13 @@ function percentIsFlagged(v) {
     if (v === 'HOURLY')
         return true;
     return typeof v === 'number' && (v > 1 || v < 0);
+}
+/**
+ * Round 8 §2.4 — `% Completion` turns solid red (white bold text) when it holds
+ * no valid state: blank, 0%, or text that isn't HOURLY / SUBBED / SET RATE.
+ */
+function percentIsRedFlagged(v) {
+    return !(0, format_1.percentIsValidState)(v);
 }
 /**
  * `In QBO Time?` values shared by 2+ included rows (a duplicate timesheet job

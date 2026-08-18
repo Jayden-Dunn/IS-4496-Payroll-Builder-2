@@ -2,8 +2,9 @@
  * Round 6 payroll derived tabs — condensed layouts fed from PayrollPreviewModel
  * (same shared model as Payroll Preview). Core = data content + recognizable sketch.
  */
-import { useState, type CSSProperties, type ReactNode } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import { fmtAccounting, isDarkColor, parseMoneyInput, parsePercentInput } from '../lib/format';
+import { CellInput } from './CellInput';
 import { buildJournalEntryRows } from '../lib/journalEntry';
 import { buildPrFinalCheckRows } from '../lib/prFinalCheck';
 import type {
@@ -46,54 +47,39 @@ function NumCell({
   onCommit,
   pct,
   className,
+  placeholder,
 }: {
   value: number | null;
   onCommit: (n: number | null) => void;
   pct?: boolean;
   className?: string;
+  placeholder?: string;
 }): JSX.Element {
-  const [text, setText] = useState<string | null>(null);
   const display = value === null ? '' : pct ? `${Math.round(value * 100)}%` : value.toFixed(2);
   return (
-    <input
-      className={`cell-input text-right ${className ?? ''}`}
-      value={text ?? display}
-      onChange={(e) => setText(e.target.value)}
-      onFocus={() => setText(display)}
-      onBlur={() => {
-        if (text !== null && text !== display) {
-          if (pct) {
-            const p = parsePercentInput(text);
-            onCommit(typeof p === 'number' ? p : null);
-          } else {
-            onCommit(parseMoneyInput(text));
-          }
+    <CellInput
+      value={display}
+      className={`text-right ${className ?? ''}`}
+      placeholder={placeholder}
+      onCommit={(text) => {
+        if (pct) {
+          const p = parsePercentInput(text);
+          onCommit(typeof p === 'number' ? p : null);
+        } else {
+          onCommit(parseMoneyInput(text));
         }
-        setText(null);
-      }}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-        if (e.key === 'Escape') setText(null);
       }}
     />
   );
 }
 
 function MemoCell({ value, onCommit }: { value: string; onCommit: (t: string) => void }): JSX.Element {
-  const [text, setText] = useState<string | null>(null);
   return (
-    <input
-      className="cell-input italic text-neutral-600"
+    <CellInput
+      value={value}
+      onCommit={onCommit}
+      className="italic text-neutral-600"
       placeholder="memo…"
-      value={text ?? value}
-      onChange={(e) => setText(e.target.value)}
-      onBlur={() => {
-        if (text !== null && text !== value) onCommit(text);
-        setText(null);
-      }}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-      }}
     />
   );
 }
@@ -158,11 +144,11 @@ function PsChainBody({
       <tbody>
         <tr>
           {label('PO')}
-          {jobs.map((j, i) => (
+          {jobs.map((j) => (
             <td
               key={j.jobRowId}
               className="xcell text-right text-[11px] font-bold"
-              style={highlightFirstJob && i === 0 ? HOURLY_PAY_YELLOW : jobCellStyle(j.colorHex)}
+              style={jobCellStyle(j.colorHex)}
             >
               {j.jobShort}
             </td>
@@ -170,11 +156,11 @@ function PsChainBody({
         </tr>
         <tr>
           {label('Name')}
-          {jobs.map((j, i) => (
+          {jobs.map((j) => (
             <td
               key={j.jobRowId}
               className="xcell text-right text-[11px] font-bold"
-              style={highlightFirstJob && i === 0 ? HOURLY_PAY_YELLOW : jobCellStyle(j.colorHex)}
+              style={jobCellStyle(j.colorHex)}
             >
               {j.customer}
             </td>
@@ -182,9 +168,10 @@ function PsChainBody({
         </tr>
         {(
           [
-            ['Profit Share', (j: PsBlock['jobs'][number]) => money(j.profitShare)],
+            // Round 8 §8.1 — SUBBED / SET RATE render blank (no auto share).
+            ['Profit Share', (j: PsBlock['jobs'][number]) => (j.manualPay ? '' : money(j.profitShare))],
             ['Work Order Override', (j: PsBlock['jobs'][number]) => (j.workOrderOverride !== null ? money(j.workOrderOverride) : '')],
-            ['% Completion', (j: PsBlock['jobs'][number]) => pctLabel(j.percentCompletion)],
+            ['% Completion', (j: PsBlock['jobs'][number]) => (j.manualPay ? j.manualPay : pctLabel(j.percentCompletion))],
             ['- Labor + Wages', (j: PsBlock['jobs'][number]) => money(j.laborWages)],
             ['-Mileage', (j: PsBlock['jobs'][number]) => money(j.mileage)],
             ['-½ Materials', (j: PsBlock['jobs'][number]) => money(j.halfMaterials)],
@@ -202,7 +189,8 @@ function PsChainBody({
                 ) : lab === '% Completion' && editable && onEdit ? (
                   <NumCell
                     pct
-                    value={j.percentCompletion}
+                    value={j.manualPay ? null : j.percentCompletion}
+                    placeholder={j.manualPay ?? undefined}
                     onCommit={(n) => onEdit(psKey(j.jobRowId), { percentCompletion: n ?? 0 })}
                   />
                 ) : (
@@ -223,8 +211,12 @@ function PsChainBody({
                 ? `@ ${Math.round(j.woPct * 100)}% PS`
                 : '';
             return (
-              <td key={j.jobRowId} className="xcell text-right">
-                {money(j.totalProfitShare)}
+              <td
+                key={j.jobRowId}
+                className="xcell text-right"
+                title={j.manualPay ? `${j.manualPay} — enter pay manually` : undefined}
+              >
+                {j.manualPay ? '' : money(j.totalProfitShare)}
                 {note && <span className="ml-1 text-[10px] font-normal text-neutral-600">{note}</span>}
               </td>
             );
@@ -259,7 +251,14 @@ function PsChainBody({
         <tr className="font-semibold">
           <td className="xcell w-40">Hourly Pay</td>
           <td className="xcell text-right" colSpan={Math.max(jobs.length, 1)} style={HOURLY_PAY_YELLOW}>
-            {money(block.hourlyPay)}
+            {editable && onEdit ? (
+              <NumCell
+                value={block.hourlyPay}
+                onCommit={(n) => onEdit(`psb:${block.key}`, { hourlyPay: n ?? 0 })}
+              />
+            ) : (
+              money(block.hourlyPay)
+            )}
           </td>
         </tr>
         <tr>
@@ -342,6 +341,15 @@ function PsChainBody({
           {jobs.map((j) => (
             <td key={j.jobRowId} className="xcell text-right">
               {money(j.materials)}
+            </td>
+          ))}
+        </tr>
+        {/* Round 8 §8.5 — informational, directly beneath Materials. */}
+        <tr>
+          {label('Travel')}
+          {jobs.map((j) => (
+            <td key={j.jobRowId} className="xcell text-right">
+              {money(j.travel)}
             </td>
           ))}
         </tr>
@@ -638,7 +646,13 @@ function PainterSequence({
 // Tabs
 // ---------------------------------------------------------------------------
 
-export function ProfitshareOutputTab({ model }: { model: PayrollPreviewModel | null }): JSX.Element {
+export function ProfitshareOutputTab({
+  model,
+  onEdit,
+}: {
+  model: PayrollPreviewModel | null;
+  onEdit?: OnEdit;
+}): JSX.Element {
   if (!model) return <EmptyPayroll label="Profitshare Output needs Payroll Preview" />;
   const leads = model.leads;
   return (
@@ -654,7 +668,7 @@ export function ProfitshareOutputTab({ model }: { model: PayrollPreviewModel | n
               className="shrink-0"
               style={{ marginLeft: i === 0 ? 0 : '2rem' /* spacer ≈ 8th column between bands */ }}
             >
-              <PsChainBody block={block} nameStyle={NAME_RED} highlightFirstJob />
+              <PsChainBody block={block} nameStyle={NAME_RED} highlightFirstJob onEdit={onEdit} />
             </div>
           ))}
         </div>
@@ -666,9 +680,11 @@ export function ProfitshareOutputTab({ model }: { model: PayrollPreviewModel | n
 export function ManagementReportTab({
   model,
   defaultPsPct = 0.38,
+  onEdit,
 }: {
   model: PayrollPreviewModel | null;
   defaultPsPct?: number;
+  onEdit?: OnEdit;
 }): JSX.Element {
   if (!model) return <EmptyPayroll label="Management Report needs Payroll Preview" />;
   return (
@@ -691,7 +707,12 @@ export function ManagementReportTab({
           </table>
           {model.leads.map((block) => (
             <div key={block.key} className="mb-6">
-              <PsChainBody block={block} defaultPsPct={defaultPsPct} nameStyle={NAME_GREEN} />
+              <PsChainBody
+                block={block}
+                defaultPsPct={defaultPsPct}
+                nameStyle={NAME_GREEN}
+                onEdit={onEdit}
+              />
               <div className="h-6" />
             </div>
           ))}
@@ -764,7 +785,8 @@ export function InputNumsTab({
                     <td key={j.jobRowId} className="xcell text-right">
                       <NumCell
                         pct
-                        value={j.percentCompletion}
+                        value={j.manualPay ? null : j.percentCompletion}
+                        placeholder={j.manualPay ?? undefined}
                         onCommit={(n) => onEdit(psKey(j.jobRowId), { percentCompletion: n ?? 0 })}
                       />
                     </td>
@@ -789,6 +811,16 @@ export function InputNumsTab({
                   <td className="xcell" colSpan={Math.max(jobs.length - 1, 1)}>
                     <MemoCell value={block.reimbMemo} onCommit={(t) => onEdit(`psb:${block.key}`, { reimbMemo: t })} />
                   </td>
+                </tr>
+                <tr>
+                  <td className="xcell">Hourly Pay</td>
+                  <td className="xcell text-right" style={HOURLY_PAY_YELLOW}>
+                    <NumCell
+                      value={block.hourlyPay}
+                      onCommit={(n) => onEdit(`psb:${block.key}`, { hourlyPay: n ?? 0 })}
+                    />
+                  </td>
+                  <td className="xcell" colSpan={Math.max(jobs.length - 1, 1)} />
                 </tr>
                 <tr>
                   <td className="xcell">Deductions/Sundries</td>

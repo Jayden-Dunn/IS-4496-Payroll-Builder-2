@@ -24,9 +24,15 @@ import type {
 
 export interface PayrollExceptionsInput {
   pbj: PivotByJobModel;
+  /** The NV `PAYROLL PREVIEW` model. */
   preview: PayrollPreviewModel;
+  /** Round 8 §7.3 — the `Payroll Preview - UT` model, when the week has one. */
+  previewUt?: PayrollPreviewModel | null;
   reportRows: ReportRow[];
+  /** Slot B — the NV P&L. */
   pl: PlParseResult | null;
+  /** Round 8 §7.2 — Slot C, the optional UT P&L. */
+  plUt?: PlParseResult | null;
   /** Directory uploaded? When false, lead resolution used timesheet names. */
   hasDirectory: boolean;
   /** Threshold under which Total Profit Share raises a review item (§6.7). */
@@ -45,6 +51,22 @@ export function buildPayrollExceptions(input: PayrollExceptionsInput): Exception
   const groups: ExceptionGroup[] = [];
   const jobs = pbj.customers.flatMap((c) => c.jobs.map((j) => ({ job: j, customer: c.customer })));
   const included = reportRows.filter((r) => r.included);
+
+  // Round 8 §7.3 — every band rule runs over BOTH entities' models. Only the
+  // "missing from P&L" rule cares which model it came from, because each one
+  // resolves against its own upload.
+  const previews: { model: PayrollPreviewModel; pl: PlParseResult | null }[] = [
+    { model: preview, pl },
+    ...(input.previewUt ? [{ model: input.previewUt, pl: input.plUt ?? null }] : []),
+  ];
+  const allLeads = previews.flatMap((p) => p.model.leads);
+  const allPainters = previews.flatMap((p) => p.model.painters);
+  const allOffice = previews.flatMap((p) => p.model.office);
+  const allBlocks = [
+    ...allPainters,
+    ...allOffice,
+    ...allLeads.flatMap((l) => (l.tsheets ? [l.tsheets] : [])),
+  ];
 
   // 1. Crew-lead resolution problems.
   {
@@ -103,7 +125,7 @@ export function buildPayrollExceptions(input: PayrollExceptionsInput): Exception
   {
     const timesheetAps = new Set(jobs.map(({ job }) => job.analysis.apKey).filter(Boolean));
     const subAps = new Set<string>();
-    for (const b of preview.leads) {
+    for (const b of allLeads) {
       if (!b.sub) continue;
       for (const j of b.jobs) if (j.apKey) subAps.add(j.apKey);
     }
@@ -127,16 +149,15 @@ export function buildPayrollExceptions(input: PayrollExceptionsInput): Exception
   // 4. Hours 40+ / under 10.
   {
     const items: ExceptionItem[] = [];
-    const everyBlock = [...preview.painters, ...preview.office, ...preview.leads.flatMap((l) => (l.tsheets ? [l.tsheets] : []))];
-    for (const b of everyBlock) {
+    for (const b of allBlocks) {
       const otLine = b.lines.find((l) => l.ot);
       if (otLine) {
         items.push({
-          message: `${b.employeeName} — ${fmtHours(b.totalHours)} h total: ${fmtHours(otLine.hours)} h OT at 1.5× on "${otLine.jobLabel.replace(' [OT]', '')}"`,
+          message: `${b.employeeName} — ${fmtHours(b.totalHours)} h total: ${fmtHours(otLine.hours)} h OT at 1.5× on "${otLine.jobLabel.replace(' [OT >40 hrs/wk]', '')}"`,
         });
       }
     }
-    for (const b of preview.painters) {
+    for (const b of allPainters) {
       if (!b.inactive && b.totalHours > 0 && b.totalHours < 10) {
         items.push({ message: `${b.employeeName} — only ${fmtHours(b.totalHours)} h this week (under 10)` });
       }
@@ -164,8 +185,7 @@ export function buildPayrollExceptions(input: PayrollExceptionsInput): Exception
         items.push({ message: `${job.jobcode2} — piece-rate job with no % of Completion on the TimeNavi grid` });
       }
     }
-    const everyBlock = [...preview.painters, ...preview.office, ...preview.leads.flatMap((l) => (l.tsheets ? [l.tsheets] : []))];
-    for (const b of everyBlock) {
+    for (const b of allBlocks) {
       if (b.lines.some((l) => l.rateDefaulted)) {
         items.push({ message: `${b.employeeName} — no configured wage rate (default $ applied); add them in Settings` });
       }
@@ -181,8 +201,7 @@ export function buildPayrollExceptions(input: PayrollExceptionsInput): Exception
   // 5b (Round 4/6 §7.1). Davis-Bacon job paid below the DB minimum (manual edit).
   {
     const items: ExceptionItem[] = [];
-    const everyBlock = [...preview.painters, ...preview.office, ...preview.leads.flatMap((l) => (l.tsheets ? [l.tsheets] : []))];
-    for (const b of everyBlock) {
+    for (const b of allBlocks) {
       for (const l of b.lines) {
         if (l.belowPrevailing) {
           items.push({
@@ -202,7 +221,7 @@ export function buildPayrollExceptions(input: PayrollExceptionsInput): Exception
   // 5c (Round 6 §7.1 Branch 2). Davis-Bacon floor applied on crew-lead pay.
   {
     const items: ExceptionItem[] = [];
-    for (const b of preview.leads) {
+    for (const b of allLeads) {
       for (const j of b.jobs) {
         if (!j.dbFloorApplied) continue;
         const ps = (j.dbFloorPriorPay ?? j.totalAfterSplit).toFixed(2);
@@ -224,8 +243,7 @@ export function buildPayrollExceptions(input: PayrollExceptionsInput): Exception
   // 5d (Round 6 §7.2). Job-rate rule applied (informational).
   {
     const items: ExceptionItem[] = [];
-    const everyBlock = [...preview.painters, ...preview.office, ...preview.leads.flatMap((l) => (l.tsheets ? [l.tsheets] : []))];
-    for (const b of everyBlock) {
+    for (const b of allBlocks) {
       for (const l of b.lines) {
         if (!l.fromJobRule) continue;
         const note = l.ruleNote ? ` (${l.ruleNote})` : '';
@@ -242,11 +260,12 @@ export function buildPayrollExceptions(input: PayrollExceptionsInput): Exception
     });
   }
 
-  // 5e (Round 6 §6.2). No work-order % for lead (pivot blank + no Settings crew map entry).
+  // 5e (Round 6 §6.2 / Round 8 §9.4). No work-order % for lead. With §9.4
+  // auto-add in place this only fires when the auto-add was declined.
   {
     const items: ExceptionItem[] = [];
     const seen = new Set<string>();
-    for (const b of preview.leads) {
+    for (const b of allLeads) {
       if (b.jobs.some((j) => j.woPct === null) && !seen.has(b.leadName)) {
         seen.add(b.leadName);
         items.push({ message: `no work-order % for ${b.leadName}` });
@@ -255,22 +274,107 @@ export function buildPayrollExceptions(input: PayrollExceptionsInput): Exception
     groups.push({
       key: 'noWorkOrderPct',
       title: 'No work-order %',
-      note: 'Pivot WO% blank and the lead has no Work-order % entry in Settings — Profit Share uses 0 until one is set.',
+      note: 'Every band resolves its WO% from the pivot cell, Settings, or the §9.4 auto-add — this only fills up if the auto-add was declined.',
       items,
     });
   }
 
-  // 6. Job missing from P&L.
+  // 5f (Round 8 §9.4). Crew lead auto-added to the profit-share map.
+  {
+    const seen = new Set<string>();
+    const items: ExceptionItem[] = [];
+    for (const p of previews) {
+      for (const n of p.model.newLeadsToAdd) {
+        const key = n.lead.trim().toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        items.push({ message: `new crew lead ${n.lead} added at default ${Math.round(n.pct * 100)}%` });
+      }
+    }
+    groups.push({
+      key: 'newCrewLeadDefault',
+      title: 'New crew lead added at the default %',
+      note: 'Informational: the lead resolved from the input data with no Work-order % on file, so the seeded default was applied and saved to Settings. Change it there if the crew negotiated a different split.',
+      items,
+    });
+  }
+
+  // 5g (Round 8 §8.1). SUBBED / SET RATE jobs pay nothing automatically.
+  {
+    const items: ExceptionItem[] = [];
+    const missingPct: ExceptionItem[] = [];
+    for (const b of allLeads) {
+      for (const j of b.jobs) {
+        const po = j.apKey ? `AP${j.apKey}` : j.jobShort;
+        if (j.manualPay) {
+          items.push({ message: `${po} is ${j.manualPay} — enter pay manually` });
+        } else if (j.missingPercent) {
+          missingPct.push({ message: `missing % completion for ${po} (${b.leadName})` });
+        }
+      }
+    }
+    groups.push({
+      key: 'manualPayJob',
+      title: 'Subbed / set-rate job — enter pay manually',
+      note: 'There is no auto profit share on these jobs. The band cells are blank and stay editable for the hand-entered amount.',
+      items,
+    });
+    groups.push({
+      key: 'missingPercentCompletion',
+      title: 'Missing % completion',
+      note: 'The §8.1 chain multiplies the base by % Completion, so a blank or unreadable % pays 0 — a deliberately conservative choice. It never silently pays 100%; fill the % in and the band recomputes.',
+      items: missingPct,
+    });
+  }
+
+  // 5h (Round 8 §9.2). NV daily overtime applied.
+  groups.push({
+    key: 'nvDailyOt',
+    title: 'NV daily overtime (over 8 hrs/day)',
+    note: 'Informational: NV hours past 8 in a single day at a rate under $18 pay 1.5×. These hours are excluded from the weekly >40 split, so no hour is paid overtime twice.',
+    items: previews.flatMap((p) =>
+      p.model.dailyOtNotes.map((n) => ({
+        message: `${n.employeeName} — ${n.date}: ${fmtHours(n.hours)} h over 8 @ $${n.rate.toFixed(2)} on "${n.jobLabel}"`,
+      })),
+    ),
+  });
+
+  // 6. Job missing from P&L. Each model is judged against ITS OWN upload, so a
+  // week with no UT P&L never accuses every UT job of being missing — those
+  // jobs simply keep the Job-Total-$ fallback (Round 8 §7.2).
   groups.push({
     key: 'missingFromPl',
     title: 'Job missing from P&L',
     note: 'Income/Labor default to 0 — the profit share cannot be computed until the P&L includes the job (or you edit the numbers).',
-    items: pl
-      ? preview.leads
-          .flatMap((b) => b.jobs.filter((j) => j.missingFromPl).map((j) => ({ b, j })))
-          .map(({ b, j }) => ({ message: `AP ${j.apKey ?? '—'} (${b.leadName}) — no P&L column` }))
-      : [],
+    items: previews.flatMap(({ model, pl: entityPl }) =>
+      entityPl
+        ? model.leads
+            .flatMap((b) => b.jobs.filter((j) => j.missingFromPl).map((j) => ({ b, j })))
+            .map(({ b, j }) => ({
+              message: `AP ${j.apKey ?? '—'} (${b.leadName})${model.entity === 'UT' ? ' [UT]' : ''} — no P&L column`,
+            }))
+        : [],
+    ),
   });
+
+  // 6b (Round 8 §7.1). COGS rows the Settings mapping never mentions. UT's
+  // `Reimbursements` shows up here by design — a new QBO account must never
+  // silently drop out of materials/labor without anyone noticing.
+  {
+    const items: ExceptionItem[] = [];
+    for (const source of [pl, input.plUt ?? null]) {
+      if (!source) continue;
+      for (const label of source.unmappedCogsRows) {
+        items.push({ message: `unmapped P&L account row: ${label} (${source.entity})` });
+      }
+    }
+    groups.push({
+      key: 'unmappedPlAccount',
+      title: 'Unmapped P&L account row',
+      note: 'Informational: the P&L carries a Cost of Goods Sold row that no metric in Settings → P&L account mapping claims, so it feeds nothing. Map it there if it belongs in materials, labor, sundries, travel or mileage.',
+      items,
+    });
+  }
 
   // 7. Profit share ≤ 0 or near-zero.
   {
@@ -279,9 +383,10 @@ export function buildPayrollExceptions(input: PayrollExceptionsInput): Exception
       key: 'lowProfitShare',
       title: `Profit share below $${threshold}`,
       note: 'Often means the crew went way over on the work order — consider an Addition/adjustment.',
-      items: preview.leads.flatMap((b) =>
+      items: allLeads.flatMap((b) =>
         b.jobs
-          .filter((j) => j.totalProfitShare < threshold && !j.missingFromPl)
+          // Manual (SUBBED / SET RATE) bands have no computed share to judge.
+          .filter((j) => j.totalProfitShare < threshold && !j.missingFromPl && !j.manualPay)
           .map((j) => ({
             message: `${b.leadName} — AP ${j.apKey ?? '—'} Total Profit Share ${j.totalProfitShare.toFixed(2)}`,
           })),
@@ -289,26 +394,28 @@ export function buildPayrollExceptions(input: PayrollExceptionsInput): Exception
     });
   }
 
-  // 8. Sundry double-count hint.
+  // 8 (Round 3 §6-8, reworked by Round 8 §8.3). Sundry double-count hint. The
+  // P&L sundries no longer sit inside materials — they ARE the default
+  // Deductions/Sundries entry — so the only thing left to flag is a manual
+  // edit that walked away from that default.
   {
     const items: ExceptionItem[] = [];
-    if (pl) {
-      for (const b of preview.leads) {
-        if (b.deductions === 0 && !b.deductMemo) continue;
-        for (const j of b.jobs) {
-          const metrics = j.apKey ? pl.byJob.get(j.apKey) : undefined;
-          if (metrics && metrics.sundries !== 0) {
-            items.push({
-              message: `${b.leadName} — AP ${j.apKey}: P&L shows a "Sundries -" amount (${metrics.sundries.toFixed(2)}) and the lead also has a Deductions/Sundries entry — remove it from ½-materials to avoid double-counting`,
-            });
-          }
-        }
-      }
+    for (const b of allLeads) {
+      if (b.sundriesDefault === 0 && b.deductions === 0) continue;
+      const entered = Math.round(b.deductions * 100) / 100;
+      const expected = Math.round(b.sundriesDefault * 100) / 100;
+      if (entered === expected) continue;
+      items.push({
+        message:
+          expected === 0
+            ? `${b.leadName} — Deductions/Sundries reads ${entered.toFixed(2)} but the P&L shows no sundries on these jobs — confirm it is not already inside materials`
+            : `${b.leadName} — P&L sundries total ${expected.toFixed(2)} but Deductions/Sundries reads ${entered.toFixed(2)}; the difference is a manual edit, confirm it is not double-counted`,
+      });
     }
     groups.push({
       key: 'sundryHint',
       title: 'Sundry double-count hint',
-      note: 'A sundry deducted from the painter should also come out of the ½-materials line.',
+      note: 'Sundries default into Deductions/Sundries (memo "Sundries (P&L)") and are no longer part of ½ Materials. This lists blocks whose entry differs from that default.',
       items,
     });
   }
@@ -317,7 +424,7 @@ export function buildPayrollExceptions(input: PayrollExceptionsInput): Exception
   groups.push({
     key: 'inactiveWithHours',
     title: 'Inactive employee has hours',
-    items: [...preview.painters, ...preview.office]
+    items: [...allPainters, ...allOffice]
       .filter((b) => b.inactive && b.totalHours > 0)
       .map((b) => ({ message: `${b.employeeName} — marked inactive (*) in the directory but has ${fmtHours(b.totalHours)} h` })),
   });
@@ -327,7 +434,11 @@ export function buildPayrollExceptions(input: PayrollExceptionsInput): Exception
     key: 'duplicatePlColumn',
     title: 'Duplicate P&L job column',
     note: 'The same AP number appeared in more than one P&L column — values were summed.',
-    items: (pl?.duplicateColumns ?? []).map((ap) => ({ message: `AP ${ap} appears in multiple P&L columns` })),
+    items: [pl, input.plUt ?? null].flatMap((source) =>
+      (source?.duplicateColumns ?? []).map((ap) => ({
+        message: `AP ${ap} appears in multiple P&L columns${source && source.entity === 'UT' ? ' [UT]' : ''}`,
+      })),
+    ),
   });
 
   // 11. Balances / UT carry-forward attention.
@@ -378,7 +489,7 @@ export function buildPayrollExceptions(input: PayrollExceptionsInput): Exception
     for (const r of included) {
       if (r.apKey && !seen.has(r.apKey)) consider(r.apKey, r.event);
     }
-    for (const lead of preview.leads) {
+    for (const lead of allLeads) {
       for (const j of lead.jobs) consider(j.apKey);
     }
     groups.push({
@@ -392,6 +503,27 @@ export function buildPayrollExceptions(input: PayrollExceptionsInput): Exception
       title: 'Job name unresolved',
       note: 'No timesheet, carry-forward, QBO, or P&L name was found — the PO shows AP{key} with a blank customer.',
       items: unresolvedItems,
+    });
+  }
+
+  // Round 8 §6.4 — a carried (no-timesheet) job with no resolvable crew lead
+  // stays pivot-only and is called out here.
+  {
+    const items: ExceptionItem[] = [];
+    for (const row of [...pbj.balances, ...pbj.utPayroll]) {
+      if (row.excludedFromPayroll || row.apKey === 'OFFICE') continue;
+      if (row.percent === 'HOURLY') continue;
+      const lead = (row.crewLead || '').trim();
+      if (lead !== '') continue;
+      items.push({
+        message: `carried job ${row.apKey ? `AP${row.apKey}` : row.job || row.id} has no crew lead — not added to payroll`,
+      });
+    }
+    groups.push({
+      key: 'carriedNoLead',
+      title: 'Carried job has no crew lead',
+      note: 'The job sits below Grand Total on Pivot by Job but has no Crew Lead, so it was not added to Input #\'s or a preview band.',
+      items,
     });
   }
 

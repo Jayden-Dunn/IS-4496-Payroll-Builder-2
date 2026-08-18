@@ -53,10 +53,12 @@ Date Difference, the pivot, and the Exceptions list) recomputes live.
 
 - Estimator color legend (hex fills, add/remove) — the exact colors used for row fills on screen and in the export
 - Estimator order — drives row sorting and pivot column order
-- Persisted to `localStorage`
+- Persisted to a shared store (`/api/settings`, Vercel Blob) with `localStorage` as the offline cache,
+  so a different browser or a cleared profile still sees the same saved Settings. Blob setup is optional —
+  without it the app silently keeps using `localStorage` only.
 
 The pay date (left rail) defaults to the timesheet's week-ending Friday + 7 days and drives the pivot
-title (`NV PAYROLL: M/D/YYYY`) and the export filename (`% MM-DD-YYYY % of Completion.xlsx`).
+title (`NV PAYROLL: M/D/YYYY`) and the export filename (`MM-DD-YYYY Percentages of Completion.xlsx`).
 
 ## Code layout
 

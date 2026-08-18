@@ -1,7 +1,14 @@
 import { useRef, useState } from 'react';
 import {
+  DEFAULT_CONDITIONAL_RATE_RULES,
+  DEFAULT_CREW_LEAD_RATE,
+  DEFAULT_DAILY_OT_HOURS_THRESHOLD,
   DEFAULT_LEGEND,
+  DEFAULT_NV_DAILY_OT_RATE_THRESHOLD,
+  DEFAULT_PAINTER_ROSTER,
+  DEFAULT_PER_JOB_RATE_OVERRIDES,
   DEFAULT_PIVOT_COLUMNS,
+  DEFAULT_PL_ACCOUNT_MAPPING,
   DEFAULT_PREVAILING_MIN_RATE,
   DEFAULT_PREVAILING_PATTERNS,
   DEFAULT_PROFIT_SHARE,
@@ -9,11 +16,17 @@ import {
   DEFAULT_SUBCONTRACTORS,
   DEFAULT_WAGE_RATES,
   type DirectoryStoreStatus,
+  type SettingsStoreStatus,
 } from '../lib/settings';
 import type {
   AppSettings,
+  ConditionalRateRule,
+  EntityCode,
   JobRateRule,
   LegendEntry,
+  PainterRosterEntry,
+  PerJobRateOverride,
+  PlAccountMapping,
   ProfitShareEntry,
   SalariedEntry,
   SalarySection,
@@ -29,11 +42,40 @@ interface SettingsModalProps {
   directoryStoreStatus?: DirectoryStoreStatus | null;
   /** Set when local save worked but cross-device sync failed. */
   directorySyncWarning?: string | null;
+  /** Round 8 §1 — shared Settings store probe; null while loading. */
+  settingsStoreStatus?: SettingsStoreStatus | null;
+  /** Round 8 §1 — set when the local save worked but the shared write failed. */
+  settingsSyncWarning?: string | null;
+  /** Round 8 §1 — pull the shared Settings again, discarding unsaved edits. */
+  onReloadSettings?: () => void | Promise<void>;
   /** Parse + persist a replacement list; resolves to an error message or null. */
   onDirectoryReplace: (file: File) => Promise<string | null>;
   onDirectoryClear: () => void;
   onSave: (settings: AppSettings) => void;
   onClose: () => void;
+}
+
+const PL_METRICS: { key: keyof PlAccountMapping; label: string }[] = [
+  { key: 'income', label: 'Income' },
+  { key: 'materials', label: 'Materials' },
+  { key: 'laborWagesSubs', label: 'Labor / Wages / Subs' },
+  { key: 'sundries', label: 'Sundries' },
+  { key: 'travel', label: 'Travel' },
+  { key: 'mileage', label: 'Mileage' },
+];
+
+const PL_ENTITIES: EntityCode[] = ['NV', 'UT'];
+
+function clonePlMapping(src: Record<EntityCode, PlAccountMapping>): Record<EntityCode, PlAccountMapping> {
+  const one = (m: PlAccountMapping): PlAccountMapping => ({
+    income: [...m.income],
+    materials: [...m.materials],
+    laborWagesSubs: [...m.laborWagesSubs],
+    sundries: [...m.sundries],
+    travel: [...m.travel],
+    mileage: [...m.mileage],
+  });
+  return { NV: one(src.NV), UT: one(src.UT) };
 }
 
 const HEX_RE = /^[0-9A-Fa-f]{6}$/;
@@ -62,6 +104,9 @@ export function SettingsModal({
   directory,
   directoryStoreStatus: _directoryStoreStatus = null,
   directorySyncWarning = null,
+  settingsStoreStatus = null,
+  settingsSyncWarning = null,
+  onReloadSettings,
   onDirectoryReplace,
   onDirectoryClear,
   onSave,
@@ -74,6 +119,22 @@ export function SettingsModal({
   const [defaultPs, setDefaultPs] = useState(String(Math.round(settings.defaultProfitSharePct * 100)));
   const [wages, setWages] = useState<WageRateEntry[]>(settings.wageRates.map((e) => ({ ...e })));
   const [defaultWage, setDefaultWage] = useState(String(settings.defaultWageRate));
+  const [defaultCrewLead, setDefaultCrewLead] = useState(String(settings.defaultCrewLeadRate));
+  const [nvOtRate, setNvOtRate] = useState(String(settings.nvDailyOtRateThreshold));
+  const [otHours, setOtHours] = useState(String(settings.dailyOtHoursThreshold));
+  const [condRules, setCondRules] = useState<ConditionalRateRule[]>(
+    settings.conditionalRateRules.map((r) => ({ ...r, condition: { ...r.condition } })),
+  );
+  const [perJobRules, setPerJobRules] = useState<PerJobRateOverride[]>(
+    settings.perJobRateOverrides.map((r) => ({ ...r })),
+  );
+  const [plMap, setPlMap] = useState<Record<EntityCode, PlAccountMapping>>(() =>
+    clonePlMapping(settings.plAccountMapping),
+  );
+  const [painters, setPainters] = useState<PainterRosterEntry[]>(settings.painterRoster.map((p) => ({ ...p })));
+  const [paintersOpen, setPaintersOpen] = useState(false);
+  const [painterQuery, setPainterQuery] = useState('');
+  const [newPainter, setNewPainter] = useState('');
   const [roster, setRoster] = useState<SalariedEntry[]>(settings.salariedRoster.map((e) => ({ ...e })));
   const [mileageRate, setMileageRate] = useState(String(settings.mileageRate));
   const [subs, setSubs] = useState<string[]>([...settings.subcontractors]);
@@ -110,15 +171,38 @@ export function SettingsModal({
 
   const defaultPsNum = Number(defaultPs);
   const defaultWageNum = Number(defaultWage);
+  const defaultCrewLeadNum = Number(defaultCrewLead);
+  const nvOtRateNum = Number(nvOtRate);
+  const otHoursNum = Number(otHours);
   const mileageNum = Number(mileageRate);
   const officeMileageNum = Number(officeMileage);
   const pwMinNum = Number(pwMin);
   const numbersValid =
     Number.isFinite(defaultPsNum) &&
     Number.isFinite(defaultWageNum) &&
+    Number.isFinite(defaultCrewLeadNum) &&
+    Number.isFinite(nvOtRateNum) &&
+    Number.isFinite(otHoursNum) &&
     Number.isFinite(mileageNum) &&
     Number.isFinite(officeMileageNum) &&
     Number.isFinite(pwMinNum);
+
+  const painterMatches = painters
+    .map((p, i) => ({ p, i }))
+    .filter(({ p }) => {
+      const q = painterQuery.trim().toLowerCase();
+      if (!q) return true;
+      return p.name.toLowerCase().includes(q) || (p.note ?? '').toLowerCase().includes(q);
+    });
+  const activePainterCount = painters.filter((p) => p.active).length;
+
+  const setPlList = (entity: EntityCode, metric: keyof PlAccountMapping, raw: string): void => {
+    const list = raw
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    setPlMap((prev) => ({ ...prev, [entity]: { ...prev[entity], [metric]: list } }));
+  };
 
   const addPivotCol = (): void => {
     const t = newPivotCol.trim().toUpperCase();
@@ -134,6 +218,23 @@ export function SettingsModal({
       defaultProfitSharePct: defaultPsNum > 1 ? defaultPsNum / 100 : defaultPsNum,
       wageRates: wages.filter((e) => e.name.trim() !== ''),
       defaultWageRate: defaultWageNum,
+      defaultCrewLeadRate: defaultCrewLeadNum,
+      nvDailyOtRateThreshold: nvOtRateNum,
+      dailyOtHoursThreshold: otHoursNum,
+      conditionalRateRules: condRules
+        .map((r) => ({
+          ...r,
+          person: r.person.trim(),
+          condition: { ...r.condition, leadName: r.condition.leadName.trim() },
+        }))
+        .filter((r) => r.person !== '' && r.condition.leadName !== '' && Number.isFinite(r.rate)),
+      perJobRateOverrides: perJobRules
+        .map((r) => ({ ...r, person: r.person.trim(), apKeyPattern: r.apKeyPattern.trim() }))
+        .filter((r) => r.person !== '' && r.apKeyPattern !== '' && Number.isFinite(r.rate)),
+      plAccountMapping: clonePlMapping(plMap),
+      painterRoster: painters
+        .map((p) => ({ ...p, name: p.name.trim() }))
+        .filter((p) => p.name !== ''),
       salariedRoster: roster.filter((e) => e.name.trim() !== ''),
       mileageRate: mileageNum,
       officeMileageRate: officeMileageNum,
@@ -148,6 +249,7 @@ export function SettingsModal({
           employeeNames: r.employeeNames.map((n) => n.trim()).filter(Boolean),
         }))
         .filter((r) => r.apKey !== '' && Number.isFinite(r.rate)),
+      appliedMigrations: [...settings.appliedMigrations],
     });
   };
 
@@ -166,6 +268,28 @@ export function SettingsModal({
           </button>
         </header>
         <div className="max-h-[70vh] overflow-y-auto p-4">
+          <div className="mb-3 flex items-center gap-2 rounded border border-neutral-200 bg-neutral-50 px-2 py-1.5 text-[11px]">
+            <span className="text-neutral-600">
+              {settingsStoreStatus === 'ready'
+                ? 'Settings are shared — saving here updates every browser on this deployment.'
+                : settingsStoreStatus === 'empty'
+                  ? 'Shared store is empty — your next save becomes the shared copy.'
+                  : settingsStoreStatus === null
+                    ? 'Checking the shared Settings store…'
+                    : 'Shared Settings unavailable — saving to this browser only (optional feature).'}
+            </span>
+            {onReloadSettings && (
+              <button type="button" className="btn ml-auto text-[11px]" onClick={() => void onReloadSettings()}>
+                Reload settings
+              </button>
+            )}
+          </div>
+          {settingsSyncWarning && (
+            <div className="mb-3 rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-900">
+              {settingsSyncWarning}
+            </div>
+          )}
+
           <SectionTitle sub="This order drives row sorting on the TimeNavi Export. Colors are the fills on all tabs.">
             Estimator color legend &amp; row-sort order
           </SectionTitle>
@@ -232,24 +356,193 @@ export function SettingsModal({
             <span className="text-xs text-neutral-400">%</span>
           </div>
 
-          <SectionTitle sub="Default $/hr per employee; the optional second rate applies on hourly (T&M) jobs. OT is always 1.5× the line rate.">
+          <SectionTitle sub="Three rates per person: PS = profit-share/default $/hr, hrly = hourly (T&M) jobs, lead = a crew lead's own timesheet hours on profit-share jobs. Blank falls back to the defaults below. OT is always 1.5× the line rate.">
             Wage rates
           </SectionTitle>
+          <div className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
+            <span className="flex-1">Employee</span>
+            <span className="w-16 text-right">PS</span>
+            <span className="w-16 text-right">hrly</span>
+            <span className="w-16 text-right">lead</span>
+            <span className="w-4" />
+          </div>
           <div className="flex max-h-64 flex-col gap-1 overflow-y-auto rounded border border-neutral-100 p-1">
             {wages.map((e, i) => (
               <div key={i} className="flex items-center gap-1.5">
                 <input className="flex-1 rounded border border-neutral-300 px-1.5 py-1 text-xs" value={e.name} placeholder="Employee" onChange={(ev) => setWages((prev) => prev.map((x, j) => (j === i ? { ...x, name: ev.target.value } : x)))} />
                 <input className="w-16 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs" value={e.rate} onChange={(ev) => { const n = Number(ev.target.value); if (Number.isFinite(n)) setWages((prev) => prev.map((x, j) => (j === i ? { ...x, rate: n } : x))); }} />
                 <input className="w-16 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs" value={e.hourlyRate ?? ''} placeholder="hrly" onChange={(ev) => { const t = ev.target.value.trim(); const n = Number(t); setWages((prev) => prev.map((x, j) => (j === i ? { ...x, ...(t === '' || !Number.isFinite(n) ? { hourlyRate: undefined } : { hourlyRate: n }) } : x))); }} />
+                <input className="w-16 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs" value={e.crewLeadRate ?? ''} placeholder="lead" title="Crew-lead rate on their own timesheet hours on profit-share jobs" onChange={(ev) => { const t = ev.target.value.trim(); const n = Number(t); setWages((prev) => prev.map((x, j) => (j === i ? { ...x, ...(t === '' || !Number.isFinite(n) ? { crewLeadRate: undefined } : { crewLeadRate: n }) } : x))); }} />
                 <button type="button" className="text-neutral-400 hover:text-red-600" onClick={() => setWages((prev) => prev.filter((_, j) => j !== i))} aria-label="Remove">🗑</button>
               </div>
             ))}
           </div>
-          <div className="mt-2 flex items-center gap-2">
+          <div className="mt-2 flex flex-wrap items-center gap-2">
             <button type="button" className="btn text-xs" onClick={() => setWages((prev) => [...prev, { name: '', rate: 18 }])}>+ Add employee</button>
             <button type="button" className="btn text-xs" onClick={() => setWages(DEFAULT_WAGE_RATES.map((e) => ({ ...e })))}>Reset</button>
             <span className="ml-auto text-xs">Fallback rate $:</span>
             <input className="w-14 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs" value={defaultWage} onChange={(e) => setDefaultWage(e.target.value)} />
+            <span className="text-xs">Fallback crew-lead $:</span>
+            <input className="w-14 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs" value={defaultCrewLead} title="Used when a lead has no 'lead' rate of their own" onChange={(e) => setDefaultCrewLead(e.target.value)} />
+            <button type="button" className="btn text-xs" onClick={() => setDefaultCrewLead(String(DEFAULT_CREW_LEAD_RATE))}>Reset</button>
+          </div>
+
+          <SectionTitle sub="Daily overtime for NV: hours past the daily threshold pay 1.5× — but only for people at or below the base-rate threshold. Weekly 40-hour OT is unaffected.">
+            NV daily overtime
+          </SectionTitle>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs">Daily OT after (hrs):</span>
+            <input className="w-14 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs" value={otHours} onChange={(e) => setOtHours(e.target.value)} />
+            <span className="text-xs">Applies at base rate ≤ $:</span>
+            <input className="w-14 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs" value={nvOtRate} onChange={(e) => setNvOtRate(e.target.value)} />
+            <button
+              type="button"
+              className="btn text-xs"
+              onClick={() => {
+                setOtHours(String(DEFAULT_DAILY_OT_HOURS_THRESHOLD));
+                setNvOtRate(String(DEFAULT_NV_DAILY_OT_RATE_THRESHOLD));
+              }}
+            >
+              Reset
+            </button>
+          </div>
+
+          <SectionTitle sub="A person's rate while working a job led by someone specific — e.g. Henry earns $20/hr on Miguel Martin's jobs.">
+            Conditional rate rules
+          </SectionTitle>
+          <div className="flex flex-col gap-1">
+            {condRules.map((r, i) => (
+              <div key={r.id} className="flex flex-wrap items-center gap-1.5">
+                <input
+                  className="min-w-[9rem] flex-1 rounded border border-neutral-300 px-1.5 py-1 text-xs"
+                  value={r.person}
+                  placeholder="Person"
+                  onChange={(ev) => setCondRules((prev) => prev.map((x, j) => (j === i ? { ...x, person: ev.target.value } : x)))}
+                />
+                <span className="text-[11px] text-neutral-500">on jobs led by</span>
+                <input
+                  className="min-w-[9rem] flex-1 rounded border border-neutral-300 px-1.5 py-1 text-xs"
+                  value={r.condition.leadName}
+                  placeholder="Crew lead"
+                  onChange={(ev) =>
+                    setCondRules((prev) =>
+                      prev.map((x, j) => (j === i ? { ...x, condition: { ...x.condition, leadName: ev.target.value } } : x)),
+                    )
+                  }
+                />
+                <span className="text-[11px] text-neutral-500">$/hr</span>
+                <input
+                  className="w-16 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs"
+                  value={r.rate}
+                  onChange={(ev) => {
+                    const n = Number(ev.target.value);
+                    if (Number.isFinite(n)) setCondRules((prev) => prev.map((x, j) => (j === i ? { ...x, rate: n } : x)));
+                  }}
+                />
+                <button type="button" className="text-neutral-400 hover:text-red-600" onClick={() => setCondRules((prev) => prev.filter((_, j) => j !== i))} aria-label="Delete rule">🗑</button>
+              </div>
+            ))}
+          </div>
+          <div className="mt-2 flex gap-2">
+            <button
+              type="button"
+              className="btn text-xs"
+              onClick={() =>
+                setCondRules((prev) => [
+                  ...prev,
+                  {
+                    id: `cond-${Date.now()}-${prev.length}`,
+                    person: '',
+                    condition: { kind: 'onSameJobAsLead', leadName: '' },
+                    rate: 0,
+                  },
+                ])
+              }
+            >
+              + Add rule
+            </button>
+            <button type="button" className="btn text-xs" onClick={() => setCondRules(DEFAULT_CONDITIONAL_RATE_RULES.map((r) => ({ ...r, condition: { ...r.condition } })))}>Reset</button>
+          </div>
+
+          <SectionTitle sub="One person's $/hr on one job. The AP# is matched as a substring, so 24097 also covers its change-order suffixes.">
+            Per-job rate overrides (per person)
+          </SectionTitle>
+          <div className="flex flex-col gap-1">
+            {perJobRules.map((r, i) => (
+              <div key={r.id} className="flex flex-wrap items-center gap-1.5">
+                <input
+                  className="min-w-[9rem] flex-1 rounded border border-neutral-300 px-1.5 py-1 text-xs"
+                  value={r.person}
+                  placeholder="Person"
+                  onChange={(ev) => setPerJobRules((prev) => prev.map((x, j) => (j === i ? { ...x, person: ev.target.value } : x)))}
+                />
+                <span className="text-[11px] text-neutral-500">AP#</span>
+                <input
+                  className="w-24 rounded border border-neutral-300 px-1.5 py-1 text-xs"
+                  value={r.apKeyPattern}
+                  placeholder="24097"
+                  onChange={(ev) => setPerJobRules((prev) => prev.map((x, j) => (j === i ? { ...x, apKeyPattern: ev.target.value } : x)))}
+                />
+                <span className="text-[11px] text-neutral-500">$/hr</span>
+                <input
+                  className="w-16 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs"
+                  value={r.rate}
+                  onChange={(ev) => {
+                    const n = Number(ev.target.value);
+                    if (Number.isFinite(n)) setPerJobRules((prev) => prev.map((x, j) => (j === i ? { ...x, rate: n } : x)));
+                  }}
+                />
+                <input
+                  className="min-w-[7rem] flex-1 rounded border border-neutral-300 px-1.5 py-1 text-xs"
+                  value={r.note ?? ''}
+                  placeholder="Optional note"
+                  onChange={(ev) => setPerJobRules((prev) => prev.map((x, j) => (j === i ? { ...x, note: ev.target.value } : x)))}
+                />
+                <button type="button" className="text-neutral-400 hover:text-red-600" onClick={() => setPerJobRules((prev) => prev.filter((_, j) => j !== i))} aria-label="Delete override">🗑</button>
+              </div>
+            ))}
+          </div>
+          <div className="mt-2 flex gap-2">
+            <button
+              type="button"
+              className="btn text-xs"
+              onClick={() =>
+                setPerJobRules((prev) => [
+                  ...prev,
+                  { id: `perjob-${Date.now()}-${prev.length}`, person: '', apKeyPattern: '', rate: 0 },
+                ])
+              }
+            >
+              + Add override
+            </button>
+            <button type="button" className="btn text-xs" onClick={() => setPerJobRules(DEFAULT_PER_JOB_RATE_OVERRIDES.map((r) => ({ ...r })))}>Reset</button>
+          </div>
+
+          <SectionTitle sub="Which P&L account rows feed each metric, per entity. Comma-separated labels. Sundries is intentionally NOT part of Materials.">
+            P&amp;L account mapping
+          </SectionTitle>
+          <div className="flex flex-col gap-2">
+            {PL_ENTITIES.map((entity) => (
+              <div key={entity} className="rounded border border-neutral-200 p-2">
+                <div className="mb-1 text-[11px] font-bold uppercase tracking-wide text-neutral-600">{entity}</div>
+                <div className="flex flex-col gap-1">
+                  {PL_METRICS.map((m) => (
+                    <div key={m.key} className="flex items-center gap-1.5">
+                      <span className="w-32 shrink-0 text-[11px] text-neutral-500">{m.label}</span>
+                      <input
+                        className="flex-1 rounded border border-neutral-300 px-1.5 py-1 text-xs"
+                        value={plMap[entity][m.key].join(', ')}
+                        placeholder="Account label, Another label"
+                        onChange={(ev) => setPlList(entity, m.key, ev.target.value)}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="mt-2 flex gap-2">
+            <button type="button" className="btn text-xs" onClick={() => setPlMap(clonePlMapping(DEFAULT_PL_ACCOUNT_MAPPING))}>Reset</button>
           </div>
 
           <SectionTitle sub="Weekly salary blocks by section on the Payroll Preview.">Salaried roster</SectionTitle>
@@ -262,14 +555,18 @@ export function SettingsModal({
                   <option>ESTIMATORS</option>
                   <option>MANAGER SALARY</option>
                 </select>
-                <input className="w-32 rounded border border-neutral-300 px-1.5 py-1 text-xs" value={e.role} placeholder="Role text" onChange={(ev) => setRoster((prev) => prev.map((x, j) => (j === i ? { ...x, role: ev.target.value } : x)))} />
+                <select className="rounded border border-neutral-300 px-1 py-1 text-xs" value={e.entity} title="Entity" onChange={(ev) => setRoster((prev) => prev.map((x, j) => (j === i ? { ...x, entity: ev.target.value as EntityCode } : x)))}>
+                  <option>NV</option>
+                  <option>UT</option>
+                </select>
+                <input className="w-28 rounded border border-neutral-300 px-1.5 py-1 text-xs" value={e.role} placeholder="Role text" onChange={(ev) => setRoster((prev) => prev.map((x, j) => (j === i ? { ...x, role: ev.target.value } : x)))} />
                 <input className="w-20 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs" value={e.amount} onChange={(ev) => { const n = Number(ev.target.value); if (Number.isFinite(n)) setRoster((prev) => prev.map((x, j) => (j === i ? { ...x, amount: n } : x))); }} />
                 <button type="button" className="text-neutral-400 hover:text-red-600" onClick={() => setRoster((prev) => prev.filter((_, j) => j !== i))} aria-label="Remove">🗑</button>
               </div>
             ))}
           </div>
           <div className="mt-2 flex items-center gap-2">
-            <button type="button" className="btn text-xs" onClick={() => setRoster((prev) => [...prev, { name: '', section: 'ESTIMATORS', role: '', amount: 0 }])}>+ Add person</button>
+            <button type="button" className="btn text-xs" onClick={() => setRoster((prev) => [...prev, { name: '', section: 'ESTIMATORS', role: '', amount: 0, entity: 'NV' }])}>+ Add person</button>
             <button type="button" className="btn text-xs" onClick={() => setRoster(DEFAULT_SALARIED.map((e) => ({ ...e })))}>Reset</button>
             <span className="ml-auto text-xs">Mileage reimb $/mile:</span>
             <input className="w-16 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs" value={mileageRate} onChange={(e) => setMileageRate(e.target.value)} />
@@ -463,6 +760,123 @@ export function SettingsModal({
               </button>
             )}
             {dirError && <span className="text-xs text-red-600">{dirError}</span>}
+          </div>
+
+          <div className="mt-6 border-t border-neutral-200 pt-3">
+            <button
+              type="button"
+              className="flex w-full items-center gap-1.5 text-left text-xs font-bold uppercase tracking-wide text-neutral-600"
+              onClick={() => setPaintersOpen((v) => !v)}
+              aria-expanded={paintersOpen}
+            >
+              <span className="text-[10px] text-neutral-400">{paintersOpen ? '▼' : '▶'}</span>
+              Painters — Active/Inactive
+              <span className="ml-1 font-normal normal-case tracking-normal text-neutral-400">
+                {activePainterCount} active / {painters.length - activePainterCount} inactive
+              </span>
+            </button>
+            {paintersOpen && (
+              <>
+                <p className="mb-2 mt-1 text-[11px] text-neutral-500">
+                  Inactive painters stay in the roster but are treated as not currently working. Notes hold crew /
+                  *split* / {'{Reno}'} display metadata.
+                </p>
+                <div className="mb-2 flex items-center gap-2">
+                  <input
+                    className="flex-1 rounded border border-neutral-300 px-1.5 py-1 text-xs"
+                    value={painterQuery}
+                    placeholder="Search painters…"
+                    onChange={(e) => setPainterQuery(e.target.value)}
+                  />
+                  {painterQuery && (
+                    <button type="button" className="btn text-xs" onClick={() => setPainterQuery('')}>
+                      Clear
+                    </button>
+                  )}
+                </div>
+                <div className="flex max-h-64 flex-col gap-1 overflow-y-auto rounded border border-neutral-100 p-1">
+                  {painterMatches.length === 0 && (
+                    <p className="px-1 py-2 text-[11px] text-neutral-400">No painters match “{painterQuery}”.</p>
+                  )}
+                  {painterMatches.map(({ p, i }) => (
+                    <div key={`${p.name}-${i}`} className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        className={`w-20 shrink-0 rounded border px-1.5 py-1 text-[11px] font-semibold ${
+                          p.active
+                            ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
+                            : 'border-neutral-300 bg-neutral-50 text-neutral-500'
+                        }`}
+                        onClick={() =>
+                          setPainters((prev) => prev.map((x, j) => (j === i ? { ...x, active: !x.active } : x)))
+                        }
+                        title="Toggle Active/Inactive"
+                      >
+                        {p.active ? 'Active' : 'Inactive'}
+                      </button>
+                      <input
+                        className="flex-1 rounded border border-neutral-300 px-1.5 py-1 text-xs"
+                        value={p.name}
+                        placeholder="Painter name"
+                        onChange={(ev) =>
+                          setPainters((prev) => prev.map((x, j) => (j === i ? { ...x, name: ev.target.value } : x)))
+                        }
+                      />
+                      <input
+                        className="w-28 rounded border border-neutral-300 px-1.5 py-1 text-xs"
+                        value={p.note ?? ''}
+                        placeholder="note"
+                        onChange={(ev) =>
+                          setPainters((prev) => prev.map((x, j) => (j === i ? { ...x, note: ev.target.value } : x)))
+                        }
+                      />
+                      <button
+                        type="button"
+                        className="text-neutral-400 hover:text-red-600"
+                        onClick={() => setPainters((prev) => prev.filter((_, j) => j !== i))}
+                        aria-label="Remove painter"
+                      >
+                        🗑
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <input
+                    className="w-48 rounded border border-neutral-300 px-1.5 py-1 text-xs"
+                    value={newPainter}
+                    placeholder="New painter name"
+                    onChange={(e) => setNewPainter(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key !== 'Enter') return;
+                      const name = newPainter.trim();
+                      if (!name) return;
+                      setPainters((prev) => [...prev, { name, active: true }]);
+                      setNewPainter('');
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="btn text-xs"
+                    onClick={() => {
+                      const name = newPainter.trim();
+                      if (!name) return;
+                      setPainters((prev) => [...prev, { name, active: true }]);
+                      setNewPainter('');
+                    }}
+                  >
+                    + Add painter
+                  </button>
+                  <button
+                    type="button"
+                    className="btn text-xs"
+                    onClick={() => setPainters(DEFAULT_PAINTER_ROSTER.map((p) => ({ ...p })))}
+                  >
+                    Reset
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
         <footer className="flex justify-end gap-2 border-t border-neutral-200 px-4 py-3">

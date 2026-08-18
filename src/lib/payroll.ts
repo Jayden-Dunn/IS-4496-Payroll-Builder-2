@@ -4,12 +4,15 @@
  * nothing dataset-specific lives here; tribal knowledge comes from Settings.
  */
 import { AP_RE, extractApKey, normalizeApInput } from './apkey';
-import { round2 } from './format';
+import { isPercentNumber, isPercentState, round2 } from './format';
 import { baseApKey } from './jobNames';
 import type {
+  ConditionalRateRule,
   CrewLeadResolution,
   DirectoryEmployee,
   JobRateRule,
+  PercentValue,
+  PerJobRateOverride,
   TimesheetRow,
 } from './types';
 
@@ -88,7 +91,9 @@ export function titleCaseLeadName(
       if (dir) return stripSingleLetterTokens(dir.fullName);
       const sub = subcontractors.find((s) => s.toUpperCase() === p.toUpperCase());
       if (sub) return sub;
-      return stripSingleLetterTokens(p);
+      // No directory hit — still Title Case so auto-added leads aren't ALL CAPS.
+      const titled = p.replace(/[A-Za-z]+(?:'[A-Za-z]+)?/g, (w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
+      return stripSingleLetterTokens(titled);
     })
     .join('/');
 }
@@ -271,15 +276,21 @@ export interface OtJobHours {
 }
 
 /**
- * If the employee's week exceeds 40 hours, move the overage to an [OT] line
- * on the LAST job worked (latest date; last by file order within the day),
- * reducing that job's regular hours so regular + OT = actual.
+ * If the employee's week exceeds 40 hours, move the overage to an
+ * [OT >40 hrs/wk] line on the LAST job worked (latest date; last by file order
+ * within the day), reducing that job's regular hours so regular + OT = actual.
+ *
+ * Round 8 §9.2 — `dailyOtHours` are hours already paid at 1.5× by the NV
+ * daily-OT rule. They are excluded here so no hour is paid overtime twice;
+ * each hour gets the single highest applicable OT treatment once.
  */
-export function splitOvertime(jobs: OtJobHours[]): OtSplit {
+export function splitOvertime(jobs: OtJobHours[], opts?: { dailyOtHours?: number }): OtSplit {
   const regularByJob = new Map<string, number>(jobs.map((j) => [j.jobId, round2(j.hours)]));
   const total = round2(jobs.reduce((acc, j) => acc + j.hours, 0));
+  const dailyOtHours = round2(Math.max(0, opts?.dailyOtHours ?? 0));
   if (total <= 40 || jobs.length === 0) return { regularByJob, otJobId: null, otHours: 0 };
-  const otHours = round2(total - 40);
+  const otHours = round2(Math.max(0, total - 40 - dailyOtHours));
+  if (otHours <= 0) return { regularByJob, otJobId: null, otHours: 0 };
   const last = jobs.reduce((best, cur) => {
     const bt = best.lastDate ? best.lastDate.getTime() : -Infinity;
     const ct = cur.lastDate ? cur.lastDate.getTime() : -Infinity;
@@ -288,6 +299,91 @@ export function splitOvertime(jobs: OtJobHours[]): OtSplit {
   });
   regularByJob.set(last.jobId, round2((regularByJob.get(last.jobId) ?? 0) - otHours));
   return { regularByJob, otJobId: last.jobId, otHours };
+}
+
+// ---------------------------------------------------------------------------
+// Round 8 §9.2 — NV daily overtime
+// ---------------------------------------------------------------------------
+
+/** One (job, day) bucket of an employee's hours. */
+export interface DailyOtRow {
+  jobId: string;
+  date: Date | null;
+  hours: number;
+  /** File order — the day's overage lands on the latest rows. */
+  rowIndex: number;
+  /** NV row whose resolved line rate is under `nvDailyOtRateThreshold`. */
+  eligible: boolean;
+}
+
+/** One daily-OT chunk: hours over the threshold on a single day and job. */
+export interface DailyOtSegment {
+  jobId: string;
+  dateIso: string;
+  date: Date | null;
+  /** The employee's total hours that day (all jobs). */
+  dayHours: number;
+  otHours: number;
+}
+
+export interface DailyOtSplit {
+  /** Hours to move onto a daily-OT line, keyed by job-row id. */
+  otByJob: Map<string, number>;
+  segments: DailyOtSegment[];
+  totalOtHours: number;
+}
+
+function dayKeyOf(d: Date | null): string {
+  if (!d) return '';
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${mm}-${dd}`;
+}
+
+/**
+ * Round 8 §9.2 — NV only: a painter whose resolved line rate is under the
+ * threshold earns 1.5× for hours past `thresholdHours` in a single day.
+ *
+ * The overage is taken from the day's LAST rows backwards (mirroring the
+ * weekly rule's "last job worked"). Hours on an ineligible line — a UT row, or
+ * one already at/above the threshold rate — still consume the overage but
+ * never become daily OT, so a mixed day cannot invent overtime for the wrong
+ * line and UT rows are untouched.
+ */
+export function splitDailyOvertime(
+  rows: readonly DailyOtRow[],
+  thresholdHours: number,
+): DailyOtSplit {
+  const otByJob = new Map<string, number>();
+  const segments: DailyOtSegment[] = [];
+  let totalOtHours = 0;
+  if (!(thresholdHours > 0)) return { otByJob, segments, totalOtHours };
+
+  const byDay = new Map<string, DailyOtRow[]>();
+  for (const r of rows) {
+    const key = dayKeyOf(r.date);
+    if (!key || r.hours <= 0) continue;
+    const list = byDay.get(key);
+    if (list) list.push(r);
+    else byDay.set(key, [r]);
+  }
+
+  for (const key of [...byDay.keys()].sort()) {
+    const list = byDay.get(key) ?? [];
+    const dayHours = round2(list.reduce((a, r) => a + r.hours, 0));
+    if (dayHours <= thresholdHours) continue;
+    let remaining = round2(dayHours - thresholdHours);
+    for (const r of [...list].sort((a, b) => b.rowIndex - a.rowIndex)) {
+      if (remaining <= 0) break;
+      const take = round2(Math.min(remaining, r.hours));
+      remaining = round2(remaining - take);
+      if (!r.eligible || take <= 0) continue;
+      otByJob.set(r.jobId, round2((otByJob.get(r.jobId) ?? 0) + take));
+      segments.push({ jobId: r.jobId, dateIso: key, date: r.date, dayHours, otHours: take });
+      totalOtHours = round2(totalOtHours + take);
+    }
+  }
+  return { otByJob, segments, totalOtHours };
 }
 
 // ---------------------------------------------------------------------------
@@ -362,30 +458,88 @@ export function wageRateFor(
 }
 
 // ---------------------------------------------------------------------------
-// Round 6 §6.2 — profit-share chain (pure)
+// Round 8 §8.1 — profit-share chain (pure)
 // ---------------------------------------------------------------------------
 
+/** A `% Completion` state that means "pay is entered by hand" (Round 8 §8.1). */
+export type ManualPayState = 'SUBBED' | 'SET RATE';
+
+export interface TotalProfitShareResult {
+  /**
+   * null on SUBBED / SET RATE — there is no auto profit share, so the band
+   * cells render blank and stay editable for a hand-entered amount.
+   */
+  total: number | null;
+  /** WO Override when entered, else Profit Share (= Total Income × WO%). */
+  base: number;
+  /** The fraction actually multiplied in (0 when the % is blank or invalid). */
+  percentCompletion: number;
+  manualPay: ManualPayState | null;
+  /**
+   * Blank / free-text / HOURLY % on a piece-rate job. The chain pays 0 — a
+   * deliberately conservative choice, since silently paying 100% would
+   * overpay a job that has barely started.
+   */
+  missingPercent: boolean;
+}
+
 /**
- * Total Profit Share = (WO Override if entered, else Profit Share)
- * − Labor − ½ Materials. % Completion and Mileage are display-only.
+ * Round 8 §8.1 — SUPERSEDES Round 6 §6.2 and Round 7 §21: BOTH branches now
+ * multiply the base by % Completion (Round 5's override-only multiply is
+ * generalized).
+ *
+ *   base  = WO Override when entered, else Profit Share (Total Income × WO%)
+ *   total = base × %Completion − (− Labor + Wages) − (½ Materials)
+ *
+ * `-Mileage` is still DISPLAYED on the band but is not a term. HOURLY jobs
+ * never reach this chain (they pay hourly per §9).
  */
 export function computeTotalProfitShare(args: {
   profitShare: number;
   workOrderOverride: number | null | undefined;
   laborWages: number;
   halfMaterials: number;
-  /** Display-only — must not affect the result. */
-  percentCompletion?: number;
+  /** The job's `% of Completion` cell for the current week. */
+  percent?: PercentValue;
   /** Display-only — must not affect the result. */
   mileage?: number;
-}): number {
-  void args.percentCompletion;
+}): TotalProfitShareResult {
   void args.mileage;
   const base =
     args.workOrderOverride !== null && args.workOrderOverride !== undefined
       ? args.workOrderOverride
       : args.profitShare;
-  return base - args.laborWages - args.halfMaterials;
+  const percent = args.percent ?? null;
+
+  if (isPercentState(percent) && percent !== 'HOURLY') {
+    return { total: null, base, percentCompletion: 0, manualPay: percent, missingPercent: false };
+  }
+
+  const pct = isPercentNumber(percent) ? percent : 0;
+  return {
+    total: base * pct - args.laborWages - args.halfMaterials,
+    base,
+    percentCompletion: pct,
+    manualPay: null,
+    missingPercent: !isPercentNumber(percent),
+  };
+}
+
+/**
+ * Round 8 §8.2 — `Total (post-split) + Hourly Pay + Reimbursements −
+ * Deductions/Sundries`.
+ *
+ * Deductions/Sundries is entered as a POSITIVE amount and subtracted. The
+ * mileage rows (`Mileage - New`, `-Mileage`, `Mileage in Books`) are displayed
+ * on the band but are not terms.
+ */
+export function computeTotalPay(args: {
+  total: number;
+  hourlyPay: number;
+  reimbursements: number;
+  deductions: number;
+}): number {
+  return args.total + args.hourlyPay + args.reimbursements - args.deductions;
 }
 
 // ---------------------------------------------------------------------------
@@ -407,6 +561,12 @@ export interface LineRate {
   fromJobRule?: boolean;
   /** Optional note from the matched job rule (tooltip). */
   ruleNote?: string;
+  /** Round 8 §9.1 — a person + AP# override supplied the rate. */
+  fromPerJobOverride?: boolean;
+  /** Round 8 §9.1 — a "person X on lead Z's job" rule supplied the rate. */
+  fromConditionalRule?: boolean;
+  /** Round 8 §9.1 — the lead's own crew-lead rate on a profit-share job. */
+  fromCrewLeadRate?: boolean;
 }
 
 /** How a job-rate rule's AP# matches a timesheet/calendar apKey. */
@@ -454,17 +614,126 @@ export function matchJobRateRule(
   return best;
 }
 
+/** Wage-map row as the rate engine needs it (Settings `WageRateEntry`). */
+export interface WageRateLike {
+  name: string;
+  rate: number;
+  hourlyRate?: number;
+  crewLeadRate?: number;
+}
+
+/** Which of the three Round 8 §9.1 rate slots supplied a generic rate. */
+export type RateKind = 'crewLead' | 'hourlyJob' | 'painter' | 'default';
+
 /**
- * Round 6 §7.2 + §7.1 Branch 1. Manual line edits are applied by the caller
- * before/after this. Order: job rule → hourly-jobs rate → employee default →
- * global fallback; then on DB jobs `rate = max(resolved, prevailingMinRate)`.
+ * Round 8 §9.1 — the three-rate lookup, resolved PER LINE by job type:
+ *
+ * - job is HOURLY → the person's `hourlyRate` (their own rate, then the global
+ *   fallback, when they have none)
+ * - crew lead's own hours on a profit-share job → their `crewLeadRate`, else
+ *   the global `defaultCrewLeadRate`
+ * - everyone else → their profit-share `rate`
+ */
+export function resolveWageRate(
+  employeeName: string,
+  opts: {
+    wageRates: readonly WageRateLike[];
+    defaultWageRate: number;
+    defaultCrewLeadRate?: number;
+    hourlyJob: boolean;
+    /** These are the crew lead's OWN timesheet hours. */
+    isCrewLead?: boolean;
+  },
+): { rate: number; defaulted: boolean; kind: RateKind } {
+  const entry = opts.wageRates.find(
+    (e) => tokensSubset(e.name, employeeName) || tokensSubset(employeeName, e.name),
+  );
+  const defaulted = !entry;
+  if (opts.hourlyJob) {
+    // No hourly-jobs rate on file falls through to the global default, NOT to
+    // the person's profit-share rate — a piece-rate number would understate an
+    // hourly job.
+    const hourly = entry?.hourlyRate;
+    return {
+      rate: hourly ?? opts.defaultWageRate,
+      defaulted,
+      kind: hourly !== undefined ? 'hourlyJob' : 'default',
+    };
+  }
+  if (opts.isCrewLead) {
+    return {
+      rate: entry?.crewLeadRate ?? opts.defaultCrewLeadRate ?? entry?.rate ?? opts.defaultWageRate,
+      defaulted,
+      kind: 'crewLead',
+    };
+  }
+  return {
+    rate: entry?.rate ?? opts.defaultWageRate,
+    defaulted,
+    kind: entry ? 'painter' : 'default',
+  };
+}
+
+/**
+ * Round 8 §9.1 — person + AP# override. `apKeyPattern` is a substring match,
+ * so '24097' also covers change-order suffixes; the longest matching pattern
+ * wins when several apply.
+ */
+export function matchPerJobRateOverride(
+  employeeName: string,
+  jobApKey: string | null | undefined,
+  overrides: readonly PerJobRateOverride[] | undefined,
+): PerJobRateOverride | null {
+  if (!jobApKey || !overrides || overrides.length === 0) return null;
+  const key = jobApKey.trim().toUpperCase();
+  let best: PerJobRateOverride | null = null;
+  let bestLen = -1;
+  for (const o of overrides) {
+    const pattern = o.apKeyPattern.trim().toUpperCase();
+    if (!pattern || !key.includes(pattern)) continue;
+    if (!(tokensSubset(o.person, employeeName) || tokensSubset(employeeName, o.person))) continue;
+    if (pattern.length > bestLen) {
+      best = o;
+      bestLen = pattern.length;
+    }
+  }
+  return best;
+}
+
+/** Round 8 §9.1 — "person X earns Y while working a job led by Z". */
+export function matchConditionalRateRule(
+  employeeName: string,
+  jobLeadNames: readonly string[] | undefined,
+  rules: readonly ConditionalRateRule[] | undefined,
+): ConditionalRateRule | null {
+  if (!rules || rules.length === 0 || !jobLeadNames || jobLeadNames.length === 0) return null;
+  for (const rule of rules) {
+    if (rule.condition.kind !== 'onSameJobAsLead') continue;
+    if (!(tokensSubset(rule.person, employeeName) || tokensSubset(employeeName, rule.person))) continue;
+    const lead = rule.condition.leadName;
+    if (jobLeadNames.some((n) => tokensSubset(lead, n) || tokensSubset(n, lead))) return rule;
+  }
+  return null;
+}
+
+/**
+ * Round 8 §9.1 (extends Round 6 §7.2 + §7.1 Branch 1). Manual line edits are
+ * applied by the caller before/after this. Precedence, most specific first:
+ *
+ *   1. person + AP# override (`perJobRateOverrides`)
+ *   2. job-scoped rule (`jobRateRules`, Round 6 §7.2)
+ *   3. conditional rule ("X on lead Z's job")
+ *   4. the three generic rates (hourly-jobs / crew-lead / profit-share)
+ *
+ * then the Davis-Bacon max-wrap on DB jobs: `rate = max(resolved, dbRate)` —
+ * it never LOWERS a rate, so a $25 painter stays at $25 on an SNRHA job.
  */
 export function resolveLineRate(
   employeeName: string,
   jobText: string,
   hourlyJob: boolean,
   settings: {
-    wageRates: { name: string; rate: number; hourlyRate?: number }[];
+    wageRates: WageRateLike[];
     defaultWageRate: number;
     prevailingWagePatterns: string[];
     prevailingMinRate: number;
@@ -472,29 +741,49 @@ export function resolveLineRate(
     apKey?: string | null;
     /** Pivot-by-Job §7.1 toggle: skip Davis-Bacon floor even when patterns match. */
     forceNonDb?: boolean;
+    /** Round 8 §9.1 — global crew-lead rate (seed 18). */
+    defaultCrewLeadRate?: number;
+    conditionalRateRules?: readonly ConditionalRateRule[];
+    perJobRateOverrides?: readonly PerJobRateOverride[];
+    /** True when these are the crew lead's own timesheet hours. */
+    isCrewLead?: boolean;
+    /** Crew-lead names resolved on this job (drives the conditional rules). */
+    jobLeadNames?: readonly string[];
   },
 ): LineRate {
   const apKey = settings.apKey ?? extractApKey(jobText);
-  const matched = matchJobRateRule(employeeName, apKey, settings.jobRateRules);
+  const perJob = matchPerJobRateOverride(employeeName, apKey, settings.perJobRateOverrides);
+  const jobRule = perJob ? null : matchJobRateRule(employeeName, apKey, settings.jobRateRules);
+  const conditional =
+    perJob || jobRule
+      ? null
+      : matchConditionalRateRule(employeeName, settings.jobLeadNames, settings.conditionalRateRules);
+
   let rate: number;
-  let defaulted: boolean;
-  let fromJobRule = false;
+  let defaulted = false;
+  let kind: RateKind | null = null;
   let ruleNote: string | undefined;
 
-  if (matched) {
-    rate = matched.rule.rate;
-    defaulted = false;
-    fromJobRule = true;
-    if (matched.rule.note.trim()) ruleNote = matched.rule.note.trim();
+  if (perJob) {
+    rate = perJob.rate;
+    if (perJob.note?.trim()) ruleNote = perJob.note.trim();
+  } else if (jobRule) {
+    rate = jobRule.rule.rate;
+    if (jobRule.rule.note.trim()) ruleNote = jobRule.rule.note.trim();
+  } else if (conditional) {
+    rate = conditional.rate;
+    if (conditional.note?.trim()) ruleNote = conditional.note.trim();
   } else {
-    const info = wageRateFor(
-      employeeName,
-      settings.wageRates,
-      settings.defaultWageRate,
+    const info = resolveWageRate(employeeName, {
+      wageRates: settings.wageRates,
+      defaultWageRate: settings.defaultWageRate,
+      defaultCrewLeadRate: settings.defaultCrewLeadRate,
       hourlyJob,
-    );
+      isCrewLead: settings.isCrewLead,
+    });
     rate = info.rate;
     defaulted = info.defaulted;
+    kind = info.kind;
   }
 
   const isDb =
@@ -507,7 +796,10 @@ export function resolveLineRate(
     rate,
     defaulted,
     prevailing: isDb,
-    ...(fromJobRule ? { fromJobRule: true, ...(ruleNote ? { ruleNote } : {}) } : {}),
+    ...(jobRule ? { fromJobRule: true, ...(ruleNote ? { ruleNote } : {}) } : {}),
+    ...(perJob ? { fromPerJobOverride: true, ...(ruleNote ? { ruleNote } : {}) } : {}),
+    ...(conditional ? { fromConditionalRule: true, ...(ruleNote ? { ruleNote } : {}) } : {}),
+    ...(kind === 'crewLead' ? { fromCrewLeadRate: true } : {}),
   };
 }
 

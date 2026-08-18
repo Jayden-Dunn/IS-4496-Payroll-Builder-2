@@ -276,6 +276,7 @@ function parsePivotByJobSheet(sheet) {
     const jobs = [];
     let section = 'nv';
     let customer = '';
+    let customerRow = -1;
     let collectingEmployees = false;
     let currentJob = null;
     // Skip the header block: app 2-row → +1 weekday row; legacy may have extra
@@ -310,6 +311,7 @@ function parsePivotByJobSheet(sheet) {
         if (sec) {
             section = sec;
             customer = '';
+            customerRow = -1;
             collectingEmployees = false;
             currentJob = null;
             // Section header rows may repeat the analysis headers — skip this row.
@@ -354,6 +356,9 @@ function parsePivotByJobSheet(sheet) {
                 percent,
                 notes: asString(cellAt(row, layout.notesCol)),
                 hourly,
+                // §4.1 — the customer/job pair is painted as a unit; either half counts.
+                excludedFromPayroll: (0, parsers_1.rowHasExclusionGray)(sheet, i, [0, layout.apCol]) ||
+                    (customerRow >= 0 && (0, parsers_1.rowHasExclusionGray)(sheet, customerRow, [0])),
                 byDate: hours.byDate,
                 total: hours.total,
                 employees: [],
@@ -361,6 +366,12 @@ function parsePivotByJobSheet(sheet) {
             jobs.push(job);
             currentJob = job;
             collectingEmployees = true;
+            // §4.3 — below Grand Total every job carries its own customer row;
+            // consume the label so the next AP# cannot inherit this one's customer.
+            if (section !== 'nv') {
+                customer = '';
+                customerRow = -1;
+            }
             continue;
         }
         // Non-AP row: employee under current job, or a new customer label.
@@ -377,6 +388,7 @@ function parsePivotByJobSheet(sheet) {
         }
         if (a && !isSkipLabel(a)) {
             customer = a;
+            customerRow = i;
             collectingEmployees = false;
             currentJob = null;
         }
@@ -400,6 +412,7 @@ function toLastWeekPbj(jobs) {
         woPct: j.woPct,
         percent: j.percent,
         notes: j.notes,
+        excludedFromPayroll: j.excludedFromPayroll,
     }));
 }
 // ---------------------------------------------------------------------------

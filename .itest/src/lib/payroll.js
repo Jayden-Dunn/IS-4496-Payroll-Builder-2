@@ -11,13 +11,18 @@ exports.splitLeadCandidates = splitLeadCandidates;
 exports.resolveCrewLead = resolveCrewLead;
 exports.directoryFromTimesheet = directoryFromTimesheet;
 exports.splitOvertime = splitOvertime;
+exports.splitDailyOvertime = splitDailyOvertime;
 exports.extractWoOverride = extractWoOverride;
 exports.extractWoPct = extractWoPct;
 exports.profitSharePctFor = profitSharePctFor;
 exports.wageRateFor = wageRateFor;
 exports.computeTotalProfitShare = computeTotalProfitShare;
+exports.computeTotalPay = computeTotalPay;
 exports.isPrevailingWageJob = isPrevailingWageJob;
 exports.matchJobRateRule = matchJobRateRule;
+exports.resolveWageRate = resolveWageRate;
+exports.matchPerJobRateOverride = matchPerJobRateOverride;
+exports.matchConditionalRateRule = matchConditionalRateRule;
 exports.resolveLineRate = resolveLineRate;
 exports.applyDavisBaconLeadFloor = applyDavisBaconLeadFloor;
 /**
@@ -96,7 +101,9 @@ function titleCaseLeadName(leadDisplay, directory, subcontractors) {
         const sub = subcontractors.find((s) => s.toUpperCase() === p.toUpperCase());
         if (sub)
             return sub;
-        return stripSingleLetterTokens(p);
+        // No directory hit — still Title Case so auto-added leads aren't ALL CAPS.
+        const titled = p.replace(/[A-Za-z]+(?:'[A-Za-z]+)?/g, (w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
+        return stripSingleLetterTokens(titled);
     })
         .join('/');
 }
@@ -235,16 +242,23 @@ function directoryFromTimesheet(rows) {
     return [...seen.values()];
 }
 /**
- * If the employee's week exceeds 40 hours, move the overage to an [OT] line
- * on the LAST job worked (latest date; last by file order within the day),
- * reducing that job's regular hours so regular + OT = actual.
+ * If the employee's week exceeds 40 hours, move the overage to an
+ * [OT >40 hrs/wk] line on the LAST job worked (latest date; last by file order
+ * within the day), reducing that job's regular hours so regular + OT = actual.
+ *
+ * Round 8 §9.2 — `dailyOtHours` are hours already paid at 1.5× by the NV
+ * daily-OT rule. They are excluded here so no hour is paid overtime twice;
+ * each hour gets the single highest applicable OT treatment once.
  */
-function splitOvertime(jobs) {
+function splitOvertime(jobs, opts) {
     const regularByJob = new Map(jobs.map((j) => [j.jobId, (0, format_1.round2)(j.hours)]));
     const total = (0, format_1.round2)(jobs.reduce((acc, j) => acc + j.hours, 0));
+    const dailyOtHours = (0, format_1.round2)(Math.max(0, opts?.dailyOtHours ?? 0));
     if (total <= 40 || jobs.length === 0)
         return { regularByJob, otJobId: null, otHours: 0 };
-    const otHours = (0, format_1.round2)(total - 40);
+    const otHours = (0, format_1.round2)(Math.max(0, total - 40 - dailyOtHours));
+    if (otHours <= 0)
+        return { regularByJob, otJobId: null, otHours: 0 };
     const last = jobs.reduce((best, cur) => {
         const bt = best.lastDate ? best.lastDate.getTime() : -Infinity;
         const ct = cur.lastDate ? cur.lastDate.getTime() : -Infinity;
@@ -254,6 +268,60 @@ function splitOvertime(jobs) {
     });
     regularByJob.set(last.jobId, (0, format_1.round2)((regularByJob.get(last.jobId) ?? 0) - otHours));
     return { regularByJob, otJobId: last.jobId, otHours };
+}
+function dayKeyOf(d) {
+    if (!d)
+        return '';
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${d.getFullYear()}-${mm}-${dd}`;
+}
+/**
+ * Round 8 §9.2 — NV only: a painter whose resolved line rate is under the
+ * threshold earns 1.5× for hours past `thresholdHours` in a single day.
+ *
+ * The overage is taken from the day's LAST rows backwards (mirroring the
+ * weekly rule's "last job worked"). Hours on an ineligible line — a UT row, or
+ * one already at/above the threshold rate — still consume the overage but
+ * never become daily OT, so a mixed day cannot invent overtime for the wrong
+ * line and UT rows are untouched.
+ */
+function splitDailyOvertime(rows, thresholdHours) {
+    const otByJob = new Map();
+    const segments = [];
+    let totalOtHours = 0;
+    if (!(thresholdHours > 0))
+        return { otByJob, segments, totalOtHours };
+    const byDay = new Map();
+    for (const r of rows) {
+        const key = dayKeyOf(r.date);
+        if (!key || r.hours <= 0)
+            continue;
+        const list = byDay.get(key);
+        if (list)
+            list.push(r);
+        else
+            byDay.set(key, [r]);
+    }
+    for (const key of [...byDay.keys()].sort()) {
+        const list = byDay.get(key) ?? [];
+        const dayHours = (0, format_1.round2)(list.reduce((a, r) => a + r.hours, 0));
+        if (dayHours <= thresholdHours)
+            continue;
+        let remaining = (0, format_1.round2)(dayHours - thresholdHours);
+        for (const r of [...list].sort((a, b) => b.rowIndex - a.rowIndex)) {
+            if (remaining <= 0)
+                break;
+            const take = (0, format_1.round2)(Math.min(remaining, r.hours));
+            remaining = (0, format_1.round2)(remaining - take);
+            if (!r.eligible || take <= 0)
+                continue;
+            otByJob.set(r.jobId, (0, format_1.round2)((otByJob.get(r.jobId) ?? 0) + take));
+            segments.push({ jobId: r.jobId, dateIso: key, date: r.date, dayHours, otHours: take });
+            totalOtHours = (0, format_1.round2)(totalOtHours + take);
+        }
+    }
+    return { otByJob, segments, totalOtHours };
 }
 // ---------------------------------------------------------------------------
 // §4.3 WO Override / WO% pre-fills from the event description
@@ -309,20 +377,45 @@ function wageRateFor(employeeName, rates, fallback, hourlyJob) {
         return { rate: fallback, defaulted: true };
     return { rate: hourlyJob && entry.hourlyRate !== undefined ? entry.hourlyRate : entry.rate, defaulted: false };
 }
-// ---------------------------------------------------------------------------
-// Round 6 §6.2 — profit-share chain (pure)
-// ---------------------------------------------------------------------------
 /**
- * Total Profit Share = (WO Override if entered, else Profit Share)
- * − Labor − ½ Materials. % Completion and Mileage are display-only.
+ * Round 8 §8.1 — SUPERSEDES Round 6 §6.2 and Round 7 §21: BOTH branches now
+ * multiply the base by % Completion (Round 5's override-only multiply is
+ * generalized).
+ *
+ *   base  = WO Override when entered, else Profit Share (Total Income × WO%)
+ *   total = base × %Completion − (− Labor + Wages) − (½ Materials)
+ *
+ * `-Mileage` is still DISPLAYED on the band but is not a term. HOURLY jobs
+ * never reach this chain (they pay hourly per §9).
  */
 function computeTotalProfitShare(args) {
-    void args.percentCompletion;
     void args.mileage;
     const base = args.workOrderOverride !== null && args.workOrderOverride !== undefined
         ? args.workOrderOverride
         : args.profitShare;
-    return base - args.laborWages - args.halfMaterials;
+    const percent = args.percent ?? null;
+    if ((0, format_1.isPercentState)(percent) && percent !== 'HOURLY') {
+        return { total: null, base, percentCompletion: 0, manualPay: percent, missingPercent: false };
+    }
+    const pct = (0, format_1.isPercentNumber)(percent) ? percent : 0;
+    return {
+        total: base * pct - args.laborWages - args.halfMaterials,
+        base,
+        percentCompletion: pct,
+        manualPay: null,
+        missingPercent: !(0, format_1.isPercentNumber)(percent),
+    };
+}
+/**
+ * Round 8 §8.2 — `Total (post-split) + Hourly Pay + Reimbursements −
+ * Deductions/Sundries`.
+ *
+ * Deductions/Sundries is entered as a POSITIVE amount and subtracted. The
+ * mileage rows (`Mileage - New`, `-Mileage`, `Mileage in Books`) are displayed
+ * on the band but are not terms.
+ */
+function computeTotalPay(args) {
+    return args.total + args.hourlyPay + args.reimbursements - args.deductions;
 }
 // ---------------------------------------------------------------------------
 // Round 6 §7.1 / §7.2 — Davis-Bacon + job-rate resolution
@@ -373,28 +466,129 @@ function matchJobRateRule(employeeName, jobApKey, rules) {
     return best;
 }
 /**
- * Round 6 §7.2 + §7.1 Branch 1. Manual line edits are applied by the caller
- * before/after this. Order: job rule → hourly-jobs rate → employee default →
- * global fallback; then on DB jobs `rate = max(resolved, prevailingMinRate)`.
+ * Round 8 §9.1 — the three-rate lookup, resolved PER LINE by job type:
+ *
+ * - job is HOURLY → the person's `hourlyRate` (their own rate, then the global
+ *   fallback, when they have none)
+ * - crew lead's own hours on a profit-share job → their `crewLeadRate`, else
+ *   the global `defaultCrewLeadRate`
+ * - everyone else → their profit-share `rate`
+ */
+function resolveWageRate(employeeName, opts) {
+    const entry = opts.wageRates.find((e) => tokensSubset(e.name, employeeName) || tokensSubset(employeeName, e.name));
+    const defaulted = !entry;
+    if (opts.hourlyJob) {
+        // No hourly-jobs rate on file falls through to the global default, NOT to
+        // the person's profit-share rate — a piece-rate number would understate an
+        // hourly job.
+        const hourly = entry?.hourlyRate;
+        return {
+            rate: hourly ?? opts.defaultWageRate,
+            defaulted,
+            kind: hourly !== undefined ? 'hourlyJob' : 'default',
+        };
+    }
+    if (opts.isCrewLead) {
+        return {
+            rate: entry?.crewLeadRate ?? opts.defaultCrewLeadRate ?? entry?.rate ?? opts.defaultWageRate,
+            defaulted,
+            kind: 'crewLead',
+        };
+    }
+    return {
+        rate: entry?.rate ?? opts.defaultWageRate,
+        defaulted,
+        kind: entry ? 'painter' : 'default',
+    };
+}
+/**
+ * Round 8 §9.1 — person + AP# override. `apKeyPattern` is a substring match,
+ * so '24097' also covers change-order suffixes; the longest matching pattern
+ * wins when several apply.
+ */
+function matchPerJobRateOverride(employeeName, jobApKey, overrides) {
+    if (!jobApKey || !overrides || overrides.length === 0)
+        return null;
+    const key = jobApKey.trim().toUpperCase();
+    let best = null;
+    let bestLen = -1;
+    for (const o of overrides) {
+        const pattern = o.apKeyPattern.trim().toUpperCase();
+        if (!pattern || !key.includes(pattern))
+            continue;
+        if (!(tokensSubset(o.person, employeeName) || tokensSubset(employeeName, o.person)))
+            continue;
+        if (pattern.length > bestLen) {
+            best = o;
+            bestLen = pattern.length;
+        }
+    }
+    return best;
+}
+/** Round 8 §9.1 — "person X earns Y while working a job led by Z". */
+function matchConditionalRateRule(employeeName, jobLeadNames, rules) {
+    if (!rules || rules.length === 0 || !jobLeadNames || jobLeadNames.length === 0)
+        return null;
+    for (const rule of rules) {
+        if (rule.condition.kind !== 'onSameJobAsLead')
+            continue;
+        if (!(tokensSubset(rule.person, employeeName) || tokensSubset(employeeName, rule.person)))
+            continue;
+        const lead = rule.condition.leadName;
+        if (jobLeadNames.some((n) => tokensSubset(lead, n) || tokensSubset(n, lead)))
+            return rule;
+    }
+    return null;
+}
+/**
+ * Round 8 §9.1 (extends Round 6 §7.2 + §7.1 Branch 1). Manual line edits are
+ * applied by the caller before/after this. Precedence, most specific first:
+ *
+ *   1. person + AP# override (`perJobRateOverrides`)
+ *   2. job-scoped rule (`jobRateRules`, Round 6 §7.2)
+ *   3. conditional rule ("X on lead Z's job")
+ *   4. the three generic rates (hourly-jobs / crew-lead / profit-share)
+ *
+ * then the Davis-Bacon max-wrap on DB jobs: `rate = max(resolved, dbRate)` —
+ * it never LOWERS a rate, so a $25 painter stays at $25 on an SNRHA job.
  */
 function resolveLineRate(employeeName, jobText, hourlyJob, settings) {
     const apKey = settings.apKey ?? (0, apkey_1.extractApKey)(jobText);
-    const matched = matchJobRateRule(employeeName, apKey, settings.jobRateRules);
+    const perJob = matchPerJobRateOverride(employeeName, apKey, settings.perJobRateOverrides);
+    const jobRule = perJob ? null : matchJobRateRule(employeeName, apKey, settings.jobRateRules);
+    const conditional = perJob || jobRule
+        ? null
+        : matchConditionalRateRule(employeeName, settings.jobLeadNames, settings.conditionalRateRules);
     let rate;
-    let defaulted;
-    let fromJobRule = false;
+    let defaulted = false;
+    let kind = null;
     let ruleNote;
-    if (matched) {
-        rate = matched.rule.rate;
-        defaulted = false;
-        fromJobRule = true;
-        if (matched.rule.note.trim())
-            ruleNote = matched.rule.note.trim();
+    if (perJob) {
+        rate = perJob.rate;
+        if (perJob.note?.trim())
+            ruleNote = perJob.note.trim();
+    }
+    else if (jobRule) {
+        rate = jobRule.rule.rate;
+        if (jobRule.rule.note.trim())
+            ruleNote = jobRule.rule.note.trim();
+    }
+    else if (conditional) {
+        rate = conditional.rate;
+        if (conditional.note?.trim())
+            ruleNote = conditional.note.trim();
     }
     else {
-        const info = wageRateFor(employeeName, settings.wageRates, settings.defaultWageRate, hourlyJob);
+        const info = resolveWageRate(employeeName, {
+            wageRates: settings.wageRates,
+            defaultWageRate: settings.defaultWageRate,
+            defaultCrewLeadRate: settings.defaultCrewLeadRate,
+            hourlyJob,
+            isCrewLead: settings.isCrewLead,
+        });
         rate = info.rate;
         defaulted = info.defaulted;
+        kind = info.kind;
     }
     const isDb = !settings.forceNonDb && isPrevailingWageJob(jobText, settings.prevailingWagePatterns);
     if (isDb) {
@@ -404,7 +598,10 @@ function resolveLineRate(employeeName, jobText, hourlyJob, settings) {
         rate,
         defaulted,
         prevailing: isDb,
-        ...(fromJobRule ? { fromJobRule: true, ...(ruleNote ? { ruleNote } : {}) } : {}),
+        ...(jobRule ? { fromJobRule: true, ...(ruleNote ? { ruleNote } : {}) } : {}),
+        ...(perJob ? { fromPerJobOverride: true, ...(ruleNote ? { ruleNote } : {}) } : {}),
+        ...(conditional ? { fromConditionalRule: true, ...(ruleNote ? { ruleNote } : {}) } : {}),
+        ...(kind === 'crewLead' ? { fromCrewLeadRate: true } : {}),
     };
 }
 /**

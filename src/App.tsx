@@ -60,7 +60,7 @@ import {
 } from './lib/parsers';
 import { directoryFromTimesheet, type LeadResolverContext } from './lib/payroll';
 import { buildPayrollExceptions } from './lib/payrollExceptions';
-import { buildPayrollPreview } from './lib/payrollPreview';
+import { buildPayrollPreview, hasUtPayrollData, mergePayrollPreviews } from './lib/payrollPreview';
 import { buildPivot } from './lib/pivot';
 import {
   buildPivotByJob,
@@ -75,17 +75,22 @@ import {
   clearSavedDirectory,
   ensureDefaultPivotColumns,
   fetchAppDirectory,
+  fetchAppSettings,
+  hasLocalSettings,
   loadAppMode,
   loadSavedDirectory,
   loadSettings,
   newerDirectory,
   persistAppDirectory,
+  persistAppSettings,
   probeDirectoryStore,
+  probeSettingsStore,
   saveAppMode,
   saveDirectory,
   saveSettings,
   type AppMode,
   type DirectoryStoreStatus,
+  type SettingsStoreStatus,
 } from './lib/settings';
 import { buildReportRows, sortReportRows } from './lib/timenavi';
 import type {
@@ -125,6 +130,7 @@ type SlotId =
   | 'lastWeek'
   | 'completedPercents'
   | 'pl'
+  | 'plUt'
   | 'employees';
 
 interface SlotDef {
@@ -163,7 +169,13 @@ const PAYROLL_RAIL: SlotDef[] = [
     label: 'A · This week\u2019s completed %\u2019s',
     hint: 'Exported % of Completion workbook (Pivot by Job + timesheets)',
   },
-  { id: 'pl', label: 'B · P&L by Customer (QBO)', hint: 'Required for the payroll tabs' },
+  { id: 'pl', label: 'B · NV P&L by Customer (QBO)', hint: 'Required for the payroll tabs' },
+  {
+    id: 'plUt',
+    label: 'C · UT P&L by Customer (QBO)',
+    hint: 'Builds Payroll Preview - UT; without it UT jobs keep the Job Total $ fallback',
+    optional: true,
+  },
 ];
 
 const SLOT_LABELS: Record<Exclude<SlotId, 'employees'>, string> = {
@@ -176,7 +188,8 @@ const SLOT_LABELS: Record<Exclude<SlotId, 'employees'>, string> = {
   utSummary: '7 · UT Sales by Customer Summary',
   lastWeek: '8 · Last week\u2019s % of Completion',
   completedPercents: 'A · This week\u2019s completed %\u2019s',
-  pl: 'B · P&L by Customer (QBO)',
+  pl: 'B · NV P&L by Customer (QBO)',
+  plUt: 'C · UT P&L by Customer (QBO)',
 };
 
 interface ParsedData {
@@ -191,6 +204,8 @@ interface ParsedData {
   lastWeek: Map<string, PrevPercent> | null;
   lastWeekPbj: LastWeekPbjRow[] | null;
   pl: PlParseResult | null;
+  /** Round 8 §7.2 — the optional UT P&L (Slot C). */
+  plUt: PlParseResult | null;
   directory: DirectoryEmployee[] | null;
   /** Raw first sheets for Round 6 mirror tabs. */
   nvSalesSheet: SheetData | null;
@@ -211,6 +226,7 @@ const EMPTY_PARSED: ParsedData = {
   lastWeek: null,
   lastWeekPbj: null,
   pl: null,
+  plUt: null,
   directory: null,
   nvSalesSheet: null,
   nvSummarySheet: null,
@@ -233,8 +249,10 @@ type PercentsTab =
   | 'exceptions';
 type PayrollTab =
   | 'plImport'
+  | 'plImportUt'
   | 'mgmtReport'
   | 'payroll'
+  | 'payrollUt'
   | 'profitshare'
   | 'inputNums'
   | 'notes'
@@ -258,6 +276,7 @@ export default function App(): JSX.Element {
     lastWeek: EMPTY_CHIP,
     completedPercents: EMPTY_CHIP,
     pl: EMPTY_CHIP,
+    plUt: EMPTY_CHIP,
     employees: EMPTY_CHIP,
   });
   const [parsed, setParsed] = useState<ParsedData>(EMPTY_PARSED);
@@ -284,6 +303,13 @@ export default function App(): JSX.Element {
   const [directoryStoreStatus, setDirectoryStoreStatus] = useState<DirectoryStoreStatus | null>(null);
   const [directorySyncWarning, setDirectorySyncWarning] = useState<string | null>(null);
   const [missingInputWarning, setMissingInputWarning] = useState<string[] | null>(null);
+  // Round 8 §1 — Settings live in a shared store; localStorage is the offline
+  // cache. Blob setup stays optional: without it we silently stay local.
+  const [settingsStoreStatus, setSettingsStoreStatus] = useState<SettingsStoreStatus | null>(null);
+  const [settingsSyncWarning, setSettingsSyncWarning] = useState<string | null>(null);
+  const [settingsToast, setSettingsToast] = useState<string | null>(null);
+  /** Bumped whenever Settings are adopted from the shared store; remounts the modal. */
+  const [settingsRevision, setSettingsRevision] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -307,6 +333,39 @@ export default function App(): JSX.Element {
     };
   }, []);
 
+  // Round 8 §1 — adopt the shared Settings on load; if the store is empty and
+  // this browser has its own, push them up once (one-time migration).
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const status = await probeSettingsStore();
+      if (cancelled) return;
+      setSettingsStoreStatus(status);
+      if (status === 'ready') {
+        const remote = await fetchAppSettings();
+        if (cancelled || !remote) return;
+        setSettings(remote);
+        saveSettings(remote);
+        setSettingsRevision((n) => n + 1);
+        return;
+      }
+      if (status === 'empty' && hasLocalSettings()) {
+        const sync = await persistAppSettings(loadSettings());
+        if (cancelled) return;
+        if (sync.ok) setSettingsStoreStatus('ready');
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!settingsToast) return;
+    const t = window.setTimeout(() => setSettingsToast(null), 3500);
+    return () => window.clearTimeout(t);
+  }, [settingsToast]);
+
   // ------------------------------------------------------------------ uploads
 
   const applyCompletedSeeds = useCallback((jobs: CompletedPbjJob[]): void => {
@@ -318,7 +377,9 @@ export default function App(): JSX.Element {
         crewLead: j.crewLead || undefined,
         woOverride: j.woOverride,
         woPct: j.woPct,
-        percent: j.percent,
+        // Round 8 §3.1 — a seed, not a manual override: this week's TimeNavi
+        // value still wins wherever the grid has a row for the AP#.
+        percentSeed: j.percent,
         notes: j.notes || undefined,
       };
       for (const e of j.employees) {
@@ -420,10 +481,18 @@ export default function App(): JSX.Element {
           break;
         }
         case 'pl': {
-          const pl = parsePl(wbd);
+          const pl = parsePl(wbd, { entity: 'NV', mapping: settings.plAccountMapping.NV });
           ok(
             `✓ ${pl.byJob.size} job columns${pl.duplicateColumns.length > 0 ? ` · ${pl.duplicateColumns.length} duplicated` : ''}`,
             { pl },
+          );
+          break;
+        }
+        case 'plUt': {
+          const plUt = parsePl(wbd, { entity: 'UT', mapping: settings.plAccountMapping.UT });
+          ok(
+            `✓ ${plUt.byJob.size} job columns${plUt.duplicateColumns.length > 0 ? ` · ${plUt.duplicateColumns.length} duplicated` : ''}`,
+            { plUt },
           );
           break;
         }
@@ -449,7 +518,7 @@ export default function App(): JSX.Element {
     } catch (err) {
       fail(err instanceof Error ? err.message : 'Could not read this file.');
     }
-  }, [applyCompletedSeeds, payDateIso]);
+  }, [applyCompletedSeeds, payDateIso, settings.plAccountMapping]);
 
   /** Combined NV+UT timesheet (NV first); falls back to Slot A when neither uploaded. */
   const combinedTimesheet = useMemo((): TimesheetParseResult | null => {
@@ -692,18 +761,6 @@ export default function App(): JSX.Element {
     saveSettings(next);
   }, [pivot.estimators, settings]);
 
-  const exceptions = useMemo(
-    () =>
-      buildExceptions({
-        reportRows,
-        enriched,
-        lunchRemoved: combinedTimesheet?.lunchRemoved ?? 0,
-        payDate,
-      }),
-    [reportRows, enriched, combinedTimesheet, payDate],
-  );
-  const exceptionCount = useMemo(() => countExceptions(exceptions), [exceptions]);
-
   // ------------------------------------------------ Round 3: payroll models
 
   /** §4.2 — fresh upload wins, else the persisted directory, else null. */
@@ -741,6 +798,9 @@ export default function App(): JSX.Element {
         utTotals: parsed.utTotals,
         nvSales: parsed.nvSales,
         utSales: parsed.utSales,
+        // Round 8 §4.3 — carried-job customers resolve by AP# against these.
+        nvSalesByCust: salesByCustMirror,
+        utSalesByCust: utSalesByCustMirror,
       }),
     [
       enriched,
@@ -757,10 +817,25 @@ export default function App(): JSX.Element {
       parsed.utTotals,
       parsed.nvSales,
       parsed.utSales,
+      salesByCustMirror,
+      utSalesByCustMirror,
       balancesState,
       utState,
     ],
   );
+
+  const exceptions = useMemo(
+    () =>
+      buildExceptions({
+        reportRows,
+        enriched,
+        lunchRemoved: combinedTimesheet?.lunchRemoved ?? 0,
+        payDate,
+        pivotByJob,
+      }),
+    [reportRows, enriched, combinedTimesheet, payDate, pivotByJob],
+  );
+  const exceptionCount = useMemo(() => countExceptions(exceptions), [exceptions]);
 
   const payrollPreview = useMemo(() => {
     if (!createdPayroll || !parsed.pl) return null;
@@ -769,6 +844,8 @@ export default function App(): JSX.Element {
       enriched,
       reportRows,
       pl: parsed.pl,
+      plUt: parsed.plUt,
+      entity: 'NV',
       directory: effectiveDirectory,
       settings,
       payDate,
@@ -783,6 +860,7 @@ export default function App(): JSX.Element {
   }, [
     createdPayroll,
     parsed.pl,
+    parsed.plUt,
     parsed.nvSales,
     parsed.utSales,
     effectiveLastWeekPbj,
@@ -798,12 +876,63 @@ export default function App(): JSX.Element {
     leadCtx,
   ]);
 
+  const showUtPayroll = useMemo(
+    () => hasUtPayrollData({ enriched, pbj: pivotByJob, plUt: parsed.plUt }),
+    [enriched, pivotByJob, parsed.plUt],
+  );
+
+  const payrollPreviewUt = useMemo(() => {
+    if (!createdPayroll || !showUtPayroll) return null;
+    return buildPayrollPreview({
+      pbj: pivotByJob,
+      enriched,
+      reportRows,
+      pl: parsed.pl,
+      plUt: parsed.plUt,
+      entity: 'UT',
+      directory: effectiveDirectory,
+      settings,
+      payDate,
+      edits: payrollEdits,
+      qbHours,
+      knownEstimators,
+      leadCtx,
+      nvSales: parsed.nvSales,
+      utSales: parsed.utSales,
+      lastWeekPbj: effectiveLastWeekPbj,
+    });
+  }, [
+    createdPayroll,
+    showUtPayroll,
+    parsed.pl,
+    parsed.plUt,
+    parsed.nvSales,
+    parsed.utSales,
+    effectiveLastWeekPbj,
+    effectiveDirectory,
+    pivotByJob,
+    enriched,
+    reportRows,
+    settings,
+    payDate,
+    payrollEdits,
+    qbHours,
+    knownEstimators,
+    leadCtx,
+  ]);
+
+  const payrollPreviewAll = useMemo(
+    () => (payrollPreview ? mergePayrollPreviews(payrollPreview, payrollPreviewUt) : null),
+    [payrollPreview, payrollPreviewUt],
+  );
+
   const payrollExceptions = useMemo(() => {
     if (!createdPayroll) return [];
     return buildPayrollExceptions({
       pbj: pivotByJob,
       preview:
         payrollPreview ?? {
+          entity: 'NV',
           title: '',
           weekRange: '',
           painters: [],
@@ -815,9 +944,13 @@ export default function App(): JSX.Element {
           managers: [],
           inactiveEmployees: [],
           inactiveZeroHours: [],
+          newLeadsToAdd: [],
+          dailyOtNotes: [],
         },
+      previewUt: payrollPreviewUt,
       reportRows,
       pl: parsed.pl,
+      plUt: parsed.plUt,
       hasDirectory: effectiveDirectory !== null,
       enriched,
       nvSales: parsed.nvSales,
@@ -828,8 +961,10 @@ export default function App(): JSX.Element {
     createdPayroll,
     pivotByJob,
     payrollPreview,
+    payrollPreviewUt,
     reportRows,
     parsed.pl,
+    parsed.plUt,
     parsed.nvSales,
     parsed.utSales,
     effectiveLastWeekPbj,
@@ -837,6 +972,33 @@ export default function App(): JSX.Element {
     enriched,
   ]);
   const payrollExceptionCount = useMemo(() => countExceptions(payrollExceptions), [payrollExceptions]);
+
+  // Round 8 §9.4 — a crew lead that resolved from the input data but has no
+  // entry in the crew profit-share % map is auto-added at the seeded default.
+  // buildPayrollPreview stays pure and just reports them; writing Settings is
+  // the App layer's job, so no compute path mutates the store.
+  const newLeadsToAdd = payrollPreviewAll?.newLeadsToAdd;
+  useEffect(() => {
+    if (!newLeadsToAdd || newLeadsToAdd.length === 0) return;
+    const key = (s: string): string => s.trim().toLowerCase();
+    const additions = newLeadsToAdd.filter(
+      (n) => !settings.profitShare.some((p) => key(p.lead) === key(n.lead)),
+    );
+    if (additions.length === 0) return;
+    const next: AppSettings = {
+      ...settings,
+      profitShare: [...settings.profitShare, ...additions.map((n) => ({ lead: n.lead, pct: n.pct }))],
+    };
+    setSettings(next);
+    saveSettings(next);
+    void persistAppSettings(next);
+    const names = additions.map((n) => n.lead).join(', ');
+    setSettingsToast(
+      additions.length === 1
+        ? `New crew lead ${names} added at default 38%`
+        : `New crew leads added at default 38%: ${names}`,
+    );
+  }, [newLeadsToAdd, settings]);
 
   const estimatorOptions = useMemo(() => {
     const set = new Set<string>(legendOrder);
@@ -911,6 +1073,9 @@ export default function App(): JSX.Element {
       woOverride: null,
       woPct: null,
       percent: null,
+      livePercent: null,
+      percentOverride: false,
+      excludedFromPayroll: false,
       notes: '',
       colorHex: null,
     };
@@ -937,8 +1102,11 @@ export default function App(): JSX.Element {
         weekStart: weekBounds.weekStart,
         weekEnd: weekBounds.weekEnd,
         pl: parsed.pl,
+        plUt: parsed.plUt,
         plSourceFileName: chips.pl.fileName || null,
         payrollPreview,
+        payrollPreviewUt,
+        payrollPreviewAll,
         payrollExceptions,
         mileageRate: settings.mileageRate,
         defaultProfitSharePct: settings.defaultProfitSharePct,
@@ -966,8 +1134,11 @@ export default function App(): JSX.Element {
     payDate,
     weekBounds,
     parsed.pl,
+    parsed.plUt,
     chips.pl.fileName,
     payrollPreview,
+    payrollPreviewUt,
+    payrollPreviewAll,
     payrollExceptions,
     settings.mileageRate,
     settings.defaultProfitSharePct,
@@ -992,6 +1163,33 @@ export default function App(): JSX.Element {
     setSettings(next);
     saveSettings(next);
     setSettingsOpen(false);
+    // Last write wins on the shared store; local cache is already updated.
+    void persistAppSettings(next).then((sync) => {
+      if (sync.ok) {
+        setSettingsSyncWarning(null);
+        setSettingsStoreStatus('ready');
+        setSettingsToast('Settings saved ✓ (shared)');
+      } else {
+        setSettingsSyncWarning(sync.message);
+        setSettingsToast('Settings saved ✓ (this browser)');
+      }
+    });
+  }, []);
+
+  /** Round 8 §1 — re-pull the shared Settings (another browser may have saved). */
+  const onReloadSettings = useCallback(async (): Promise<void> => {
+    const status = await probeSettingsStore();
+    setSettingsStoreStatus(status);
+    const remote = await fetchAppSettings();
+    if (!remote) {
+      setSettingsToast('No shared settings to load');
+      return;
+    }
+    setSettings(remote);
+    saveSettings(remote);
+    setSettingsRevision((n) => n + 1);
+    setSettingsSyncWarning(null);
+    setSettingsToast('Settings reloaded ✓ (shared)');
   }, []);
 
   // Replace / clear: always cache locally; also write the shared store so phone
@@ -1229,8 +1427,12 @@ export default function App(): JSX.Element {
                   ] as [Tab, string][])
                 : ([
                     ['plImport', 'P&L by Job Import'],
+                    ...(parsed.plUt ? ([['plImportUt', 'P&L by Job Import - UT']] as [Tab, string][]) : []),
                     ['mgmtReport', 'Management Report Export'],
                     ['payroll', 'Payroll Preview'],
+                    ...(showUtPayroll
+                      ? ([['payrollUt', 'Payroll Preview - UT']] as [Tab, string][])
+                      : []),
                     ['profitshare', 'Profitshare Output'],
                     ['inputNums', "Input #'s"],
                     ['notes', 'Notes'],
@@ -1302,33 +1504,41 @@ export default function App(): JSX.Element {
               <ExceptionsPanel groups={exceptions} onNavigate={navigateToRow} />
             ) : tab === 'payroll' ? (
               <PayrollPreview model={payrollPreview} mileageRate={settings.mileageRate} onEdit={onPayrollEdit} />
+            ) : tab === 'payrollUt' ? (
+              <PayrollPreview model={payrollPreviewUt} mileageRate={settings.mileageRate} onEdit={onPayrollEdit} />
             ) : tab === 'profitshare' ? (
-              <ProfitshareOutputTab model={payrollPreview} />
+              <ProfitshareOutputTab model={payrollPreviewAll} onEdit={onPayrollEdit} />
             ) : tab === 'mgmtReport' ? (
-              <ManagementReportTab model={payrollPreview} defaultPsPct={settings.defaultProfitSharePct} />
+              <ManagementReportTab
+                model={payrollPreviewAll}
+                defaultPsPct={settings.defaultProfitSharePct}
+                onEdit={onPayrollEdit}
+              />
             ) : tab === 'inputNums' ? (
-              <InputNumsTab model={payrollPreview} onEdit={onPayrollEdit} />
+              <InputNumsTab model={payrollPreviewAll} onEdit={onPayrollEdit} />
             ) : tab === 'notes' ? (
-              <NotesTab model={payrollPreview} mileageRate={settings.mileageRate} onEdit={onPayrollEdit} />
+              <NotesTab model={payrollPreviewAll} mileageRate={settings.mileageRate} onEdit={onPayrollEdit} />
             ) : tab === 'final' ? (
               <FinalPayrollTab
-                model={payrollPreview}
+                model={payrollPreviewAll}
                 mileageRate={settings.mileageRate}
                 onEdit={onPayrollEdit}
                 defaultPsPct={settings.defaultProfitSharePct}
               />
             ) : tab === 'journal' ? (
-              <JournalEntryTab model={payrollPreview} />
+              <JournalEntryTab model={payrollPreviewAll} />
             ) : tab === 'jobs' ? (
-              <JobsListTab model={payrollPreview} pl={parsed.pl} />
+              <JobsListTab model={payrollPreviewAll} pl={parsed.pl} />
             ) : tab === 'payrollExceptions' ? (
               <ExceptionsPanel groups={payrollExceptions} onNavigate={navigateToRow} />
             ) : tab === 'prFinalCheck' ? (
               <PrFinalCheckTab pl={parsed.pl} sourceFileName={chips.pl.fileName} />
             ) : tab === 'inactive' ? (
-              <InactiveEmployeesTab model={payrollPreview} />
+              <InactiveEmployeesTab model={payrollPreviewAll} />
             ) : tab === 'plImport' ? (
               <PlImportTable pl={parsed.pl} />
+            ) : tab === 'plImportUt' ? (
+              <PlImportTable pl={parsed.plUt} />
             ) : (
               <PayrollPreview model={payrollPreview} mileageRate={settings.mileageRate} onEdit={onPayrollEdit} />
             )}
@@ -1338,15 +1548,28 @@ export default function App(): JSX.Element {
 
       {settingsOpen && (
         <SettingsModal
+          key={settingsRevision}
           settings={settings}
           directory={savedDirectory}
           directoryStoreStatus={directoryStoreStatus}
           directorySyncWarning={directorySyncWarning}
+          settingsStoreStatus={settingsStoreStatus}
+          settingsSyncWarning={settingsSyncWarning}
+          onReloadSettings={onReloadSettings}
           onDirectoryReplace={onDirectoryReplace}
           onDirectoryClear={onDirectoryClear}
           onSave={onSaveSettings}
           onClose={() => setSettingsOpen(false)}
         />
+      )}
+
+      {settingsToast && (
+        <div
+          className="fixed bottom-4 right-4 z-[60] rounded bg-neutral-900 px-3 py-2 text-xs font-semibold text-white shadow-lg"
+          role="status"
+        >
+          {settingsToast}
+        </div>
       )}
     </div>
   );
@@ -1374,6 +1597,8 @@ function clearForSlot(id: SlotId): Partial<ParsedData> {
       return { lastWeek: null, lastWeekPbj: null };
     case 'pl':
       return { pl: null };
+    case 'plUt':
+      return { plUt: null };
     case 'employees':
       return { directory: null };
   }
@@ -1402,6 +1627,7 @@ function completedFromSession(
         percent: j.analysis.percent,
         notes: j.analysis.notes,
         hourly: j.analysis.hourly,
+        excludedFromPayroll: false,
         byDate: j.byDate,
         total: j.total,
         employees: j.employees.map((e: PbjEmployeeRow) => ({
@@ -1438,6 +1664,7 @@ function completedFromSession(
         woPct: j.woPct,
         percent: j.percent,
         notes: j.notes,
+        excludedFromPayroll: j.excludedFromPayroll,
       })),
   };
 }
@@ -1460,6 +1687,7 @@ function manualToCompleted(
     percent: row.percent,
     notes: row.notes,
     hourly: row.percent === 'HOURLY' || /^hourly$/i.test(row.crewLead),
+    excludedFromPayroll: row.excludedFromPayroll,
     byDate: {},
     total: 0,
     employees: [],

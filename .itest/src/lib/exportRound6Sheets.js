@@ -5,6 +5,8 @@ exports.buildSalesByCustMirrorSheet = buildSalesByCustMirrorSheet;
 exports.buildTimesheetMirrorSheet = buildTimesheetMirrorSheet;
 exports.buildJobsByCrewSheet = buildJobsByCrewSheet;
 exports.buildPlImportSheet = buildPlImportSheet;
+exports.inputNumsSheetFormula = inputNumsSheetFormula;
+exports.inputNumbersCellRefs = inputNumbersCellRefs;
 exports.buildProfitshareOutputSheet = buildProfitshareOutputSheet;
 exports.buildManagementReportSheet = buildManagementReportSheet;
 exports.buildInputNumbersSheet = buildInputNumbersSheet;
@@ -298,8 +300,10 @@ function applyGaramond(ws, size = 12) {
         });
     });
 }
-function buildPlImportSheet(wb, pl) {
-    const ws = wb.addWorksheet('P&L by Job Import');
+function buildPlImportSheet(wb, pl, 
+// Round 8 §7.3 — the UT tree renders identically onto its own sheet.
+sheetName = 'P&L by Job Import') {
+    const ws = wb.addWorksheet(sheetName);
     // Round 7 — full uploaded account tree when present; else fall back to byJob summary.
     if (pl && pl.columnHeaders.length > 0 && pl.accountRows.length > 0) {
         const headers = [...pl.columnHeaders];
@@ -353,6 +357,26 @@ function buildPlImportSheet(wb, pl) {
     }
     applyGaramond(ws);
 }
+/** Round 8 §10 — `'Input #''s'!C10` (escaped apostrophe in the sheet name). */
+function inputNumsSheetFormula(cell) {
+    return { formula: `'Input #''s'!${cell}` };
+}
+/**
+ * Round 8 §10.1/§10.2 — row map of each lead's Input #'s block. Must stay
+ * byte-identical to `buildInputNumbersSheet` so Profitshare formulas resolve.
+ * Layout from row `start` (name row):
+ * +0 name, +1 PO, +2 WO, +3 %, +4 materials hdr, +5 blank,
+ * +6 Reimbursements, +7 Hourly Pay, +8 Deductions/Sundries, +9 Miles, +10 spacer.
+ */
+function inputNumbersCellRefs(leadCount) {
+    const out = [];
+    let row = 3;
+    for (let i = 0; i < leadCount; i++) {
+        out.push({ hourlyCell: `C${row + 7}`, deductCell: `C${row + 8}` });
+        row += 11;
+    }
+    return out;
+}
 function writePsChainValues(ws, block, startCol, opts) {
     const jobCount = Math.min(block.jobs.length, 6);
     const baseFont = { name: PP_FONT, size: 12 };
@@ -390,11 +414,7 @@ function writePsChainValues(ws, block, startCol, opts) {
     for (let i = 0; i < jobCount; i++) {
         const j = block.jobs[i];
         set(r, startCol + 1 + i, j.jobShort);
-        if (style === 'profitshare' && i === 0) {
-            ws.getCell(r, startCol + 1 + i).fill = solidFill(HOURLY_PAY_YELLOW);
-            ws.getCell(r, startCol + 1 + i).font = { ...baseFont, size: 10.5, bold: true };
-        }
-        else if (j.colorHex) {
+        if (j.colorHex) {
             ws.getCell(r, startCol + 1 + i).fill = solidFill('FF' + j.colorHex);
             ws.getCell(r, startCol + 1 + i).font = {
                 ...baseFont,
@@ -409,11 +429,7 @@ function writePsChainValues(ws, block, startCol, opts) {
     for (let i = 0; i < jobCount; i++) {
         const j = block.jobs[i];
         set(r, startCol + 1 + i, j.customer);
-        if (style === 'profitshare' && i === 0) {
-            ws.getCell(r, startCol + 1 + i).fill = solidFill(HOURLY_PAY_YELLOW);
-            ws.getCell(r, startCol + 1 + i).font = { ...baseFont, size: 10.5, bold: true };
-        }
-        else if (j.colorHex) {
+        if (j.colorHex) {
             ws.getCell(r, startCol + 1 + i).fill = solidFill('FF' + j.colorHex);
             ws.getCell(r, startCol + 1 + i).font = {
                 ...baseFont,
@@ -424,24 +440,27 @@ function writePsChainValues(ws, block, startCol, opts) {
         }
     }
     r++;
+    // Round 8 §8.1 — SUBBED / SET RATE bands carry no auto profit share: the
+    // computed cells export blank and the % cell shows the state verbatim.
+    const cut = block.jobs.slice(0, jobCount);
     const rows = [
-        { label: 'Profit Share', vals: block.jobs.slice(0, jobCount).map((j) => j.profitShare), fmt: MONEY_FMT },
+        { label: 'Profit Share', vals: cut.map((j) => (j.manualPay ? '' : j.profitShare)), fmt: MONEY_FMT },
         {
             label: 'Work Order Override',
-            vals: block.jobs.slice(0, jobCount).map((j) => (j.workOrderOverride !== null ? j.workOrderOverride : '')),
+            vals: cut.map((j) => (j.workOrderOverride !== null ? j.workOrderOverride : '')),
             fmt: ACCOUNTING_FMT,
         },
         {
             label: '% Completion',
-            vals: block.jobs.slice(0, jobCount).map((j) => j.percentCompletion),
+            vals: cut.map((j) => (j.manualPay ? j.manualPay : j.percentCompletion)),
             fmt: PCT_FMT,
         },
-        { label: '- Labor + Wages', vals: block.jobs.slice(0, jobCount).map((j) => j.laborWages), fmt: MONEY_FMT },
-        { label: '-Mileage', vals: block.jobs.slice(0, jobCount).map((j) => j.mileage), fmt: MONEY_FMT },
-        { label: '-½ Materials', vals: block.jobs.slice(0, jobCount).map((j) => j.halfMaterials), fmt: MONEY_FMT },
+        { label: '- Labor + Wages', vals: cut.map((j) => j.laborWages), fmt: MONEY_FMT },
+        { label: '-Mileage', vals: cut.map((j) => j.mileage), fmt: MONEY_FMT },
+        { label: '-½ Materials', vals: cut.map((j) => j.halfMaterials), fmt: MONEY_FMT },
         {
             label: 'Total Profit Share',
-            vals: block.jobs.slice(0, jobCount).map((j) => j.totalProfitShare),
+            vals: cut.map((j) => (j.manualPay ? '' : j.totalProfitShare)),
             fmt: ACCOUNTING_FMT,
             bold: true,
         },
@@ -486,9 +505,9 @@ function writePsChainValues(ws, block, startCol, opts) {
     const footer = [
         { label: 'Total', value: block.total, bold: true },
         { label: 'Mileage - New', value: block.mileageNew },
-        { label: 'Hourly Pay', value: block.hourlyPay, highlight: true },
+        { label: 'Hourly Pay', value: block.hourlyPay, highlight: true, formula: opts.hourlyPayRef },
         { label: 'Reimbursements', value: block.reimbursements, memo: block.reimbMemo, color: REIMB_BLUE },
-        { label: 'Deductions/Sundries', value: block.deductions, memo: block.deductMemo, color: DEDUCT_RED },
+        { label: 'Deductions/Sundries', value: block.deductions, memo: block.deductMemo, color: DEDUCT_RED, formula: opts.deductionsRef },
         { label: 'Total Pay', value: block.totalPay, bold: true, money: true, cream: style === 'profitshare' },
     ];
     let deductFooterRow = 0;
@@ -496,7 +515,14 @@ function writePsChainValues(ws, block, startCol, opts) {
         if (f.label === 'Deductions/Sundries')
             deductFooterRow = r;
         set(r, startCol, f.label);
-        set(r, startCol + 1, f.value, f.money ? MONEY_FMT : ACCOUNTING_FMT);
+        if (f.formula) {
+            ws.getCell(r, startCol + 1).value = inputNumsSheetFormula(f.formula);
+            ws.getCell(r, startCol + 1).numFmt = f.money ? MONEY_FMT : ACCOUNTING_FMT;
+            ws.getCell(r, startCol + 1).font = { ...baseFont };
+        }
+        else {
+            set(r, startCol + 1, f.value, f.money ? MONEY_FMT : ACCOUNTING_FMT);
+        }
         if (f.memo)
             set(r, startCol + 2, f.memo);
         if (f.bold) {
@@ -530,6 +556,8 @@ function writePsChainValues(ws, block, startCol, opts) {
     const info = [
         { label: 'Total Income', vals: block.jobs.slice(0, jobCount).map((j) => j.income), fmt: MONEY_FMT },
         { label: 'Materials', vals: block.jobs.slice(0, jobCount).map((j) => j.materials), fmt: MONEY_FMT },
+        // Round 8 §8.5 — informational, directly beneath Materials.
+        { label: 'Travel', vals: block.jobs.slice(0, jobCount).map((j) => j.travel), fmt: MONEY_FMT },
         { label: 'QB Labor-Wages-Subs', vals: block.jobs.slice(0, jobCount).map((j) => j.laborWages), fmt: MONEY_FMT },
         { label: 'Mileage in Books', vals: block.jobs.slice(0, jobCount).map((j) => j.mileage), fmt: MONEY_FMT },
         {
@@ -593,10 +621,13 @@ function buildProfitshareOutputSheet(wb, model, defaultPsPct, mileageRate = 0.62
     let maxEndRow = 1;
     leads.forEach((block, bi) => {
         const startCol = 1 + bi * 8;
+        const refs = inputNumbersCellRefs(leads.length)[bi];
         const end = writePsChainValues(ws, block, startCol, {
             defaultPsPct,
             startRow: 1,
             style: 'profitshare',
+            hourlyPayRef: refs?.hourlyCell,
+            deductionsRef: refs?.deductCell,
         });
         if (end > maxEndRow)
             maxEndRow = end;
@@ -621,16 +652,23 @@ function buildManagementReportSheet(wb, model, defaultPsPct) {
     const ws = wb.addWorksheet('Management Report Export');
     ws.columns = Array.from({ length: 8 }, () => ({ width: 16 }));
     const leads = model?.leads ?? [];
+    const refs = inputNumbersCellRefs(leads.length);
     const jobCols = 6;
     const hdr = ws.addRow(['Crew', ...Array.from({ length: jobCols }, (_, i) => `Job ${i + 1}`)]);
     for (let c = 1; c <= 1 + jobCols; c++) {
         hdr.getCell(c).fill = solidFill(HEADER_GRAY);
         hdr.getCell(c).font = { name: PP_FONT, bold: true, size: 12, color: { argb: WHITE } };
     }
-    for (const block of leads) {
-        writePsChainValues(ws, block, 1, { defaultPsPct, style: 'management' });
+    leads.forEach((block, bi) => {
+        const r = refs[bi];
+        writePsChainValues(ws, block, 1, {
+            defaultPsPct,
+            style: 'management',
+            hourlyPayRef: r?.hourlyCell,
+            deductionsRef: r?.deductCell,
+        });
         ws.addRow([]);
-    }
+    });
     if (leads.length === 0)
         ws.addRow(['(no crew leads this week)']);
     applyGaramond(ws);
@@ -689,7 +727,8 @@ function buildInputNumbersSheet(wb, model) {
         pctRow.getCell(2).value = '% Completion:';
         pctRow.getCell(2).font = { name: PP_FONT, size: 12 };
         for (let i = 0; i < jobCount; i++) {
-            pctRow.getCell(3 + i).value = block.jobs[i].percentCompletion;
+            const j = block.jobs[i];
+            pctRow.getCell(3 + i).value = j.manualPay ? j.manualPay : j.percentCompletion;
             pctRow.getCell(3 + i).numFmt = PCT_FMT;
             pctRow.getCell(3 + i).font = { name: PP_FONT, size: 12 };
         }
@@ -708,6 +747,14 @@ function buildInputNumbersSheet(wb, model) {
         reimb.getCell(3).numFmt = ACCOUNTING_FMT;
         reimb.getCell(4).value = block.reimbMemo;
         reimb.getCell(3).font = { name: PP_FONT, size: 12, color: { argb: REIMB_BLUE } };
+        row++;
+        // Round 8 §10.2 — Hourly Pay sits between Reimbursements and Deductions.
+        const hourly = ws.getRow(row);
+        hourly.getCell(2).value = 'Hourly Pay';
+        hourly.getCell(3).value = block.hourlyPay;
+        hourly.getCell(3).numFmt = ACCOUNTING_FMT;
+        hourly.getCell(3).fill = solidFill(HOURLY_PAY_YELLOW);
+        hourly.getCell(3).font = { name: PP_FONT, size: 12 };
         row++;
         const deduct = ws.getRow(row);
         deduct.getCell(2).value = 'Deductions/Sundries';

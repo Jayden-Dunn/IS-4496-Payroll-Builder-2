@@ -313,7 +313,10 @@ check('24314 last % paid (from workbook only)', r24314.lastPaid, 0.9);
 check('24314 QBO job name (NV first)', r24314.qboJobName, 'AP24314 Ext');
 check('24314 In QBO Time', r24314.inQboTime, 'AP24314 Ext');
 check('24314 job total', r24314.jobTotal, 650);
-check('24314 apptivo defaults to job total', r24314.apptivo, 650);
+// Round 8 §2.2 — Apptivo is never auto-filled from the job total; it stays
+// blank until someone types it, so the $ Difference stays blank too.
+check('24314 apptivo blank until typed', r24314.apptivo, null);
+check('24314 $ difference blank while apptivo is blank', r24314.dollarDiff, null);
 check('24314 invoice date = FIRST (earliest) match', [r24314.invoiceDate!.getMonth() + 1, r24314.invoiceDate!.getDate()], [6, 25]);
 check('24314 date difference (R − B, whole days)', r24314.dateDiff, -4);
 check('24314 title initials for mismatch check', r24314.titleInitials, 'XC');
@@ -597,7 +600,7 @@ const pbj2 = buildPivotByJob({
   qbHours: { [`${j24314.id}\u0000leo@x.com`]: 42.5 },
   lastWeekPbj,
   balancesState: { added: [], deleted: ['balances:20000'], edits: { 'balances:21848-A5': { notes: 'edited note' } } },
-  utState: { added: [{ id: 'manual:ut:1', customer: 'X', job: 'New UT row', apKey: '24999', estimator: '', crewLead: '', woOverride: null, woPct: null, percent: null, notes: '', colorHex: null }], deleted: [], edits: {} },
+  utState: { added: [{ id: 'manual:ut:1', customer: 'X', job: 'New UT row', apKey: '24999', estimator: '', crewLead: '', woOverride: null, woPct: null, percent: null, livePercent: null, percentOverride: false, excludedFromPayroll: false, notes: '', colorHex: null }], deleted: [], edits: {} },
   pl, nvTotals, utTotals, nvSales, utSales,
 });
 check('editing an AP# re-runs On Calendar?/%Compl live', [pbj2.customers[0].jobs[0].analysis.onCalendar, pbj2.customers[0].jobs[0].analysis.percent], ['TimeNavi row 5', 0.5]);
@@ -618,49 +621,82 @@ const leoBlock = preview.painters[1];
 check('OT split: 42h → 40 regular + 2 OT on the last job', leoBlock.lines.map((l) => [l.hours, l.ot]), [[40, false], [2, true]]);
 check('OT line at 1.5× the rate', [leoBlock.lines[0].rate, leoBlock.lines[1].rate], [18, 27]);
 check('block totals (reg+OT = actual, pay = Σ h×r)', [leoBlock.totalHours, leoBlock.totalPay], [42, 774]);
-check('[OT] tag on the line label', leoBlock.lines[1].jobLabel.endsWith('[OT]'), true);
+// Round 8 §9.2 — weekly and daily OT carry distinguishable tags, so the
+// weekly line now reads "[OT >40 hrs/wk]".
+check('weekly OT tag on the line label', leoBlock.lines[1].jobLabel.endsWith('[OT >40 hrs/wk]'), true);
 const juanB = preview.painters[0];
 check('unknown employee → fallback rate + flag', [juanB.lines[0].rate, juanB.lines[0].rateDefaulted], [18, true]);
 check('job display name on the line', juanB.lines[0].jobLabel, 'CCSD 5321 Lambrook Dr Int/Ext');
 check('lines in first-encounter order', juanB.lines.map((l) => l.apKey), ['24403', '99999', '24450', '24500']);
 
-check('lead blocks alphabetical by first name', preview.leads.map((b) => b.leadName), ['DANIEL GONZALES BONILLA', 'RAFAEL AGUILAR', 'TED FRANK']);
-const daniel = preview.leads[0];
+check(
+  'lead blocks alphabetical by first name',
+  preview.leads.map((b) => b.leadName),
+  ['CARLOS RUIZ CRUZ', 'DANIEL GONZALES BONILLA', 'RAFAEL AGUILAR', 'RENE SALAZAR', 'TED FRANK'],
+);
+const leadBy = (name: string) => preview.leads.find((b) => b.leadName === name)!;
+const daniel = leadBy('DANIEL GONZALES BONILLA');
 check('lead jobs = piece-rate jobs he leads', daniel.jobs.map((j) => j.apKey), ['24314', '24403']);
 const d24314 = daniel.jobs[0];
 check('PS chain: profitShare = income × Settings crew WO% (pivot WO% blank)', d24314.profitShare, round2(650 * 0.38));
 check('PS chain: WO Override blank by default', d24314.workOrderOverride, null);
 check('PS chain: % Completion from Pivot by Job', d24314.percentCompletion, 0.3);
-// Round 6 §6.2: (WO|PS) − labor − ½mat — no × % Completion, no − mileage.
+// Round 8 §8.1 (supersedes Round 6 §6.2): base × %Completion − labor − ½mat.
+// Mileage stays display-only.
 check(
-  'PS chain: Total Profit Share = PS − labor − ½mat',
+  'PS chain: Total Profit Share = PS × %Completion − labor − ½mat',
   round2(d24314.totalProfitShare),
-  round2(round2(650 * 0.38) - 113.04 - round2(35.74 / 2)),
+  round2(round2(650 * 0.38) * 0.3 - 113.04 - round2(35.74 / 2)),
 );
 const d24403 = daniel.jobs[1];
 check('PS chain: description WO Override not auto-applied', d24403.workOrderOverride, null);
+// 24403's only status line on/before the 7/10 pay date is "7/03/26 10% COMPLETE".
+check('PS chain: 24403 % Completion from Pivot by Job', d24403.percentCompletion, 0.1);
 check(
-  'PS chain math on 24403 (Settings 38% PS; % complete display-only)',
+  'PS chain math on 24403 (Settings 38% PS × 10% complete)',
   round2(d24403.totalProfitShare),
-  round2(9000 * 0.38 - 2081.09 - round2(760.1 / 2)),
+  round2(9000 * 0.38 * 0.1 - 2081.09 - round2(760.1 / 2)),
 );
 check('lead Total = Σ after-split totals', round2(daniel.total), round2(d24314.totalAfterSplit + d24403.totalAfterSplit));
 check('lead with no timesheet hours: no T-SHEETS block, Hourly Pay 0', [daniel.tsheets, daniel.hourlyPay], [null, 0]);
-check('Total Pay = Total + Mileage + Hourly + Reimb + Deductions', daniel.totalPay, daniel.total);
-const ted = preview.leads[2];
-// Ted has no Settings WO% entry → Profit Share 0 when pivot WO% is blank.
-check('split job: each co-lead gets ÷2 (Ted WO% missing → 0)', [ted.jobs[0].splitWith, ted.jobs[0].totalAfterSplit], [2, 0]);
+// Round 8 §8.2 — Total + Hourly Pay + Reimbursements − Deductions. Daniel's
+// jobs carry no P&L sundries, so the deductions default is 0 here.
+check('Total Pay = Total + Hourly + Reimb − Deductions', daniel.totalPay, daniel.total);
+const ted = leadBy('TED FRANK');
+const carlos = leadBy('CARLOS RUIZ CRUZ');
+check('§6 carried no-timesheet job joins its lead band', carlos.jobs.map((j) => j.apKey), ['21848-A5']);
+check('§6 Rene carried AP20000 is on his band', leadBy('RENE SALAZAR').jobs.some((j) => j.apKey === '20000'), true);
+// Round 8 §9.4 — a lead with no WO% on file is auto-added at the seeded 38%
+// default, so the split job now pays: 150 × 38% × 50% complete, ÷ 2 co-leads.
+check(
+  'split job: each co-lead gets ÷2 (Ted auto-added at the 38% default)',
+  [ted.jobs[0].splitWith, round2(ted.jobs[0].totalAfterSplit)],
+  [2, round2((150 * 0.38 * 0.5) / 2)],
+);
 
 check('office block: single Office line', [preview.office.length, preview.office[0].lines.length, preview.office[0].lines[0].jobLabel], [1, 1, 'Office']);
 check('salary sections from the roster', [preview.admin.length, preview.estimators.length, preview.managers.length], [1, 5, 4]);
-check('inactive zero-hour employees parked', preview.inactiveZeroHours, ['Calixto Efrain Climaco']);
+check(
+  'inactive roster includes Calixto (directory * + persisted painters)',
+  preview.inactiveZeroHours.includes('Calixto Efrain Climaco'),
+  true,
+);
+check('inactive roster is the persisted painter list', preview.inactiveZeroHours.length >= 50, true);
 
 // Round 4 §5.2 — one A→Z painter sequence interleaving painters and leads,
 // subs last (none here). §5.3 — lead bands in Title Case. §5.5 — office PO text.
 check(
   'painter sequence interleaved A→Z by first name',
   preview.painterSequence.map((e) => (e.kind === 'hourly' ? e.block.employeeName : e.block.displayName)),
-  ['Daniel Gonzales Bonilla', 'Juan Perez', 'Leonardo Martinez-Rincon', 'Rafael Aguilar', 'Ted Frank'],
+  [
+    'Carlos Ruiz Cruz',
+    'Daniel Gonzales Bonilla',
+    'Juan Perez',
+    'Leonardo Martinez-Rincon',
+    'Rafael Aguilar',
+    'Rene Salazar',
+    'Ted Frank',
+  ],
 );
 check('week range on the model', preview.weekRange, '6/29 - 7/3');
 check('office PO cell text = "(week range)"', preview.office[0].lines[0].poText, '(6/29 - 7/3)');
@@ -678,10 +714,17 @@ const previewEdited = buildPayrollPreview({
   nvSales, utSales, lastWeekPbj,
 })!;
 check('net edit stored (taxes/NEST/net independent; taxes not auto-derived)', previewEdited.painters[1].net, 600);
-const editedJob = previewEdited.leads[0].jobs[1];
-// Round 6 §6.2 — % Completion edit must NOT change Total Profit Share.
-check('percent edit does not change Total Profit Share', round2(editedJob.totalProfitShare), round2(9000 * 0.38 - 2081.09 - round2(760.1 / 2)));
-check('reimbursement edit flows into Total Pay', round2(previewEdited.leads[0].totalPay), round2(previewEdited.leads[0].total + 100));
+const editedDaniel = previewEdited.leads.find((b) => b.leadName === 'DANIEL GONZALES BONILLA')!;
+const editedJob = editedDaniel.jobs.find((j) => j.apKey === '24403')!;
+// Round 8 §8.1 — % Completion is a term now, so editing it to 100% DOES move
+// Total Profit Share (up from the 10% the calendar suggested).
+check('percent edit recomputes Total Profit Share', round2(editedJob.percentCompletion), 1);
+check(
+  'percent edit at 100% pays the full base less labor and ½mat',
+  round2(editedJob.totalProfitShare),
+  round2(9000 * 0.38 * 1 - 2081.09 - round2(760.1 / 2)),
+);
+check('reimbursement edit flows into Total Pay', round2(editedDaniel.totalPay), round2(editedDaniel.total + 100));
 
 console.log('payroll exceptions…');
 const pGroups = buildPayrollExceptions({
@@ -694,8 +737,11 @@ check('hours on a job not on the calendar (99999)', pg('hoursNotOnCalendar').ite
 check('calendar job with no hours (24388, Utah excluded)', pg('calendarNoHours').items.length, 1);
 check('40+ hours item (Leonardo OT)', pg('hours40or10').items.length, 1);
 check('missing pay inputs (blank WO% on piece-rate jobs + default-rate employees)', pg('missingInputs').items.length, 9);
-check('job missing from P&L: none (all leads\u2019 jobs present)', pg('missingFromPl').items.length, 0);
-check('low profit-share items (Ted\u2019s 0 TPS only; Daniel now positive)', pg('lowProfitShare').items.length, 1);
+check('job missing from P&L: carried jobs with no P&L column', pg('missingFromPl').items.length, 2);
+// Round 8 §8.1 flips this group: multiplying by % Completion pushes both of
+// Daniel's jobs (30% and 10% complete) below the $25 threshold, while the
+// §9.4 auto-added 38% lifts the split job to $28.50 and clears it.
+check('low profit-share items (Daniel\u2019s two part-complete jobs)', pg('lowProfitShare').items.length, 2);
 check('inactive-with-hours: none', pg('inactiveWithHours').items.length, 0);
 check('duplicate P&L column surfaced', pg('duplicatePlColumn').items.length, 1);
 check('UT carry-forward that matched nothing (24111)', pg('carryForward').items.length, 1);
@@ -840,7 +886,8 @@ async function testExport(): Promise<void> {
   check('JS row peach fill', fillOf(tn.getCell('A2')), 'FFFABF8F');
   // §1.4: fallback-resolved TE row carries its color; RF row gets the new color.
   check('fallback TE row: J value + green fill', [tn.getCell('J5').value, fillOf(tn.getCell('A5'))], ['TE', 'FFC4D79B']);
-  check('RF row dusty-rose fill', [tn.getCell('J7').value, fillOf(tn.getCell('A7'))], ['RF', 'FFDA9694']);
+  // Round 8 §5 — the RF seed moved from DA9694 to C4A484 (migration r8-rf-color).
+  check('RF row tan fill', [tn.getCell('J7').value, fillOf(tn.getCell('A7'))], ['RF', 'FFC4A484']);
   check('light fill keeps black text', tn.getCell('A7').font?.color?.argb, 'FF000000');
 
   // B-4 / C-1: date cells are UTC-midnight (no time), formatted mm-dd-yy.
@@ -881,7 +928,9 @@ async function testExport(): Promise<void> {
     [fillOf(tn.getCell('M2')), tn.getCell('M2').font?.color?.argb],
     ['FFFFC7CE', 'FF9C0006'],
   );
-  check('zero $ Difference NOT pink', [tn.getCell('P2').value, fillOf(tn.getCell('P2'))], [0, 'FFFABF8F']);
+  // Round 8 §2.2 — with Apptivo blank, P exports blank rather than 0; either
+  // way it must keep the row fill and never take the pink flag.
+  check('blank $ Difference NOT pink', [isBlank(tn.getCell('P2').value), fillOf(tn.getCell('P2'))], [true, 'FFFABF8F']);
 
   // ---------- Pivot by Crew ----------
   const pv = readBack.getWorksheet('Pivot by Crew') as ExcelJS.Worksheet;
@@ -911,7 +960,7 @@ async function testExport(): Promise<void> {
   check('zero-hour XC still gets its header + color', [pv.getCell('G4').value, fillOf(pv.getCell('G4'))], ['XC', 'FF95B3D7']);
   check('ND header dark blue with white text', [pv.getCell('H4').value, fillOf(pv.getCell('H4')), pv.getCell('H4').font?.color?.argb], ['ND', 'FF4472C4', 'FFFFFFFF']);
   // Round 2 §4: RF right after TE (column J with the current layout).
-  check('RF header dusty rose right after TE', [pv.getCell('I4').value, pv.getCell('J4').value, fillOf(pv.getCell('J4'))], ['TE', 'RF', 'FFDA9694']);
+  check('RF header tan right after TE', [pv.getCell('I4').value, pv.getCell('J4').value, fillOf(pv.getCell('J4'))], ['TE', 'RF', 'FFC4A484']);
   check('#N/A header gray, last before Grand Total', [pv.getCell('K4').value, fillOf(pv.getCell('K4'))], ['#N/A', 'FF808080']);
   check('Grand Total header gray', fillOf(pv.getCell(4, gtColNum)), 'FF808080');
 
@@ -1000,7 +1049,18 @@ async function testExport(): Promise<void> {
   check('pbj no Sum of hours / Column Labels artifact', typeof pj.getCell('A3').value === 'string' && !String(pj.getCell('A3').value).includes('Sum of hours'), true);
   check('pbj job row analysis: AP#, TimeNavi row, lead', [pj.getCell('I4').value, pj.getCell('J4').value, pj.getCell('L4').value], ['24314', 'TimeNavi row 3', 'DANIEL GONZALES BONILLA']);
   check('pbj WO Override blank by default', isBlank(pj.getCell('M4').value), true);
-  check('pbj job % of Completion 0% format', [pj.getCell('O4').value, pj.getCell('O4').numFmt], [0.3, '0%']);
+  const pctComplCell = pj.getCell('O4');
+  const pctComplVal = pctComplCell.value as { formula?: string } | number;
+  check(
+    'pbj job % of Completion is INDEX/MATCH vs TimeNavi',
+    typeof pctComplVal === 'object' &&
+      typeof pctComplVal.formula === 'string' &&
+      pctComplVal.formula.includes('INDEX') &&
+      pctComplVal.formula.includes('MATCH') &&
+      !pctComplVal.formula.includes('XLOOKUP'),
+    true,
+  );
+  check('pbj job % of Completion 0% format', pctComplCell.numFmt, '0%');
   // Round 7 — Notes column keeps the header label; job/BALANCES/UT data cells stay empty.
   check('pbj Notes header present', pj.getCell(1, lastColNum).value, 'Notes');
   check('pbj Notes data empty on job row (Round 7)', isBlank(pj.getCell(4, lastColNum).value), true);
@@ -1161,13 +1221,20 @@ async function testExport(): Promise<void> {
   check('Profit Share is a live formula (income × WO%)', typeof (psFormulaCell.value as { formula?: string })?.formula === 'string', true);
   const tpsRowNum = ppColA.findIndex((v) => v === 'Total Profit Share');
   const tpsFormula = String((pp.getCell(tpsRowNum, 2).value as { formula?: string })?.formula ?? '');
+  // Round 8 §8.1 — both branches of the base multiply by the % Completion
+  // cell, so the live formula now carries a '*' that Round 6's never did.
   check(
-    'Total Profit Share formula = IF(WO="",PS,WO)−labor−½mat',
-    tpsFormula.includes('IF(') && tpsFormula.includes('-') && !tpsFormula.includes('*'),
-    true,
+    'TPS formula = IF(N(WO)>0,WO×%,PS×%)−½mat−labor',
+    [tpsFormula.includes('IF('), tpsFormula.includes('*'), tpsFormula.includes('-')],
+    [true, true, true],
   );
   const totalPayRowNum = ppColA.findIndex((v) => v === 'Total Pay');
-  check('Total Pay is a SUM formula', String((pp.getCell(totalPayRowNum, 2).value as { formula?: string })?.formula ?? '').startsWith('SUM'), true);
+  const totalPayFormula = String((pp.getCell(totalPayRowNum, 2).value as { formula?: string })?.formula ?? '');
+  check(
+    'Total Pay = Total + Hourly + Reimb − Deductions',
+    [totalPayFormula.includes('+'), totalPayFormula.includes('-'), totalPayFormula.startsWith('SUM')],
+    [true, true, false],
+  );
   // An hourly line total =C×D.
   let lineFormulaOk = false;
   pp.eachRow((row) => {
@@ -1207,6 +1274,26 @@ async function testExport(): Promise<void> {
     ['PO#', '', 'Job'],
   );
   check('Journal Entry header only (no data rows)', je.actualRowCount, 1);
+
+  // Round 8 §10 — Input #'s Hourly Pay row + live Profitshare refs.
+  const inputNums = payWb.getWorksheet("Input #'s") as ExcelJS.Worksheet;
+  let inputHourly = false;
+  inputNums.eachRow((row) => {
+    if (row.getCell(2).value === 'Hourly Pay') inputHourly = true;
+  });
+  check("Input #'s has an Hourly Pay row", inputHourly, true);
+  const pso = payWb.getWorksheet('Profitshare Output') as ExcelJS.Worksheet;
+  let psoHourlyFormula = '';
+  let psoDeductFormula = '';
+  pso.eachRow((row) => {
+    const lab = String(row.getCell(1).value ?? '');
+    const f = String((row.getCell(2).value as { formula?: string } | null)?.formula ?? '');
+    if (lab === 'Hourly Pay') psoHourlyFormula = f;
+    if (lab === 'Deductions/Sundries') psoDeductFormula = f;
+  });
+  check("Profitshare Hourly Pay refs Input #'s", psoHourlyFormula.includes("Input #''s"), true);
+  check("Profitshare Deductions refs Input #'s", psoDeductFormula.includes("Input #''s"), true);
+  check('NV-only week omits UT preview sheets', payWb.getWorksheet('Payroll Preview - UT'), undefined);
 
   // ---------- PR Final Check (Round 7 §2) ----------
   const prfc = payWb.getWorksheet('PR Final Check') as ExcelJS.Worksheet;

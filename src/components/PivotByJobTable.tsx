@@ -1,7 +1,8 @@
 import { useState, type CSSProperties } from 'react';
 import { fmtAccounting, fmtHoursFixed, fmtPercent, isDarkColor, parseMoneyInput, parsePercentInput } from '../lib/format';
 import { fmtMonthDay, weekdayShort } from '../lib/pivotByJob';
-import type { ManualSectionRow, PbjJobEdit, PivotByJobModel } from '../lib/types';
+import type { ManualSectionRow, PbjJobEdit, PercentValue, PivotByJobModel } from '../lib/types';
+import { CellInput } from './CellInput';
 
 interface PivotByJobTableProps {
   model: PivotByJobModel;
@@ -14,6 +15,34 @@ interface PivotByJobTableProps {
 
 const BLACK: CSSProperties = { backgroundColor: '#000', color: '#fff' };
 const GRAY: CSSProperties = { backgroundColor: '#808080', color: '#fff' };
+/** Round 8 §4.1 — the "excluded from payroll" swatch, on screen and on export. */
+const EXCLUSION_GRAY: CSSProperties = { backgroundColor: '#A6A6A6', color: '#000' };
+
+/** Tooltip for a % cell that mirrors this week's TimeNavi value (§3.1). */
+function percentLinkTitle(live: PercentValue, override: boolean): string {
+  const shown = fmtPercent(live) || '(blank)';
+  return override
+    ? `Manual override — this week's TimeNavi Export says ${shown}`
+    : `Live from this week's TimeNavi Export (${shown}) — type here to override`;
+}
+
+/** Marker + one-click relink shown on a manually overridden % cell. */
+function OverrideBadge({ live, onRelink }: { live: PercentValue; onRelink: () => void }): JSX.Element {
+  return (
+    <button
+      type="button"
+      className="ml-1 inline-flex h-4 shrink-0 items-center rounded-xs border border-amber-700 bg-amber-100 px-1 text-[9px] font-bold leading-none text-amber-900"
+      title={`Manual override — click to relink to TimeNavi (${fmtPercent(live) || 'blank'})`}
+      aria-label="Manual override — click to relink to TimeNavi"
+      onClick={(e) => {
+        e.stopPropagation();
+        onRelink();
+      }}
+    >
+      M
+    </button>
+  );
+}
 
 /** Thin top+bottom borders spanning A through the QB-Hrs column (§3.5). */
 function hoursBorderStyle(dateCount: number): CSSProperties {
@@ -45,7 +74,7 @@ function Toggle({ open, onClick, label }: { open: boolean; onClick: () => void; 
   );
 }
 
-/** Editable text cell that commits on blur/Enter. */
+/** Editable text cell that commits on blur/Enter (Round 8 §12.2 — see CellInput). */
 function EditCell({
   value,
   onCommit,
@@ -59,23 +88,13 @@ function EditCell({
   title?: string;
   placeholder?: string;
 }): JSX.Element {
-  const [text, setText] = useState<string | null>(null);
   return (
-    <input
-      className={`cell-input ${className ?? ''}`}
-      value={text ?? value}
+    <CellInput
+      value={value}
+      onCommit={onCommit}
+      className={className}
       title={title}
       placeholder={placeholder}
-      onChange={(e) => setText(e.target.value)}
-      onFocus={() => setText(value)}
-      onBlur={() => {
-        if (text !== null && text !== value) onCommit(text);
-        setText(null);
-      }}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-        if (e.key === 'Escape') setText(null);
-      }}
     />
   );
 }
@@ -432,8 +451,23 @@ function JobBlock({
             />
           )}
         </td>
-        <td className="xcell text-center font-bold" title="Mirrors the TimeNavi Export grid — edit it there">
-          {fmtPercent(a.percent)}
+        <td className="xcell text-center font-bold" title={percentLinkTitle(a.livePercent, a.percentOverride)}>
+          <span className="inline-flex w-full items-center justify-center">
+            <EditCell
+              value={fmtPercent(a.percent)}
+              onCommit={(t) =>
+                onEditJob(job.id, { percent: t.trim() === '' ? undefined : parsePercentInput(t) })
+              }
+              className="text-center"
+              placeholder="—"
+            />
+            {a.percentOverride && (
+              <OverrideBadge
+                live={a.livePercent}
+                onRelink={() => onEditJob(job.id, { percent: undefined })}
+              />
+            )}
+          </span>
         </td>
         <td className="xcell font-bold" style={{ color: style && isDarkColor(job.colorHex ?? 'FFFFFF') ? '#FFC7C7' : '#C00000' }}>
           <EditCell value={a.notes} onCommit={(t) => onEditJob(job.id, { notes: t })} />
@@ -520,7 +554,7 @@ function ManualSection({
           </tr>
         )}
         {rows.map((r) => {
-          const style = bandStyle(r.colorHex);
+          const style = r.excludedFromPayroll ? EXCLUSION_GRAY : bandStyle(r.colorHex);
           return (
             <ManualPair
               key={r.id}
@@ -607,25 +641,58 @@ function ManualPair({
             className="text-center"
           />
         </td>
-        <td className="xcell text-center">
-          <EditCell
-            value={fmtPercent(r.percent)}
-            onCommit={(t) => onManualEdit(section, r.id, { percent: parsePercentInput(t) })}
-            className="text-center"
-          />
+        <td className="xcell text-center" title={percentLinkTitle(r.livePercent, r.percentOverride)}>
+          <span className="inline-flex w-full items-center justify-center">
+            <EditCell
+              value={fmtPercent(r.percent)}
+              onCommit={(t) =>
+                onManualEdit(section, r.id, {
+                  percent: t.trim() === '' ? undefined : parsePercentInput(t),
+                })
+              }
+              className="text-center"
+            />
+            {r.percentOverride && (
+              <OverrideBadge
+                live={r.livePercent}
+                onRelink={() => onManualEdit(section, r.id, { percent: undefined })}
+              />
+            )}
+          </span>
         </td>
         <td className="xcell" style={{ color: '#C00000' }}>
           <EditCell value={r.notes} onCommit={(t) => onManualEdit(section, r.id, { notes: t })} />
         </td>
         <td className="xcell text-center">
-          <button
-            type="button"
-            className="text-neutral-400 hover:text-red-600"
-            onClick={() => onManualDelete(section, r.id)}
-            aria-label="Delete row"
-          >
-            🗑
-          </button>
+          <span className="inline-flex items-center gap-1">
+            <button
+              type="button"
+              className={`inline-flex h-4 items-center rounded-xs border px-1 text-[9px] font-bold leading-none ${
+                r.excludedFromPayroll
+                  ? 'border-neutral-700 bg-[#A6A6A6] text-neutral-900'
+                  : 'border-neutral-300 bg-white text-neutral-500'
+              }`}
+              title={
+                r.excludedFromPayroll
+                  ? 'Excluded from payroll (A6A6A6) — click to include'
+                  : 'Click to exclude this job from payroll (paints A6A6A6 here and on export)'
+              }
+              aria-pressed={r.excludedFromPayroll}
+              onClick={() =>
+                onManualEdit(section, r.id, { excludedFromPayroll: !r.excludedFromPayroll })
+              }
+            >
+              EX
+            </button>
+            <button
+              type="button"
+              className="text-neutral-400 hover:text-red-600"
+              onClick={() => onManualDelete(section, r.id)}
+              aria-label="Delete row"
+            >
+              🗑
+            </button>
+          </span>
         </td>
       </tr>
     </>

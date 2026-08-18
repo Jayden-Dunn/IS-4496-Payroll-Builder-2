@@ -5,6 +5,7 @@
  * workaround).
  */
 import { timesheetApKey } from './apkey';
+import { buildCustomerByApResolver } from './customerByAp';
 import { dateToIso, fmtDate, round2 } from './format';
 import {
   carryDisplayMap,
@@ -13,6 +14,7 @@ import {
   timesheetDisplayMap,
   type JobDisplaySources,
 } from './jobNames';
+import type { SalesByCustMirrorRow } from './mirrorTabs';
 import type { LastWeekPbjRow } from './parsers';
 import {
   extractLeadParenthetical,
@@ -27,6 +29,7 @@ import type {
   EnrichedTimesheetRow,
   JobAnalysis,
   ManualSectionRow,
+  PercentValue,
   PbjCustomerBlock,
   PbjEditsMap,
   PbjEmployeeRow,
@@ -79,6 +82,27 @@ export interface PivotByJobInput {
   utTotals: ReadonlyMap<string, number> | null;
   nvSales: readonly SalesRow[] | null;
   utSales: readonly SalesRow[] | null;
+  /**
+   * Round 8 §4.3 — Sales by Customer Summary mirrors (already parsed by
+   * `mirrorTabs`); the carried-job customer resolver reads their hierarchy.
+   */
+  nvSalesByCust?: readonly SalesByCustMirrorRow[] | null;
+  utSalesByCust?: readonly SalesByCustMirrorRow[] | null;
+}
+
+/**
+ * Round 8 §4.2 — the Reno, NV estimator's initial. Reno is a Nevada branch, so
+ * his carried jobs belong to NV PAYROLL (BALANCES) no matter which calendar
+ * the event came from.
+ */
+export const RENO_ESTIMATOR = 'RF';
+
+/** Section a carried job lands in: the estimator outranks the source calendar. */
+export function carriedSectionFor(
+  defaultSection: 'balances' | 'ut',
+  estimator: string | null | undefined,
+): 'balances' | 'ut' {
+  return (estimator ?? '').trim().toUpperCase() === RENO_ESTIMATOR ? 'balances' : defaultSection;
 }
 
 export function pbjJobId(customer: string, jobcode2: string): string {
@@ -206,14 +230,18 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
             : edit.apKey !== undefined && match
               ? match.row.estimator || baseEstimator
               : baseEstimator;
-          // TimeNavi match wins for live %'s; Slot A / edit.percent seeds payroll-only path.
-          const percent = isOffice
+          // Round 8 §3.1 — the cell is a live reference to THIS week's TimeNavi
+          // `% Completion` for the same AP#; a manual pivot edit overrides it.
+          // Slot A seeds only fill in when the grid has no row (payroll-only).
+          const livePercent: PercentValue = isOffice ? null : match ? match.row.percent : null;
+          const percentOverride = !isOffice && edit.percent !== undefined;
+          const percent: PercentValue = isOffice
             ? null
-            : edit.percent !== undefined
-              ? edit.percent
+            : percentOverride
+              ? (edit.percent as PercentValue)
               : match
-                ? match.row.percent
-                : null;
+                ? livePercent
+                : (edit.percentSeed ?? null);
 
           // Crew lead — from the matched event title (§3.2); OFFICE → HOURLY.
           const resolution = match
@@ -253,6 +281,8 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
             woPctSuggestion: hourly ? null : (pctSrc?.pct ?? null),
             woPctSuggestionSource: hourly ? null : (pctSrc?.line ?? null),
             percent,
+            livePercent,
+            percentOverride,
             notes,
             hourly,
             sub: resolution?.sub ?? false,
@@ -311,34 +341,80 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
   const seenBalancesAp = new Set<string>();
   const seenUtAp = new Set<string>();
 
-  for (const row of input.lastWeekPbj ?? []) {
-    if (row.section === 'ut') {
-      if (seenUtAp.has(row.apKey)) continue;
-      seenUtAp.add(row.apKey);
-      // Round 7 — no carried notes / *PAID* text in BALANCES/UT.
-      utSeeds.push(manualRowFromCarry('ut', row, '', colorByEstimator));
+  // Round 8 §4.3 — every carried job resolves its OWN customer by AP key
+  // (Sales by Customer Summary first, P&L header structure second).
+  const customerResolver = buildCustomerByApResolver({
+    nvSalesByCust: input.nvSalesByCust,
+    utSalesByCust: input.utSalesByCust,
+    pl: input.pl,
+  });
+  const unresolvedCarriedCustomers: string[] = [];
+  const resolveCarriedCustomer = (
+    apKey: string | null,
+    section: 'balances' | 'ut',
+    fallback: string,
+    { flag }: { flag: boolean } = { flag: true },
+  ): string => {
+    const hit = customerResolver.resolve(apKey, section === 'ut' ? 'UT' : 'NV');
+    if (hit.customer) return hit.customer;
+    if (flag && apKey && !unresolvedCarriedCustomers.includes(apKey)) {
+      unresolvedCarriedCustomers.push(apKey);
+    }
+    return fallback;
+  };
+
+  /** §3.1/§3.3 — this week's TimeNavi `% Completion` for an AP#, if any. */
+  const liveLink = (apKey: string | null): { linked: boolean; percent: PercentValue } => {
+    const hit = apKey ? eventByApKey.get(apKey) : undefined;
+    return hit ? { linked: true, percent: hit.row.percent } : { linked: false, percent: null };
+  };
+
+  const pushSeed = (section: 'balances' | 'ut', seed: ManualSectionRow): void => {
+    if (section === 'balances') {
+      seenBalancesAp.add(seed.apKey ?? seed.id);
+      balancesSeeds.push(seed);
     } else {
+      seenUtAp.add(seed.apKey ?? seed.id);
+      utSeeds.push(seed);
+    }
+  };
+
+  for (const row of input.lastWeekPbj ?? []) {
+    // §4.2 — RF (Reno, NV) carried jobs go to NV BALANCES, never UT PAYROLL.
+    const section = carriedSectionFor(row.section === 'ut' ? 'ut' : 'balances', row.estimator);
+    if (seenBalancesAp.has(row.apKey) || seenUtAp.has(row.apKey)) continue;
+    if (row.section !== 'ut') {
       // NV pivot/balances rows: carry when paid < 100% and no hours this week.
       const partial = typeof row.percent === 'number' && row.percent < 1;
       const open = row.section === 'balances' ? row.percent !== 1 : partial;
-      if (!open || timesheetApKeys.has(row.apKey) || seenBalancesAp.has(row.apKey)) continue;
-      seenBalancesAp.add(row.apKey);
-      balancesSeeds.push(manualRowFromCarry('balances', row, '', colorByEstimator));
+      if (!open || timesheetApKeys.has(row.apKey)) continue;
     }
+    // Round 7 — no carried notes / *PAID* text in BALANCES/UT.
+    pushSeed(
+      section,
+      manualRowFromCarry({
+        section,
+        row,
+        notes: '',
+        colorByEstimator,
+        live: liveLink(row.apKey),
+        customer: resolveCarriedCustomer(row.apKey, section, row.customer),
+      }),
+    );
   }
 
-  // UT seeds from this week's included Utah-calendar events (dedupe by apKey).
+  // Seeds from this week's included Utah/Reno-calendar events (dedupe by apKey).
   for (const r of included) {
     if (!/^utah\b|^reno\b/i.test(r.calendar.trim())) continue;
     const apKey = r.apKey;
-    if (!apKey || seenUtAp.has(apKey)) continue;
-    seenUtAp.add(apKey);
+    if (!apKey || seenUtAp.has(apKey) || seenBalancesAp.has(apKey)) continue;
+    const section = carriedSectionFor('ut', r.estimator);
     const resolution = resolveCrewLead(extractLeadParenthetical(r.event, knownEstimators), leadCtx);
     // Round 6 §5.3 — blank WO defaults (suggestions live on calendar-matched NV jobs only).
     const names = jobDisplayPair(apKey, { ...nameSources, eventTitle: r.event });
-    utSeeds.push({
-      id: `ut:${apKey}`,
-      customer: names.customerName,
+    pushSeed(section, {
+      id: `${section}:${apKey}`,
+      customer: resolveCarriedCustomer(apKey, section, names.customerName, { flag: false }),
       job: names.poLabel,
       apKey,
       estimator: r.estimator,
@@ -346,6 +422,9 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
       woOverride: null,
       woPct: null,
       percent: r.percent,
+      livePercent: r.percent,
+      percentOverride: false,
+      excludedFromPayroll: false,
       notes: '',
       colorHex: colorByEstimator.get(r.estimator) ?? null,
     });
@@ -355,7 +434,7 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
   for (const r of enriched) {
     if (r.sourceEntity !== 'UT' || r.hours === 0) continue;
     const apKey = r.apKey;
-    if (!apKey || apKey === 'OFFICE' || seenUtAp.has(apKey)) continue;
+    if (!apKey || apKey === 'OFFICE' || seenUtAp.has(apKey) || seenBalancesAp.has(apKey)) continue;
     seenUtAp.add(apKey);
     const match = eventByApKey.get(apKey);
     const resolution = match
@@ -365,16 +444,23 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
       ...nameSources,
       eventTitle: match?.row.event ?? null,
     });
+    const live = liveLink(apKey);
     utSeeds.push({
       id: `ut:${apKey}`,
-      customer: names.customerName || r.jobcode1 || '(blank)',
+      customer:
+        resolveCarriedCustomer(apKey, 'ut', names.customerName, { flag: false }) ||
+        r.jobcode1 ||
+        '(blank)',
       job: names.poLabel || r.jobcode2,
       apKey,
       estimator: r.estimator,
       crewLead: resolution?.display ?? '',
       woOverride: null,
       woPct: null,
-      percent: match ? match.row.percent : null,
+      percent: live.percent,
+      livePercent: live.percent,
+      percentOverride: false,
+      excludedFromPayroll: false,
       notes: '',
       colorHex: colorByEstimator.get(r.estimator) ?? null,
     });
@@ -398,28 +484,58 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
     grandTotal: round2(grandTotal),
     balances,
     utPayroll,
+    unresolvedCarriedCustomers,
   };
 }
 
-function manualRowFromCarry(
-  section: 'balances' | 'ut',
-  row: LastWeekPbjRow,
-  notes: string,
-  colorByEstimator: ReadonlyMap<string, string>,
-): ManualSectionRow {
+function manualRowFromCarry(args: {
+  section: 'balances' | 'ut';
+  row: LastWeekPbjRow;
+  notes: string;
+  colorByEstimator: ReadonlyMap<string, string>;
+  /** This week's TimeNavi link for the same AP# (§3.3). */
+  live: { linked: boolean; percent: PercentValue };
+  /** Customer resolved by AP key (§4.3); falls back to the carried text. */
+  customer: string;
+}): ManualSectionRow {
+  const { section, row, notes, colorByEstimator, live, customer } = args;
   return {
     id: `${section}:${row.apKey}`,
-    customer: row.customer,
+    customer,
     job: row.job,
     apKey: row.apKey,
     estimator: row.estimator,
     crewLead: row.crewLead,
     woOverride: row.woOverride,
     woPct: row.woPct,
-    percent: row.percent,
+    // §3.3 — CURRENT week in the column; last week's number stays in Last % Paid.
+    percent: live.linked ? live.percent : row.percent,
+    livePercent: live.percent,
+    percentOverride: false,
+    excludedFromPayroll: row.excludedFromPayroll,
     notes,
     colorHex: colorByEstimator.get(row.estimator) ?? null,
   };
+}
+
+/**
+ * Merge a seed with the user's patch. Keys explicitly set to `undefined` mean
+ * "drop the edit" (e.g. relinking % to TimeNavi), so they never overwrite.
+ */
+function applyRowEdits(
+  seed: ManualSectionRow,
+  patch: Partial<ManualSectionRow> | undefined,
+): ManualSectionRow {
+  const out: ManualSectionRow = { ...seed };
+  if (!patch) return out;
+  for (const key of Object.keys(patch) as (keyof ManualSectionRow)[]) {
+    const value = patch[key];
+    if (value === undefined) continue;
+    Object.assign(out, { [key]: value });
+  }
+  // §3.1 — a typed % on a carried row wins over the live TimeNavi value.
+  if (patch.percent !== undefined) out.percentOverride = true;
+  return out;
 }
 
 /** Merge seeds with user adds/deletes/edits (rows persist keyed by id). */
@@ -430,11 +546,11 @@ export function applyManualState(seeds: ManualSectionRow[], state: ManualSection
   for (const seed of seeds) {
     if (deleted.has(seed.id)) continue;
     seen.add(seed.id);
-    out.push({ ...seed, ...state.edits[seed.id] });
+    out.push(applyRowEdits(seed, state.edits[seed.id]));
   }
   for (const added of state.added) {
     if (deleted.has(added.id) || seen.has(added.id)) continue;
-    out.push({ ...added, ...state.edits[added.id] });
+    out.push(applyRowEdits(added, state.edits[added.id]));
   }
   return out;
 }
