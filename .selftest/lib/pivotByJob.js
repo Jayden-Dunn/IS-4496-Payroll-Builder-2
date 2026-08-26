@@ -53,9 +53,12 @@ function pbjJobId(customer, jobcode2) {
 function isHourlyJob(percent, crewLead, jobText) {
     if (percent === 'HOURLY')
         return true;
+    if (percent && typeof percent === 'object' && percent.kind === 'text' && /hourly/i.test(percent.text)) {
+        return true;
+    }
     if (/^hourly$/i.test(crewLead.trim()))
         return true;
-    return /\bT\s*&\s*M\b|\[hrly\]/i.test(jobText);
+    return /\bT\s*&\s*M\b|\[hrly\]|\[hourly\]/i.test(jobText);
 }
 const byText = (a, b) => a.localeCompare(b, 'en', { sensitivity: 'base' });
 function buildPivotByJob(input) {
@@ -167,13 +170,22 @@ function buildPivotByJob(input) {
                     : match
                         ? livePercent
                         : (edit.percentSeed ?? null);
+            const typePercent = isOffice
+                ? null
+                : percentOverride
+                    ? edit.percent
+                    : edit.percentSeed !== undefined
+                        ? edit.percentSeed
+                        : percent;
             // Crew lead — from the matched event title (§3.2); OFFICE → HOURLY.
             const resolution = match
                 ? (0, payroll_1.resolveCrewLead)((0, payroll_1.extractLeadParenthetical)(match.row.event, knownEstimators), leadCtx)
                 : null;
             const crewLead = edit.crewLead !== undefined ? edit.crewLead : isOffice ? 'HOURLY' : (resolution?.display ?? '');
             const jobText = `${job.jobcode2} ${match?.row.event ?? ''}`;
-            const hourly = isHourlyJob(percent, crewLead, jobText);
+            // Payroll job type follows Slot A / a typed Pivot % (HOURLY vs a
+            // percentage). Live TimeNavi % still fills the displayed cell.
+            const hourly = isHourlyJob(typePercent, crewLead, jobText);
             // Round 6 §5.3 — WO% / WO Override blank by default; calendar patterns
             // are suggestions only (tooltips / click-to-accept). Slot A seeds via edits.
             const pctSrc = match ? (0, payroll_1.extractWoPct)(match.row.description) : null;
@@ -322,6 +334,50 @@ function buildPivotByJob(input) {
         pushSeed(section, {
             id: `${section}:${apKey}`,
             customer: resolveCarriedCustomer(apKey, section, names.customerName, { flag: false }),
+            job: names.poLabel,
+            apKey,
+            estimator: r.estimator,
+            crewLead: resolution.display,
+            woOverride: null,
+            woPct: null,
+            percent: r.percent,
+            livePercent: r.percent,
+            percentOverride: false,
+            excludedFromPayroll: false,
+            notes: '',
+            colorHex: colorByEstimator.get(r.estimator) ?? null,
+        });
+    }
+    /**
+     * Round 9 §6/§9/§11 — this week's NV calendar jobs that have NO timesheet
+     * hours are seeded into NV PAYROLL (BALANCES) so they sit below the Grand
+     * Total with their crew lead, WO fields and %.
+     *
+     * The payroll process reads its jobs from the completed %'s workbook now,
+     * not from the TimeNavi grid, so a piece-rate job that never got clocked
+     * (a subcontractor week, a job that only invoiced) has to reach the payroll
+     * side through this section — which is exactly where the office already
+     * keeps them. Gray-flagged rows still stay off payroll.
+     */
+    for (const r of included) {
+        const apKey = r.apKey;
+        if (!apKey || apKey === 'OFFICE')
+            continue;
+        if (seenBalancesAp.has(apKey) || seenUtAp.has(apKey))
+            continue;
+        if (timesheetApKeys.has(apKey))
+            continue;
+        if (/^utah\b|^reno\b/i.test(r.calendar.trim()))
+            continue; // handled above
+        const resolution = (0, payroll_1.resolveCrewLead)((0, payroll_1.extractLeadParenthetical)(r.event, knownEstimators), leadCtx);
+        if (resolution.names.length === 0)
+            continue; // nobody to pay it to
+        if (isHourlyJob(r.percent, resolution.display, r.event))
+            continue; // paid by the hour
+        const names = (0, jobNames_1.jobDisplayPair)(apKey, { ...nameSources, eventTitle: r.event });
+        pushSeed('balances', {
+            id: `balances:${apKey}`,
+            customer: resolveCarriedCustomer(apKey, 'balances', names.customerName, { flag: false }),
             job: names.poLabel,
             apKey,
             estimator: r.estimator,

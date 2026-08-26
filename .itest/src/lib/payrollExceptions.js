@@ -29,6 +29,41 @@ function buildPayrollExceptions(input) {
         ...allOffice,
         ...allLeads.flatMap((l) => (l.tsheets ? [l.tsheets] : [])),
     ];
+    /**
+     * Round 9 §9/§11 — every non-gray job below the Grand Total must reach a
+     * Payroll Preview band. A row can only fail to land when nothing names its
+     * crew lead, so say so instead of dropping it silently (Carlos Ruiz's
+     * AP25264 and Henry Limay Flores's AP25228 both went missing this way).
+     */
+    {
+        const items = [];
+        const bandedAps = new Set();
+        for (const p of previews) {
+            for (const lead of p.model.leads) {
+                for (const j of lead.jobs)
+                    if (j.apKey)
+                        bandedAps.add(j.apKey);
+            }
+        }
+        for (const row of [...pbj.balances, ...pbj.utPayroll]) {
+            if (row.excludedFromPayroll)
+                continue; // gray = deliberately off payroll
+            if (row.apKey === 'OFFICE' || !row.apKey)
+                continue;
+            if (bandedAps.has(row.apKey))
+                continue;
+            const where = row.job || row.customer || `AP${row.apKey}`;
+            items.push({
+                message: `AP${row.apKey} ${where} — below Grand Total with no timesheet hours and no crew lead on the Pivot by Job row, so it has no band to pay from`,
+            });
+        }
+        groups.push({
+            key: 'carriedJobNotPaid',
+            title: 'Job below Grand Total not on any payroll band',
+            note: 'Non-gray rows below the Grand Total pay through their crew lead\u2019s band. Fill in the Crew Lead cell on the Pivot by Job tab of the completed %\u2019s workbook.',
+            items,
+        });
+    }
     // 1. Crew-lead resolution problems.
     {
         const items = [];

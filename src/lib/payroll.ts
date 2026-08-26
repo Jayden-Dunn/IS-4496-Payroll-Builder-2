@@ -669,25 +669,32 @@ export function resolveWageRate(
   );
   const defaulted = !entry;
 
-  // Round 9 §18 — a pay item with its own rate slot wins outright.
+  // Round 9 §18 — a pay item with its own rate slot wins outright. With no
+  // configured rate for that pay type the line falls back the same way an
+  // ordinary line would (hourly job → hourly rate, else the PS rate), so
+  // Round 9 §35 still pays Xavier Green $18 on an hourly job and $25 on a
+  // work-order job even though both are clocked as Commercial Hourly.
+  const genericFallback = (opts.hourlyJob ? entry?.hourlyRate : undefined) ?? entry?.rate ?? opts.defaultWageRate;
   if (opts.payRateKind === 'commercialHourly') {
     return {
-      rate: entry?.commercialHourlyRate ?? entry?.rate ?? opts.defaultWageRate,
+      rate: entry?.commercialHourlyRate ?? genericFallback,
       defaulted,
       kind: entry?.commercialHourlyRate !== undefined ? 'commercialHourly' : 'painter',
     };
   }
   if (opts.payRateKind === 'wages2') {
     return {
-      rate: entry?.wages2Rate ?? entry?.rate ?? opts.defaultWageRate,
+      rate: entry?.wages2Rate ?? genericFallback,
       defaulted,
       kind: entry?.wages2Rate !== undefined ? 'wages2' : 'painter',
     };
   }
   // Round 9 §13 — "Crew Lead - Hourly Wage" on the timesheet means these hours
-  // are crew-lead hours, whichever painter clocked them.
+  // are crew-lead hours, whichever painter clocked them. It selects the
+  // crew-lead rate on PROFIT-SHARE jobs only: Round 8 §9.1's rule that an
+  // hourly (T&M) job pays the person's hourly-jobs rate still comes first.
   const isCrewLead = opts.payRateKind === 'crewLead' ? true : opts.isCrewLead;
-  if (opts.hourlyJob && !isCrewLead) {
+  if (opts.hourlyJob) {
     // No hourly-jobs rate on file falls through to the global default, NOT to
     // the person's profit-share rate — a piece-rate number would understate an
     // hourly job.

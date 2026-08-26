@@ -501,6 +501,10 @@ function buildTimeNaviSheet(wb: ExcelJS.Workbook, input: ExportInput, palette: R
     };
   }
 
+  // Round 9 §38 — the whole `Apptivo $` column is typed as dollars, so a value
+  // typed into a blank cell later still formats as currency.
+  ws.getColumn(tnCol('Apptivo $')).numFmt = CURRENCY_FMT;
+
   // Hide (never delete) the reference's hidden columns, located by header text.
   for (const h of TN_HIDDEN_HEADERS) {
     const idx = TN_HEADERS.indexOf(h);
@@ -1228,6 +1232,36 @@ function buildPayrollPreviewSheet(
       };
       if (bodyFill) sums.getCell(c).fill = solidFill(bodyFill);
     }
+    // Round 9 §19/§23 — extra rows under an hourly block's totals.
+    if (block.extras.length > 0) {
+      const extraRows = block.extras.map((x) => ({
+        extra: x,
+        row: ws.addRow([x.label, '', '', '', x.amount ?? '']).number,
+      }));
+      for (const r of extraRows) {
+        ws.getCell(`E${r.row}`).numFmt = ACCOUNTING_FMT;
+        ws.getCell(`E${r.row}`).alignment = center;
+        ws.getCell(`E${r.row}`).font = {
+          ...baseFont,
+          ...(r.extra.kind === 'deduction'
+            ? { color: { argb: DEDUCT_RED } }
+            : r.extra.kind === 'reimbursement'
+              ? { color: { argb: REIMB_BLUE } }
+              : {}),
+        };
+      }
+      const moneyExtras = extraRows.filter((r) => r.extra.kind !== 'note');
+      if (moneyExtras.length > 0) {
+        const terms = moneyExtras
+          .map((r) => `${r.extra.kind === 'deduction' ? '-' : '+'}N(E${r.row})`)
+          .join('');
+        const netRow = ws.addRow(['Total Pay']);
+        netRow.getCell(5).value = { formula: `E${sums.number}${terms}` };
+        netRow.getCell(5).numFmt = ACCOUNTING_FMT;
+        netRow.getCell(5).alignment = center;
+        netRow.font = { ...baseFont, bold: true };
+      }
+    }
     ws.addRow([]);
   };
 
@@ -1281,7 +1315,9 @@ function buildPayrollPreviewSheet(
     ]).number;
     const laborRow = ws.addRow(['- Labor + Wages', ...block.jobs.map((j) => j.laborWages)]).number;
     const milesRow = ws.addRow(['-Mileage', ...block.jobs.map((j) => j.mileage)]).number;
-    const halfRow = ws.addRow(['-½ Materials', ...block.jobs.map((j) => j.halfMaterials)]).number;
+    // Round 9 §32 — a full-materials lead is charged all of it, and the row says so.
+    const materialsLabel = block.jobs.some((j) => j.fullMaterials) ? '- Materials' : '-½ Materials';
+    const halfRow = ws.addRow([materialsLabel, ...block.jobs.map((j) => j.halfMaterials)]).number;
     const tpsRow = ws.addRow(['Total Profit Share']).number;
     let splitRow = 0;
     if (block.jobs.some((j) => j.splitWith > 1)) {
@@ -1293,6 +1329,12 @@ function buildPayrollPreviewSheet(
     const hourlyPayRow = ws.addRow(['Hourly Pay']).number;
     const reimbRow = ws.addRow(['Reimbursements', block.reimbursements, block.reimbMemo]).number;
     const deductRow = ws.addRow(['Deductions/Sundries']).number;
+    // Round 9 §19/§23 — configured extra rows sit directly above Total Pay so
+    // the formula below can pick them up.
+    const extraRows = block.extras.map((x) => ({
+      extra: x,
+      row: ws.addRow([x.label, x.amount ?? '']).number,
+    }));
     const totalPayRow = ws.addRow(['Total Pay']).number;
     const inputRef = inputRefsByLeadKey?.get(block.key);
     if (inputRef) {
@@ -1364,9 +1406,25 @@ function buildPayrollPreviewSheet(
     }
     // Round 8 §8.2 — Total + Hourly + Reimbursements − Deductions/Sundries.
     // Mileage - New is display-only, and deductions are entered positive.
+    const extraTerms = extraRows
+      .filter((r) => r.extra.kind !== 'note')
+      .map((r) => `${r.extra.kind === 'deduction' ? '-' : '+'}N(B${r.row})`)
+      .join('');
     ws.getCell(`B${totalPayRow}`).value = {
-      formula: `B${totalRow}+B${hourlyPayRow}+B${reimbRow}-B${deductRow}`,
+      formula: `B${totalRow}+B${hourlyPayRow}+B${reimbRow}-B${deductRow}${extraTerms}`,
     };
+    for (const r of extraRows) {
+      ws.getCell(`B${r.row}`).numFmt = ACCOUNTING_FMT;
+      ws.getCell(`A${r.row}`).font = { ...baseFont };
+      ws.getCell(`B${r.row}`).font = {
+        ...baseFont,
+        ...(r.extra.kind === 'deduction'
+          ? { color: { argb: DEDUCT_RED } }
+          : r.extra.kind === 'reimbursement'
+            ? { color: { argb: REIMB_BLUE } }
+            : {}),
+      };
+    }
     for (const rn of [totalRow, mileNewRow, hourlyPayRow, reimbRow, deductRow]) {
       ws.getCell(`B${rn}`).numFmt = ACCOUNTING_FMT;
       ws.getCell(`A${rn}`).font = { ...baseFont, bold: rn === totalRow };
@@ -1410,18 +1468,57 @@ function buildPayrollPreviewSheet(
   };
 
   const salaryBlock = (block: SalaryBlock, fill: string): void => {
-    band([`${block.name}${block.timesheetHours > 0 ? ` (${block.timesheetHours}hrs)` : ''}`], fill, BLACK);
+    band(
+      [
+        `${block.name}${block.timesheetHours > 0 ? ` (${block.timesheetHours}hrs)` : ''}` +
+          // Round 9 §26/§33 — subcontractors in the salary sections.
+          (block.sub ? ' (subcontractor)' : ''),
+      ],
+      fill,
+      BLACK,
+    );
     // §5.4 — the date-range cell renders 9pt like the office PO cells.
     const r1 = ws.addRow([model.weekRange ? `(${model.weekRange})` : '', block.role, block.amount]);
     r1.getCell(1).font = { ...baseFont, size: 9 };
     r1.getCell(3).numFmt = ACCOUNTING_FMT;
-    // Reimb already computed at the Settings mileage rate.
-    const r2 = ws.addRow([`mileage reimb: ${block.name} - ${block.miles} miles`, '', block.mileageReimb]);
+    // Round 9 §28 — a flat labeled reimbursements row replaces mileage reimb
+    // for the people configured that way (Jodi Dunn).
+    const r2 = block.reimbursementsLabel
+      ? ws.addRow([block.reimbursementsLabel, '', block.reimbursements])
+      : ws.addRow([`mileage reimb: ${block.name} - ${block.miles} miles`, '', block.mileageReimb]);
     r2.getCell(3).numFmt = ACCOUNTING_FMT;
+    // Round 9 §19/§23/§24/§29 — configured extra rows.
+    const extraRows = block.extras.map((x) => ({
+      extra: x,
+      row: ws.addRow([x.label, '', x.amount ?? '']).number,
+    }));
+    for (const r of extraRows) {
+      ws.getCell(`C${r.row}`).numFmt = ACCOUNTING_FMT;
+      ws.getCell(`C${r.row}`).font = {
+        ...baseFont,
+        ...(r.extra.kind === 'deduction'
+          ? { color: { argb: DEDUCT_RED } }
+          : r.extra.kind === 'reimbursement'
+            ? { color: { argb: REIMB_BLUE } }
+            : {}),
+      };
+    }
+    const extraTerms = extraRows
+      .filter((r) => r.extra.kind !== 'note')
+      .map((r) => `${r.extra.kind === 'deduction' ? '-' : '+'}N(C${r.row})`)
+      .join('');
     const r3 = ws.addRow(['Total', '', '']);
-    r3.getCell(3).value = { formula: `C${r1.number}+C${r2.number}` };
+    r3.getCell(3).value = { formula: `C${r1.number}+C${r2.number}${extraTerms}` };
     r3.getCell(3).numFmt = ACCOUNTING_FMT;
     r3.font = { ...baseFont, bold: true };
+    // Round 9 §34 — pre-filled taxes / net when the roster carries them.
+    if (block.taxes !== null || block.net !== null) {
+      const rt = ws.addRow(['(-) taxes', '', block.taxes ?? '']);
+      rt.getCell(3).numFmt = ACCOUNTING_FMT;
+      const rn = ws.addRow(['net', '', block.net ?? '']);
+      rn.getCell(3).numFmt = ACCOUNTING_FMT;
+      rn.font = { ...baseFont, bold: true };
+    }
     ws.addRow([]);
   };
 

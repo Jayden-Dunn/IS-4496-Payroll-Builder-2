@@ -635,24 +635,38 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     if (seenCrewOwners.has(ownerKey)) continue;
     seenCrewOwners.add(ownerKey);
     const match = [...emps.values()].find((e) => nameMatches(e.fullName, owner));
-    // Round 9 §18 — owning a crew label is NOT by itself proof of crew-lead
-    // work: Samuel Brewster's whole week is "Commercial Hourly", so he is an
-    // hourly painter, not a profit-share lead. Promote a crew owner only when
-    // the timesheet shows crew-lead pay-item hours, the Pivot by Job Crew Lead
-    // column names them, or Settings lists them as a profit-share lead.
+    /**
+     * Round 9 §18 — owning a crew label is not by itself proof of crew-lead
+     * work. Samuel Brewster's whole week is clocked as "Commercial Hourly", so
+     * he is an hourly painter this week, not a profit-share lead.
+     *
+     * The Round 7 §20.1 promotion still stands by default; it is only skipped
+     * when the timesheet positively says otherwise — the person clocked a
+     * PERSONAL pay type (Commercial Hourly / Wages 2) and never a crew-lead
+     * one, and nothing else names them as a lead. A blank or plain
+     * "Regular Pay" week leaves the promotion exactly as it was.
+     */
     const ownerUser = match?.username ?? null;
-    const clockedCrewLead =
-      ownerUser !== null &&
-      [...crewLeadUsersByJob.values()].some((set) => set.has(ownerUser));
-    const namedOnPivot = pieceRateJobs.some((pj) => {
-      const res = pj.job.analysis.crewLeadResolution;
-      const names = res && res.names.length > 0 ? res.names : pj.job.analysis.crewLead ? [pj.job.analysis.crewLead] : [];
-      return names.some((n) => nameMatches(n, match?.fullName ?? owner));
-    });
-    const inProfitShareMap = settings.profitShare.some((pentry) =>
-      nameMatches(pentry.lead, match?.fullName ?? owner),
+    const ownerJobs = ownerUser ? (empJobs.get(ownerUser) ?? []) : [];
+    const clockedCrewLead = ownerJobs.some((j) => j.segments.some((sg) => sg.rateKind === 'crewLead'));
+    const clockedOwnPayType = ownerJobs.some((j) =>
+      j.segments.some((sg) => sg.rateKind === 'commercialHourly' || sg.rateKind === 'wages2'),
     );
-    if (!clockedCrewLead && !namedOnPivot && !inProfitShareMap) continue;
+    if (clockedOwnPayType && !clockedCrewLead) {
+      const ownerName = match?.fullName ?? owner;
+      const namedOnPivot = pieceRateJobs.some((pj) => {
+        const res = pj.job.analysis.crewLeadResolution;
+        const names =
+          res && res.names.length > 0
+            ? res.names
+            : pj.job.analysis.crewLead
+              ? [pj.job.analysis.crewLead]
+              : [];
+        return names.some((n) => nameMatches(n, ownerName));
+      });
+      const inProfitShareMap = settings.profitShare.some((pentry) => nameMatches(pentry.lead, ownerName));
+      if (!namedOnPivot && !inProfitShareMap) continue;
+    }
     addLeadName(match?.fullName ?? owner);
   }
   // Optional boost: Settings profitShare leads with hours this week.
@@ -663,6 +677,43 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     if (!match) continue;
     const hrs = (empJobs.get(match.username) ?? []).reduce((a, j) => a + j.hours, 0);
     if (hrs > 0) addLeadName(match.fullName);
+  }
+
+  /**
+   * Round 9 — one band per human. "Rene Salazar" (crew label / Settings) and
+   * "Rene Salazar M" (timesheet + directory) are the same person, and each
+   * used to raise its own band that paid the same jobs twice. Names that
+   * token-match are collapsed onto the most specific spelling — the one that
+   * matches a timesheet employee when there is one.
+   */
+  {
+    const entries = [...leadNames.entries()];
+    const canonical: { key: string; meta: { sub: boolean } }[] = [];
+    const matchesEmp = (n: string): boolean =>
+      [...emps.values()].some((e) => nameMatches(e.fullName, n));
+    for (const [name, meta] of entries) {
+      const at = canonical.findIndex(
+        (c) => tokensSubset(c.key, name) || tokensSubset(name, c.key),
+      );
+      if (at < 0) {
+        canonical.push({ key: name, meta });
+        continue;
+      }
+      const kept = canonical[at].key;
+      // Prefer the spelling that matches a real timesheet employee; when both
+      // (or neither) do, prefer the longer, more specific one.
+      const preferNew =
+        (matchesEmp(name) && !matchesEmp(kept)) ||
+        (matchesEmp(name) === matchesEmp(kept) && name.length > kept.length);
+      canonical[at] = {
+        key: preferNew ? name : kept,
+        meta: { sub: canonical[at].meta.sub || meta.sub },
+      };
+    }
+    if (canonical.length !== entries.length) {
+      leadNames.clear();
+      for (const c of canonical) leadNames.set(c.key, c.meta);
+    }
   }
 
   /** Is this timesheet employee one of the resolved crew leads? */

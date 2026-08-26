@@ -1042,10 +1042,7 @@ export function NotesTab({
     0,
   ) +
     model.office.reduce((s, b) => s + b.totalPay, 0) +
-    [...model.admin, ...model.estimators, ...model.managers].reduce(
-      (s, b) => s + b.amount + b.mileageReimb,
-      0,
-    );
+    [...model.admin, ...model.estimators, ...model.managers].reduce((s, b) => s + b.total, 0);
   return (
     <div className="p-3" style={GARAMOND}>
       <div className="mb-3 flex max-w-4xl items-baseline justify-between gap-4">
