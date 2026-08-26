@@ -67,6 +67,26 @@ const INVOICE_DATE_FMT = 'mm/dd/yyyy';
 const PCT_FMT = '0%';
 const HOURS_FMT = '0.00';
 
+/**
+ * Round 9 §38 — accounting format WITH the "$" symbol. Used by the payroll
+ * bands and by the TimeNavi `Apptivo $` column, whose values are dollars.
+ */
+const CURRENCY_FMT = '_("$"* #,##0.00_);_("$"* \\(#,##0.00\\);_("$"* "-"??_);_(@_)';
+
+/**
+ * Round 9 §2/§36 — the AP# column is autofit, then widened by this factor so
+ * every AP number (suffixes included) fits without truncation.
+ */
+const TN_AP_WIDTH_SCALE = 1.35;
+
+/**
+ * Round 9 §37 — TimeNavi rows are pinned to a compact single-line height.
+ * Nothing on the sheet wraps, so the tall auto-height rows are unnecessary;
+ * 12.75 is the shortest height that still shows the 10pt Calibri text in full.
+ */
+const TN_ROW_HEIGHT = 12.75;
+const TN_HEADER_ROW_HEIGHT = 12.75;
+
 const FONT = 'Calibri';
 
 function solidFill(argb: string): ExcelJS.Fill {
@@ -446,10 +466,13 @@ function buildTimeNaviSheet(wb: ExcelJS.Workbook, input: ExportInput, palette: R
     { min: 12, max: TN_EVENT_MAX },
   );
   const descWidth = Math.round(TN_WIDTHS[descIdx] * TN_DESC_SCALE * 10) / 10;
-  const apWidth = autofitColWidth(
-    ['AP#', ...included.map((r) => r.apKey ?? '')],
-    { min: 4, max: 18 },
-  );
+  // Round 9 §2/§36 — autofit, then 35% wider so no AP number is clipped.
+  const apWidth =
+    Math.round(
+      autofitColWidth(['AP#', ...included.map((r) => r.apKey ?? '')], { min: 4, max: 18 }) *
+        TN_AP_WIDTH_SCALE *
+        10,
+    ) / 10;
   ws.columns = TN_WIDTHS.map((width, i) => {
     if (i === 0) return { width: eventWidth };
     if (i === descIdx) return { width: descWidth };
@@ -465,6 +488,7 @@ function buildTimeNaviSheet(wb: ExcelJS.Workbook, input: ExportInput, palette: R
   // Round 7 — Calibri 10 for all used TimeNavi cells.
   const tnFont = { name: FONT, size: 10 };
   const header = ws.addRow(TN_HEADERS);
+  header.height = TN_HEADER_ROW_HEIGHT; // Round 9 §37
   for (let c = 1; c <= TN_HEADERS.length; c++) {
     const cell = header.getCell(c);
     cell.value = TN_HEADERS[c - 1];
@@ -522,12 +546,19 @@ function buildTimeNaviSheet(wb: ExcelJS.Workbook, input: ExportInput, palette: R
       const cell = row.getCell(col);
       if (typeof cell.value === 'number') cell.numFmt = PCT_FMT;
     }
-    for (const col of [14, 15, 16]) {
+    for (const col of [14, 16]) {
       const cell = row.getCell(col);
       if (typeof cell.value === 'number') cell.numFmt = ACCOUNTING_FMT;
     }
+    // Round 9 §38 — `Apptivo $` holds dollars, so it carries the $ format.
+    {
+      const apptivoCell = row.getCell(tnCol('Apptivo $'));
+      if (typeof apptivoCell.value === 'number') apptivoCell.numFmt = CURRENCY_FMT;
+    }
     row.getCell(19).numFmt = '0';
 
+    // Round 9 §37 — halve the row height; nothing on this sheet wraps.
+    row.height = TN_ROW_HEIGHT;
     row.getCell(1).alignment = { vertical: 'top' };
 
     // Full-row fill keyed off the RESOLVED estimator, with readable text.
@@ -759,7 +790,7 @@ function buildPivotSheet(wb: ExcelJS.Workbook, pivot: PivotModel, palette: Reado
 const RED = 'FFFF0000';
 const DARK_RED = 'FFC00000';
 // Round 4 §3.2-1 — WO Override uses the $ accounting variant on this tab.
-const MONEY_FMT = '_("$"* #,##0.00_);_("$"* \\(#,##0.00\\);_("$"* "-"??_);_(@_)';
+const MONEY_FMT = CURRENCY_FMT;
 
 function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): void {
   const ws = wb.addWorksheet('Pivot by Job', {

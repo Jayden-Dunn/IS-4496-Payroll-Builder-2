@@ -60,12 +60,12 @@ import {
 } from './lib/parsers';
 import { directoryFromTimesheet, type LeadResolverContext } from './lib/payroll';
 import { buildPayrollExceptions } from './lib/payrollExceptions';
+import { buildPayrollPivotByJob } from './lib/payrollPivot';
 import { buildPayrollPreview, hasUtPayrollData, mergePayrollPreviews } from './lib/payrollPreview';
 import { buildPivot } from './lib/pivot';
 import {
   buildPivotByJob,
   EMPTY_MANUAL_STATE,
-  pbjJobId,
   type ManualSectionState,
 } from './lib/pivotByJob';
 import { applyPivotView, EMPTY_PIVOT_VIEW, isPivotViewActive, type PivotViewState } from './lib/pivotView';
@@ -368,27 +368,10 @@ export default function App(): JSX.Element {
 
   // ------------------------------------------------------------------ uploads
 
-  const applyCompletedSeeds = useCallback((jobs: CompletedPbjJob[]): void => {
-    const editPatch: PbjEditsMap = {};
-    const qbPatch: QbHoursMap = {};
-    for (const j of jobs) {
-      const id = pbjJobId(j.customer, j.job);
-      editPatch[id] = {
-        crewLead: j.crewLead || undefined,
-        woOverride: j.woOverride,
-        woPct: j.woPct,
-        // Round 8 §3.1 — a seed, not a manual override: this week's TimeNavi
-        // value still wins wherever the grid has a row for the AP#.
-        percentSeed: j.percent,
-        notes: j.notes || undefined,
-      };
-      for (const e of j.employees) {
-        if (e.qbHours != null) qbPatch[`${id}\u0000${e.username}`] = e.qbHours;
-      }
-    }
-    setPbjEdits((prev) => ({ ...editPatch, ...prev }));
-    setQbHours((prev) => ({ ...qbPatch, ...prev }));
-  }, []);
+  // Round 9 §6 — Slot A feeds the PAYROLL side only. It used to seed the %'s
+  // report's Pivot by Job edits, which let a payroll upload move the %'s
+  // report's numbers; the payroll process now builds its own model from this
+  // upload (see `payrollPivotByJob`) and the two sides never cross.
 
   const handleFile = useCallback(async (id: SlotId, file: File): Promise<void> => {
     const fail = (message: string): void => {
@@ -435,7 +418,6 @@ export default function App(): JSX.Element {
               (res.timesheet.lunchRemoved > 0 ? ` · ${res.timesheet.lunchRemoved} lunch removed` : ''),
             { completedPercents: res },
           );
-          applyCompletedSeeds(res.jobs);
           // Pay date from completed timesheet when not already set from NV upload.
           if (!payDateIso) {
             let max: Date | null = null;
@@ -518,21 +500,22 @@ export default function App(): JSX.Element {
     } catch (err) {
       fail(err instanceof Error ? err.message : 'Could not read this file.');
     }
-  }, [applyCompletedSeeds, payDateIso, settings.plAccountMapping]);
+  }, [payDateIso, settings.plAccountMapping]);
 
-  /** Combined NV+UT timesheet (NV first); falls back to Slot A when neither uploaded. */
+  /**
+   * Combined NV+UT timesheet for the %'s REPORT side (NV first).
+   * Round 9 §6 — this no longer falls back to Slot A: the %'s report reads
+   * only the %'s uploads, and the payroll process reads only its own.
+   */
   const combinedTimesheet = useMemo((): TimesheetParseResult | null => {
     const nv = parsed.timesheetNv;
     const ut = parsed.timesheetUt;
-    if (nv || ut) {
-      return {
-        rows: [...(nv?.rows ?? []), ...(ut?.rows ?? [])],
-        lunchRemoved: (nv?.lunchRemoved ?? 0) + (ut?.lunchRemoved ?? 0),
-      };
-    }
-    if (parsed.completedPercents) return parsed.completedPercents.timesheet;
-    return null;
-  }, [parsed.timesheetNv, parsed.timesheetUt, parsed.completedPercents]);
+    if (!nv && !ut) return null;
+    return {
+      rows: [...(nv?.rows ?? []), ...(ut?.rows ?? [])],
+      lunchRemoved: (nv?.lunchRemoved ?? 0) + (ut?.lunchRemoved ?? 0),
+    };
+  }, [parsed.timesheetNv, parsed.timesheetUt]);
 
   const percentsMissingInputs = useMemo((): string[] => {
     const checks: [Exclude<SlotId, 'employees'>, boolean][] = [
@@ -578,16 +561,21 @@ export default function App(): JSX.Element {
   );
   const payDate = useMemo(() => (payDateIso ? isoToDate(payDateIso) : null), [payDateIso]);
 
-  /** Prefer Slot A timesheet for payroll when uploaded; else combined NV+UT. */
-  const payrollTimesheet = useMemo((): TimesheetParseResult | null => {
-    if (createdPayroll && parsed.completedPercents) return parsed.completedPercents.timesheet;
-    return combinedTimesheet;
-  }, [createdPayroll, parsed.completedPercents, combinedTimesheet]);
-
-  const effectiveLastWeekPbj = useMemo(
-    () => parsed.completedPercents?.lastWeekPbj ?? parsed.lastWeekPbj,
-    [parsed.completedPercents, parsed.lastWeekPbj],
+  /**
+   * Round 9 §1/§6 — the payroll process's hours come from the `timesheets`
+   * tab of Slot A ("This week's completed %'s") and from nowhere else.
+   */
+  const payrollTimesheet = useMemo(
+    (): TimesheetParseResult | null => parsed.completedPercents?.timesheet ?? null,
+    [parsed.completedPercents],
   );
+
+  /**
+   * Round 9 §6 — the %'s report carries forward from ITS own Slot 8 upload
+   * ("Last week's % of Completion"). It no longer borrows Slot A, which
+   * belongs to the payroll process.
+   */
+  const effectiveLastWeekPbj = useMemo(() => parsed.lastWeekPbj, [parsed.lastWeekPbj]);
 
   /** apKey → jobcode_2 of the first timesheet row with that key (column M). */
   const timesheetApKeyMap = useMemo(() => {
@@ -659,38 +647,43 @@ export default function App(): JSX.Element {
     for (const r of reportRows) {
       if (r.included && r.apKey && r.estimator && !m.has(r.apKey)) m.set(r.apKey, r.estimator);
     }
-    // Payroll-only Slot A: seed estimators from completed jobs when no TimeNavi grid.
-    if (m.size === 0 && parsed.completedPercents) {
-      for (const j of parsed.completedPercents.jobs) {
-        if (j.apKey && j.estimator && !m.has(j.apKey)) m.set(j.apKey, j.estimator);
-      }
-    }
     return m;
-  }, [reportRows, parsed.completedPercents]);
+  }, [reportRows]);
 
+  /** %'s report enrichment — built from the %'s uploads only (Round 9 §6). */
   const enriched = useMemo(() => {
-    const needPercents = createdPercents && combinedTimesheet && parsed.nvSales && parsed.utSales;
-    const needPayroll = createdPayroll && payrollTimesheet;
-    if (!needPercents && !needPayroll) return [];
-    const rows = (createdPayroll && payrollTimesheet ? payrollTimesheet : combinedTimesheet)!.rows;
-    // Payroll-only may lack sales uploads — enrich still resolves OFFICE / completed estimators.
+    if (!createdPercents || !combinedTimesheet) return [];
     return enrichTimesheet(
-      rows,
+      combinedTimesheet.rows,
       parsed.nvSales ?? [],
       parsed.utSales ?? [],
       includedApKeys,
       estimatorByApKey,
     );
-  }, [
-    createdPercents,
-    createdPayroll,
-    combinedTimesheet,
-    payrollTimesheet,
-    parsed.nvSales,
-    parsed.utSales,
-    includedApKeys,
-    estimatorByApKey,
-  ]);
+  }, [createdPercents, combinedTimesheet, parsed.nvSales, parsed.utSales, includedApKeys, estimatorByApKey]);
+
+  /**
+   * Round 9 §6 — the payroll side's enriched timesheet: Slot A's `timesheets`
+   * tab, with estimators resolved from Slot A's own Pivot by Job rows.
+   */
+  const payrollEstimatorByApKey = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const j of parsed.completedPercents?.jobs ?? []) {
+      if (j.apKey && j.estimator && !m.has(j.apKey)) m.set(j.apKey, j.estimator);
+    }
+    return m;
+  }, [parsed.completedPercents]);
+
+  const payrollApKeys = useMemo(() => {
+    const set = new Set<string>();
+    for (const j of parsed.completedPercents?.jobs ?? []) if (j.apKey) set.add(j.apKey);
+    return set;
+  }, [parsed.completedPercents]);
+
+  const payrollEnriched = useMemo(() => {
+    if (!createdPayroll || !payrollTimesheet) return [];
+    return enrichTimesheet(payrollTimesheet.rows, [], [], payrollApKeys, payrollEstimatorByApKey);
+  }, [createdPayroll, payrollTimesheet, payrollApKeys, payrollEstimatorByApKey]);
 
   // Round 6 — mirror models for %'s tabs + export
   const salesByRepMirror = useMemo(() => {
@@ -729,6 +722,18 @@ export default function App(): JSX.Element {
   );
 
   const jobsByCrew = useMemo(() => buildJobsByCrew(enriched), [enriched]);
+
+  /** Round 9 §6 — payroll filenames/date ranges follow the PAYROLL timesheet. */
+  const payrollWeekBounds = useMemo(() => {
+    let weekStart: Date | null = null;
+    let weekEnd: Date | null = null;
+    for (const r of payrollTimesheet?.rows ?? []) {
+      if (!r.localDate) continue;
+      if (!weekStart || r.localDate.getTime() < weekStart.getTime()) weekStart = r.localDate;
+      if (!weekEnd || r.localDate.getTime() > weekEnd.getTime()) weekEnd = r.localDate;
+    }
+    return { weekStart, weekEnd };
+  }, [payrollTimesheet]);
 
   const weekBounds = useMemo(() => {
     let weekStart: Date | null = null;
@@ -770,14 +775,41 @@ export default function App(): JSX.Element {
   );
 
   const leadCtx = useMemo<LeadResolverContext>(() => {
-    const rows = (payrollTimesheet ?? combinedTimesheet)?.rows ?? [];
+    const rows = combinedTimesheet?.rows ?? [];
     const crewGroups = [...new Set(rows.map((r) => r.group).filter(Boolean))];
     return {
       directory: effectiveDirectory ?? directoryFromTimesheet(rows),
       crewGroups,
       subcontractors: settings.subcontractors,
     };
-  }, [effectiveDirectory, payrollTimesheet, combinedTimesheet, settings.subcontractors]);
+  }, [effectiveDirectory, combinedTimesheet, settings.subcontractors]);
+
+  /** Round 9 §6 — the payroll side resolves leads against ITS timesheet. */
+  const payrollLeadCtx = useMemo<LeadResolverContext>(() => {
+    const rows = payrollTimesheet?.rows ?? [];
+    const crewGroups = [...new Set(rows.map((r) => r.group).filter(Boolean))];
+    return {
+      directory: effectiveDirectory ?? directoryFromTimesheet(rows),
+      crewGroups,
+      subcontractors: settings.subcontractors,
+    };
+  }, [effectiveDirectory, payrollTimesheet, settings.subcontractors]);
+
+  /**
+   * Round 9 §6 — the payroll process's Pivot by Job, built straight from Slot
+   * A. Every reference the payroll tabs used to take from the %'s report
+   * output (WO%, WO Override, Crew Lead, % of Completion, the gray exclusion
+   * flag, the bottom-of-pivot jobs) now comes from THIS model, i.e. from the
+   * "This week's completed %'s" upload on the payroll rail.
+   */
+  const payrollPivotByJob = useMemo((): PivotByJobModel | null => {
+    if (!parsed.completedPercents) return null;
+    return buildPayrollPivotByJob({
+      completed: parsed.completedPercents,
+      settings,
+      qbHours,
+    });
+  }, [parsed.completedPercents, settings, qbHours]);
 
   const pivotByJob = useMemo(
     () =>
@@ -793,7 +825,9 @@ export default function App(): JSX.Element {
         lastWeekPbj: effectiveLastWeekPbj,
         balancesState,
         utState,
-        pl: parsed.pl,
+        // Round 9 §6 — the P&L lives on the PAYROLL rail; the %'s report
+        // resolves its names from its own sales/summary uploads.
+        pl: null,
         nvTotals: parsed.nvTotals,
         utTotals: parsed.utTotals,
         nvSales: parsed.nvSales,
@@ -812,7 +846,6 @@ export default function App(): JSX.Element {
       pbjEdits,
       qbHours,
       effectiveLastWeekPbj,
-      parsed.pl,
       parsed.nvTotals,
       parsed.utTotals,
       parsed.nvSales,
@@ -837,12 +870,18 @@ export default function App(): JSX.Element {
   );
   const exceptionCount = useMemo(() => countExceptions(exceptions), [exceptions]);
 
+  /**
+   * Round 9 §6 — every payroll input is the payroll rail's own: Slot A's
+   * Pivot by Job + timesheets, and the P&L uploads. `reportRows` is empty
+   * here on purpose — the %'s report's TimeNavi grid is no longer a payroll
+   * input, so nothing on this tab can move when the %'s report changes.
+   */
   const payrollPreview = useMemo(() => {
-    if (!createdPayroll || !parsed.pl) return null;
+    if (!createdPayroll || !parsed.pl || !payrollPivotByJob) return null;
     return buildPayrollPreview({
-      pbj: pivotByJob,
-      enriched,
-      reportRows,
+      pbj: payrollPivotByJob,
+      enriched: payrollEnriched,
+      reportRows: [],
       pl: parsed.pl,
       plUt: parsed.plUt,
       entity: 'NV',
@@ -852,41 +891,40 @@ export default function App(): JSX.Element {
       edits: payrollEdits,
       qbHours,
       knownEstimators,
-      leadCtx,
-      nvSales: parsed.nvSales,
-      utSales: parsed.utSales,
-      lastWeekPbj: effectiveLastWeekPbj,
+      leadCtx: payrollLeadCtx,
+      nvSales: null,
+      utSales: null,
+      lastWeekPbj: parsed.completedPercents?.lastWeekPbj ?? null,
     });
   }, [
     createdPayroll,
     parsed.pl,
     parsed.plUt,
-    parsed.nvSales,
-    parsed.utSales,
-    effectiveLastWeekPbj,
+    parsed.completedPercents,
     effectiveDirectory,
-    pivotByJob,
-    enriched,
-    reportRows,
+    payrollPivotByJob,
+    payrollEnriched,
     settings,
     payDate,
     payrollEdits,
     qbHours,
     knownEstimators,
-    leadCtx,
+    payrollLeadCtx,
   ]);
 
   const showUtPayroll = useMemo(
-    () => hasUtPayrollData({ enriched, pbj: pivotByJob, plUt: parsed.plUt }),
-    [enriched, pivotByJob, parsed.plUt],
+    () =>
+      payrollPivotByJob !== null &&
+      hasUtPayrollData({ enriched: payrollEnriched, pbj: payrollPivotByJob, plUt: parsed.plUt }),
+    [payrollEnriched, payrollPivotByJob, parsed.plUt],
   );
 
   const payrollPreviewUt = useMemo(() => {
-    if (!createdPayroll || !showUtPayroll) return null;
+    if (!createdPayroll || !showUtPayroll || !payrollPivotByJob) return null;
     return buildPayrollPreview({
-      pbj: pivotByJob,
-      enriched,
-      reportRows,
+      pbj: payrollPivotByJob,
+      enriched: payrollEnriched,
+      reportRows: [],
       pl: parsed.pl,
       plUt: parsed.plUt,
       entity: 'UT',
@@ -896,29 +934,26 @@ export default function App(): JSX.Element {
       edits: payrollEdits,
       qbHours,
       knownEstimators,
-      leadCtx,
-      nvSales: parsed.nvSales,
-      utSales: parsed.utSales,
-      lastWeekPbj: effectiveLastWeekPbj,
+      leadCtx: payrollLeadCtx,
+      nvSales: null,
+      utSales: null,
+      lastWeekPbj: parsed.completedPercents?.lastWeekPbj ?? null,
     });
   }, [
     createdPayroll,
     showUtPayroll,
     parsed.pl,
     parsed.plUt,
-    parsed.nvSales,
-    parsed.utSales,
-    effectiveLastWeekPbj,
+    parsed.completedPercents,
     effectiveDirectory,
-    pivotByJob,
-    enriched,
-    reportRows,
+    payrollPivotByJob,
+    payrollEnriched,
     settings,
     payDate,
     payrollEdits,
     qbHours,
     knownEstimators,
-    leadCtx,
+    payrollLeadCtx,
   ]);
 
   const payrollPreviewAll = useMemo(
@@ -927,9 +962,9 @@ export default function App(): JSX.Element {
   );
 
   const payrollExceptions = useMemo(() => {
-    if (!createdPayroll) return [];
+    if (!createdPayroll || !payrollPivotByJob) return [];
     return buildPayrollExceptions({
-      pbj: pivotByJob,
+      pbj: payrollPivotByJob,
       preview:
         payrollPreview ?? {
           entity: 'NV',
@@ -948,28 +983,25 @@ export default function App(): JSX.Element {
           dailyOtNotes: [],
         },
       previewUt: payrollPreviewUt,
-      reportRows,
+      reportRows: [],
       pl: parsed.pl,
       plUt: parsed.plUt,
       hasDirectory: effectiveDirectory !== null,
-      enriched,
-      nvSales: parsed.nvSales,
-      utSales: parsed.utSales,
-      lastWeekPbj: effectiveLastWeekPbj,
+      enriched: payrollEnriched,
+      nvSales: null,
+      utSales: null,
+      lastWeekPbj: parsed.completedPercents?.lastWeekPbj ?? null,
     });
   }, [
     createdPayroll,
-    pivotByJob,
+    payrollPivotByJob,
     payrollPreview,
     payrollPreviewUt,
-    reportRows,
     parsed.pl,
     parsed.plUt,
-    parsed.nvSales,
-    parsed.utSales,
-    effectiveLastWeekPbj,
+    parsed.completedPercents,
     effectiveDirectory,
-    enriched,
+    payrollEnriched,
   ]);
   const payrollExceptionCount = useMemo(() => countExceptions(payrollExceptions), [payrollExceptions]);
 
@@ -1099,8 +1131,8 @@ export default function App(): JSX.Element {
     if (mode === 'payroll') {
       void exportPayrollWorkbook({
         payDate,
-        weekStart: weekBounds.weekStart,
-        weekEnd: weekBounds.weekEnd,
+        weekStart: payrollWeekBounds.weekStart,
+        weekEnd: payrollWeekBounds.weekEnd,
         pl: parsed.pl,
         plUt: parsed.plUt,
         plSourceFileName: chips.pl.fileName || null,
@@ -1110,7 +1142,7 @@ export default function App(): JSX.Element {
         payrollExceptions,
         mileageRate: settings.mileageRate,
         defaultProfitSharePct: settings.defaultProfitSharePct,
-        estimatorByApKey,
+        estimatorByApKey: payrollEstimatorByApKey,
         legend: settings.legend,
       });
       return;
@@ -1133,6 +1165,8 @@ export default function App(): JSX.Element {
     mode,
     payDate,
     weekBounds,
+    payrollWeekBounds,
+    payrollEstimatorByApKey,
     parsed.pl,
     parsed.plUt,
     chips.pl.fileName,
@@ -1253,7 +1287,6 @@ export default function App(): JSX.Element {
     if (!createdPercents || !combinedTimesheet) return;
     const fromSession = completedFromSession(combinedTimesheet, pivotByJob, parsed.lastWeekPbj);
     setParsed((p) => ({ ...p, completedPercents: fromSession }));
-    applyCompletedSeeds(fromSession.jobs);
     setChips((c) => ({
       ...c,
       completedPercents: {
@@ -1262,7 +1295,7 @@ export default function App(): JSX.Element {
         message: `✓ from this session · ${fromSession.jobs.length} jobs · ${fromSession.timesheet.rows.length} rows`,
       },
     }));
-  }, [createdPercents, combinedTimesheet, pivotByJob, parsed.lastWeekPbj, applyCompletedSeeds]);
+  }, [createdPercents, combinedTimesheet, pivotByJob, parsed.lastWeekPbj]);
 
   // ------------------------------------------------------------------ render
 
@@ -1277,7 +1310,7 @@ export default function App(): JSX.Element {
         onOpenSettings={() => setSettingsOpen(true)}
         downloadName={
           mode === 'payroll'
-            ? payrollExportFilename(payDate, weekBounds.weekStart, weekBounds.weekEnd)
+            ? payrollExportFilename(payDate, payrollWeekBounds.weekStart, payrollWeekBounds.weekEnd)
             : exportFilename(payDate)
         }
         exportFiltered={exportFiltered}

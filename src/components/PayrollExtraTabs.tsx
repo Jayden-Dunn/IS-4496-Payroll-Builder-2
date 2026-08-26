@@ -106,6 +106,7 @@ function PsChainBody({
   defaultPsPct,
   onEdit,
   showGrossWages,
+  hideBooksRows,
   nameStyle,
   highlightFirstJob,
 }: {
@@ -114,6 +115,12 @@ function PsChainBody({
   defaultPsPct?: number;
   onEdit?: OnEdit;
   showGrossWages?: boolean;
+  /**
+   * Round 9 §30 — the Final Payroll Breakdown drops the reference rows
+   * (Total Income, Materials, Travel, QB Labor-Wages-Subs, Mileage in Books,
+   * % Materials). They stay on the main Payroll Preview.
+   */
+  hideBooksRows?: boolean;
   nameStyle?: CSSProperties;
   highlightFirstJob?: boolean;
 }): JSX.Element {
@@ -176,7 +183,11 @@ function PsChainBody({
             ['% Completion', (j: PsBlock['jobs'][number]) => (j.manualPay ? j.manualPay : pctLabel(j.percentCompletion))],
             ['- Labor + Wages', (j: PsBlock['jobs'][number]) => money(j.laborWages)],
             ['-Mileage', (j: PsBlock['jobs'][number]) => money(j.mileage)],
-            ['-½ Materials', (j: PsBlock['jobs'][number]) => money(j.halfMaterials)],
+            [
+              // Round 9 §32 — full-materials leads are charged all of it.
+              block.jobs.some((j) => j.fullMaterials) ? '- Materials' : '-½ Materials',
+              (j: PsBlock['jobs'][number]) => money(j.halfMaterials),
+            ],
           ] as [string, (j: PsBlock['jobs'][number]) => string][]
         ).map(([lab, pick]) => (
           <tr key={lab}>
@@ -234,6 +245,10 @@ function PsChainBody({
             ))}
           </tr>
         )}
+        {/* Round 9 §5 — spacer between Total Profit Share and Total. */}
+        <tr>
+          <td className="xcell" colSpan={1 + jobs.length} />
+        </tr>
         <tr className="font-semibold">
           {label('Total')}
           <td className="xcell text-right" colSpan={Math.max(jobs.length, 1)}>
@@ -309,6 +324,24 @@ function PsChainBody({
             </td>
           )}
         </tr>
+        {/* Round 9 §19/§23 — configured extra rows. */}
+        {block.extras.map((x) => (
+          <tr key={x.key}>
+            {label(x.label)}
+            <td
+              className={`xcell text-right ${x.kind === 'deduction' ? 'text-[#FF0000]' : x.kind === 'reimbursement' ? 'text-[#0070C0]' : ''}`}
+              colSpan={Math.max(jobs.length, 1)}
+            >
+              {editable && onEdit ? (
+                <NumCell value={x.amount} onCommit={(n) => onEdit(x.key, { amount: n })} />
+              ) : x.amount !== null ? (
+                money(x.amount)
+              ) : (
+                ''
+              )}
+            </td>
+          </tr>
+        ))}
         <tr className="font-bold">
           {label('Total Pay')}
           <td
@@ -319,14 +352,17 @@ function PsChainBody({
             ${money(block.totalPay)}
           </td>
         </tr>
+        {/* Round 9 §31 — hours pay + profit share for this crew lead. */}
         {showGrossWages && (
           <tr className="font-bold">
             {label('Total Gross Wages:')}
             <td className="xcell text-right" colSpan={Math.max(jobs.length, 1)}>
-              ${money(block.total + block.hourlyPay)}
+              ${money(block.totalGrossWages)}
             </td>
           </tr>
         )}
+        {hideBooksRows ? null : (
+        <>
         <tr>
           <td className="xcell" colSpan={1 + jobs.length} />
         </tr>
@@ -379,6 +415,8 @@ function PsChainBody({
             </td>
           ))}
         </tr>
+        </>
+        )}
       </tbody>
     </table>
   );
@@ -501,9 +539,50 @@ function HourlyReadOnly({
             )
           )}
         </tr>
+        {/* Round 9 §3 — the NOTES log states the hour split explicitly:
+            regular vs daily overtime vs weekly overtime, straight off the
+            timesheet's own pay items. */}
+        {notesLayout &&
+          hourSplitRows(block).map((row) => (
+            <tr key={row.label}>
+              <td className={`xcell ${bodyCls}`} />
+              <td className={`xcell text-[11px] italic text-neutral-600 ${bodyCls}`}>{row.label}</td>
+              <td className={`xcell text-center ${bodyCls}`}>{row.hours.toFixed(2)}</td>
+              <td className={`xcell ${bodyCls}`} />
+              <td className={`xcell text-center ${bodyCls}`}>{money(row.pay)}</td>
+              <td className={`xcell ${bodyCls}`} />
+              <td className={`xcell ${bodyCls}`} />
+            </tr>
+          ))}
       </tbody>
     </table>
   );
+}
+
+/**
+ * Round 9 §3 — regular / daily-OT / weekly-OT hour buckets for one block.
+ * Rows with no hours are omitted, so a straight-time week still reads as one
+ * line and only a week that actually has overtime grows extra rows.
+ */
+function hourSplitRows(block: HourlyBlock): { label: string; hours: number; pay: number }[] {
+  const buckets = [
+    { label: 'regular hrs', match: (l: HourlyBlock['lines'][number]) => !l.ot && !l.dailyOt },
+    { label: 'daily OT hrs (1.5×)', match: (l: HourlyBlock['lines'][number]) => l.dailyOt === true },
+    { label: 'overtime hrs (1.5×)', match: (l: HourlyBlock['lines'][number]) => l.ot && !l.dailyOt },
+  ];
+  const out: { label: string; hours: number; pay: number }[] = [];
+  for (const b of buckets) {
+    const lines = block.lines.filter(b.match);
+    const hours = lines.reduce((a, l) => a + l.hours, 0);
+    if (hours === 0) continue;
+    out.push({
+      label: b.label,
+      hours: Math.round(hours * 100) / 100,
+      pay: lines.reduce((a, l) => a + l.hours * l.rate, 0),
+    });
+  }
+  // A block with only regular hours needs no breakdown at all.
+  return out.length > 1 ? out : [];
 }
 
 function SalaryReadOnly({
@@ -522,6 +601,8 @@ function SalaryReadOnly({
           <th className="xcell text-left" style={headerStyle} colSpan={3}>
             {block.name}
             {block.timesheetHours > 0 && <span className="ml-1 font-normal">({block.timesheetHours}hrs)</span>}
+            {/* Round 9 §26/§33 — subcontractors in the salary sections. */}
+            {block.sub && <span className="ml-2 text-[10px] font-normal">(subcontractor)</span>}
           </th>
         </tr>
       </thead>
@@ -531,16 +612,47 @@ function SalaryReadOnly({
           <td className="xcell">{block.role}</td>
           <td className="xcell w-28 text-right">{money(block.amount)}</td>
         </tr>
-        <tr>
-          <td className="xcell">mileage reimb</td>
-          <td className="xcell text-right">{block.miles} mi</td>
-          <td className="xcell text-right">{money(block.mileageReimb)}</td>
-        </tr>
+        {/* Round 9 §28 — flat "Reimbursements" row instead of mileage reimb. */}
+        {block.reimbursementsLabel ? (
+          <tr>
+            <td className="xcell">{block.reimbursementsLabel}</td>
+            <td className="xcell" />
+            <td className="xcell text-right">{money(block.reimbursements)}</td>
+          </tr>
+        ) : (
+          <tr>
+            <td className="xcell">mileage reimb</td>
+            <td className="xcell text-right">{block.miles} mi</td>
+            <td className="xcell text-right">{money(block.mileageReimb)}</td>
+          </tr>
+        )}
+        {/* Round 9 §19/§23/§24/§29 — configured extra rows. */}
+        {block.extras.map((x) => (
+          <tr key={x.key}>
+            <td className="xcell">{x.label}</td>
+            <td className="xcell" />
+            <td className="xcell text-right">{x.amount !== null ? money(x.amount) : ''}</td>
+          </tr>
+        ))}
         <tr className="font-semibold">
           <td className="xcell">Total</td>
           <td className="xcell" />
-          <td className="xcell text-right">{money(block.amount + block.mileageReimb)}</td>
+          <td className="xcell text-right">{money(block.total)}</td>
         </tr>
+        {(block.taxes !== null || block.net !== null) && (
+          <>
+            <tr>
+              <td className="xcell">(-) taxes</td>
+              <td className="xcell" />
+              <td className="xcell text-right">{block.taxes !== null ? money(block.taxes) : ''}</td>
+            </tr>
+            <tr className="font-semibold">
+              <td className="xcell">net</td>
+              <td className="xcell" />
+              <td className="xcell text-right">{block.net !== null ? money(block.net) : ''}</td>
+            </tr>
+          </>
+        )}
       </tbody>
     </table>
   );
@@ -629,6 +741,7 @@ function PainterSequence({
   defaultPsPct,
   blankTaxes,
   showGrossWages,
+  hideBooksRows,
   notesMode,
   onEdit,
 }: {
@@ -637,6 +750,8 @@ function PainterSequence({
   defaultPsPct?: number;
   blankTaxes?: boolean;
   showGrossWages?: boolean;
+  /** Round 9 §30 — Final Payroll Breakdown only. */
+  hideBooksRows?: boolean;
   /** NOTES working log: materials table + T-SHEETS; no PS WO% band. */
   notesMode?: boolean;
   onEdit?: OnEdit;
@@ -673,6 +788,7 @@ function PainterSequence({
               defaultPsPct={defaultPsPct}
               onEdit={onEdit}
               showGrossWages={showGrossWages}
+              hideBooksRows={hideBooksRows}
             />
             {entry.block.tsheets && (
               <div className="mb-4 ml-4 max-w-3xl">
@@ -962,6 +1078,7 @@ export function FinalPayrollTab({
         defaultPsPct={defaultPsPct}
         blankTaxes
         showGrossWages
+        hideBooksRows
       />
     </div>
   );

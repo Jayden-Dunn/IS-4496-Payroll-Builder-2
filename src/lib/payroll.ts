@@ -6,6 +6,7 @@
 import { AP_RE, extractApKey, normalizeApInput } from './apkey';
 import { isPercentNumber, isPercentState, round2 } from './format';
 import { baseApKey } from './jobNames';
+import type { PayRateKind } from './payTypes';
 import type {
   ConditionalRateRule,
   CrewLeadResolution,
@@ -567,6 +568,8 @@ export interface LineRate {
   fromConditionalRule?: boolean;
   /** Round 8 §9.1 — the lead's own crew-lead rate on a profit-share job. */
   fromCrewLeadRate?: boolean;
+  /** Round 9 §18 — a per-painter pay-item rate (Commercial Hourly / Wages 2). */
+  fromPayItemRate?: 'commercialHourly' | 'wages2';
 }
 
 /** How a job-rate rule's AP# matches a timesheet/calendar apKey. */
@@ -620,10 +623,20 @@ export interface WageRateLike {
   rate: number;
   hourlyRate?: number;
   crewLeadRate?: number;
+  /** Round 9 §18 — per-painter `Commercial Hourly` rate. */
+  commercialHourlyRate?: number;
+  /** Round 9 §18 — per-painter `Wages 2` rate. */
+  wages2Rate?: number;
 }
 
-/** Which of the three Round 8 §9.1 rate slots supplied a generic rate. */
-export type RateKind = 'crewLead' | 'hourlyJob' | 'painter' | 'default';
+/** Which rate slot supplied a generic rate. */
+export type RateKind =
+  | 'crewLead'
+  | 'hourlyJob'
+  | 'painter'
+  | 'commercialHourly'
+  | 'wages2'
+  | 'default';
 
 /**
  * Round 8 §9.1 — the three-rate lookup, resolved PER LINE by job type:
@@ -643,13 +656,38 @@ export function resolveWageRate(
     hourlyJob: boolean;
     /** These are the crew lead's OWN timesheet hours. */
     isCrewLead?: boolean;
+    /**
+     * Round 9 §18 — the timesheet pay item's rate slot. `commercialHourly` and
+     * `wages2` are per-painter rates that outrank the hourly-job / crew-lead
+     * slots, because the pay item is what the painter actually clocked into.
+     */
+    payRateKind?: PayRateKind;
   },
 ): { rate: number; defaulted: boolean; kind: RateKind } {
   const entry = opts.wageRates.find(
     (e) => tokensSubset(e.name, employeeName) || tokensSubset(employeeName, e.name),
   );
   const defaulted = !entry;
-  if (opts.hourlyJob) {
+
+  // Round 9 §18 — a pay item with its own rate slot wins outright.
+  if (opts.payRateKind === 'commercialHourly') {
+    return {
+      rate: entry?.commercialHourlyRate ?? entry?.rate ?? opts.defaultWageRate,
+      defaulted,
+      kind: entry?.commercialHourlyRate !== undefined ? 'commercialHourly' : 'painter',
+    };
+  }
+  if (opts.payRateKind === 'wages2') {
+    return {
+      rate: entry?.wages2Rate ?? entry?.rate ?? opts.defaultWageRate,
+      defaulted,
+      kind: entry?.wages2Rate !== undefined ? 'wages2' : 'painter',
+    };
+  }
+  // Round 9 §13 — "Crew Lead - Hourly Wage" on the timesheet means these hours
+  // are crew-lead hours, whichever painter clocked them.
+  const isCrewLead = opts.payRateKind === 'crewLead' ? true : opts.isCrewLead;
+  if (opts.hourlyJob && !isCrewLead) {
     // No hourly-jobs rate on file falls through to the global default, NOT to
     // the person's profit-share rate — a piece-rate number would understate an
     // hourly job.
@@ -660,7 +698,7 @@ export function resolveWageRate(
       kind: hourly !== undefined ? 'hourlyJob' : 'default',
     };
   }
-  if (opts.isCrewLead) {
+  if (isCrewLead) {
     return {
       rate: entry?.crewLeadRate ?? opts.defaultCrewLeadRate ?? entry?.rate ?? opts.defaultWageRate,
       defaulted,
@@ -749,6 +787,8 @@ export function resolveLineRate(
     isCrewLead?: boolean;
     /** Crew-lead names resolved on this job (drives the conditional rules). */
     jobLeadNames?: readonly string[];
+    /** Round 9 §18 — rate slot selected by the timesheet pay item. */
+    payRateKind?: PayRateKind;
   },
 ): LineRate {
   const apKey = settings.apKey ?? extractApKey(jobText);
@@ -780,6 +820,7 @@ export function resolveLineRate(
       defaultCrewLeadRate: settings.defaultCrewLeadRate,
       hourlyJob,
       isCrewLead: settings.isCrewLead,
+      payRateKind: settings.payRateKind,
     });
     rate = info.rate;
     defaulted = info.defaulted;
@@ -800,6 +841,7 @@ export function resolveLineRate(
     ...(perJob ? { fromPerJobOverride: true, ...(ruleNote ? { ruleNote } : {}) } : {}),
     ...(conditional ? { fromConditionalRule: true, ...(ruleNote ? { ruleNote } : {}) } : {}),
     ...(kind === 'crewLead' ? { fromCrewLeadRate: true } : {}),
+    ...(kind === 'commercialHourly' || kind === 'wages2' ? { fromPayItemRate: kind } : {}),
   };
 }
 

@@ -6,6 +6,7 @@ import type {
   JobRateRule,
   LegendEntry,
   PainterRosterEntry,
+  PayrollLineItem,
   PerJobRateOverride,
   PlAccountMapping,
   ProfitShareEntry,
@@ -121,6 +122,27 @@ export const ROUND8_WAGE_SEEDS: WageRateEntry[] = [
   { name: 'Xavier Green', rate: 18, hourlyRate: 18 },
 ];
 
+/**
+ * Round 9 §12/§17/§18/§21/§22/§27/§35 — corrected and new per-painter rates.
+ * `rate` is the profit-share / work-order rate, `hourlyRate` the T&M rate,
+ * `commercialHourlyRate` and `wages2Rate` the two Round 9 §18 pay types.
+ * SEEDS ONLY — every one of them is editable in Settings.
+ */
+export const ROUND9_WAGE_SEEDS: WageRateEntry[] = [
+  // §22 — was $16/hr.
+  { name: 'Emily Trujillo', rate: 18, hourlyRate: 18 },
+  // §12 — was running at the $18 default.
+  { name: 'Marvin Ealey', rate: 25, hourlyRate: 25, commercialHourlyRate: 25 },
+  // §17 — $15 regular, profit-share jobs included.
+  { name: 'Rocio Sanchez', rate: 15, hourlyRate: 15 },
+  // §18 — Commercial Hourly painter, not a crew lead.
+  { name: 'Samuel Brewster', rate: 18, commercialHourlyRate: 30 },
+  // §27 — Utah; daily OT never applies (see DEFAULT_DAILY_OT_EXEMPT).
+  { name: 'Tyler Dunn', rate: 15, hourlyRate: 15 },
+  // §21/§35 — $25 on profit-share / work-order jobs, $18 on hourly jobs.
+  { name: 'Xavier Green', rate: 25, hourlyRate: 18 },
+];
+
 /** Name key for wage-map merges (case/whitespace-insensitive). */
 function wageKey(name: string): string {
   return name.trim().toLowerCase().replace(/\s+/g, ' ');
@@ -167,8 +189,8 @@ export function mergeWageRateSeeds(
 }
 
 export const DEFAULT_WAGE_RATES: WageRateEntry[] = mergeWageRateSeeds(
-  BASE_WAGE_RATES,
-  ROUND8_WAGE_SEEDS,
+  mergeWageRateSeeds(BASE_WAGE_RATES, ROUND8_WAGE_SEEDS),
+  ROUND9_WAGE_SEEDS,
 );
 
 export const DEFAULT_WAGE_RATE = 18;
@@ -176,27 +198,25 @@ export const DEFAULT_WAGE_RATE = 18;
 /** Round 8 §9.1 — fallback lead rate on own timesheet hours on PS jobs. */
 export const DEFAULT_CREW_LEAD_RATE = 18;
 
-/** Round 8 §9.1 — seeded conditional rate rules. */
-export const DEFAULT_CONDITIONAL_RATE_RULES: ConditionalRateRule[] = [
-  {
-    id: 'cond-henry-limay-flores-miguel-martin',
-    person: 'Henry Limay Flores',
-    condition: { kind: 'onSameJobAsLead', leadName: 'Miguel Martin' },
-    rate: 20,
-    note: '$20/hr on Miguel Martin jobs',
-  },
-];
+/**
+ * Round 8 §9.1 — seeded conditional rate rules.
+ *
+ * Round 9 §13 — the "Henry Limay Flores on Miguel Martin's job" rule is GONE:
+ * when the two work the same job, the crew lead is whoever the Pivot by Job
+ * `Crew Lead` column names, and the painter who clocked
+ * "Crew Lead - Hourly Wage" is the lead for that job. The rule MECHANISM stays
+ * available in Settings for genuinely negotiated cases.
+ */
+export const DEFAULT_CONDITIONAL_RATE_RULES: ConditionalRateRule[] = [];
 
-/** Round 8 §9.1 — seeded person + AP# rate overrides. */
-export const DEFAULT_PER_JOB_RATE_OVERRIDES: PerJobRateOverride[] = [
-  {
-    id: 'perjob-samuel-brewster-24097',
-    person: 'Samuel Brewster',
-    apKeyPattern: '24097',
-    rate: 30,
-    note: '$30/hr on AP24097',
-  },
-];
+/**
+ * Round 8 §9.1 — seeded person + AP# rate overrides.
+ *
+ * Round 9 §18 — Samuel Brewster's $30 is no longer pinned to AP24097: he is
+ * paid $30 wherever he clocks the "Commercial Hourly" pay type, which is what
+ * his timesheet actually says. The override MECHANISM is untouched.
+ */
+export const DEFAULT_PER_JOB_RATE_OVERRIDES: PerJobRateOverride[] = [];
 
 /** Round 8 §9.2 — daily-OT thresholds (logic lives in the payroll engine). */
 export const DEFAULT_NV_DAILY_OT_RATE_THRESHOLD = 18;
@@ -298,17 +318,107 @@ export const DEFAULT_PAINTER_ROSTER: PainterRosterEntry[] = [
 });
 
 export const DEFAULT_SALARIED: SalariedEntry[] = [
-  { name: 'Jodi Dunn', section: 'ADMIN', role: 'Manager Salary', amount: 865, entity: 'NV' },
+  // Round 9 §28 — Jodi's mileage row reads "Reimbursements" and is a flat cell.
+  {
+    name: 'Jodi Dunn',
+    section: 'ADMIN',
+    role: 'Manager Salary',
+    amount: 865,
+    entity: 'NV',
+    reimbursementsLabel: 'Reimbursements',
+  },
   { name: 'Jason Thompson', section: 'ESTIMATORS', role: 'Salary', amount: 1200, entity: 'NV' },
   { name: 'Paul Good', section: 'ESTIMATORS', role: 'Commissions', amount: 1600, entity: 'NV' },
   { name: 'Ryan Frey', section: 'ESTIMATORS', role: 'Commercial Estimator', amount: 1442, entity: 'NV' },
   { name: 'Terry Emry', section: 'ESTIMATORS', role: 'Commissions', amount: 1442, entity: 'NV' },
   { name: 'Xavier Cuellar', section: 'ESTIMATORS', role: 'Commercial Estimator', amount: 1200, entity: 'NV' },
+  // Round 9 §34 — Jeff Sherman is paid out of the Utah entity.
+  {
+    name: 'Jeff Sherman',
+    section: 'ESTIMATORS',
+    role: 'Commercial Estimator',
+    amount: 1400,
+    entity: 'UT',
+    taxes: 238.81,
+    net: 1161.19,
+  },
   { name: 'Charles Mike Holden', section: 'MANAGER SALARY', role: 'Manager Salary', amount: 2500, entity: 'NV' },
   { name: 'Maria Donofrio', section: 'MANAGER SALARY', role: 'Manager Salary', amount: 1650, entity: 'NV' },
   { name: 'Nathan Dunn', section: 'MANAGER SALARY', role: 'Manager Salary', amount: 1000, entity: 'NV' },
-  { name: 'Kristina Benson', section: 'MANAGER SALARY', role: 'Manager Salary', amount: 150, entity: 'NV' },
+  // Round 9 §25 — once a month, on the month's first pay date.
+  {
+    name: 'Paul Letourneau',
+    section: 'MANAGER SALARY',
+    role: 'Monthly',
+    amount: 1000,
+    entity: 'NV',
+    frequency: 'firstPayDateOfMonth',
+  },
+  // Round 9 §26/§33 — subcontractor; renders at the very bottom of the section.
+  {
+    name: 'Kristina Benson',
+    section: 'MANAGER SALARY',
+    role: 'Subcontractor',
+    amount: 150,
+    entity: 'NV',
+    sub: true,
+  },
 ];
+
+/**
+ * Round 9 §19/§23/§24/§29 — person-scoped extra rows on the Payroll Preview.
+ * `deduction` comes OUT of the person's total, `reimbursement` goes in, and
+ * `note` is a labeled blank line for the payroll clerk to fill in.
+ * SEED DATA — fully editable in Settings.
+ */
+export const DEFAULT_PAYROLL_LINE_ITEMS: PayrollLineItem[] = [
+  // §19 — labeled row, value intentionally blank.
+  { id: 'li-ted-frank-gas', person: 'Ted Frank', label: 'Gas Reimb', amount: null, kind: 'note', frequency: 'weekly' },
+  // §23 — weekly Aflac deductions.
+  { id: 'li-paul-good-aflac', person: 'Paul Good', label: 'Aflac', amount: 39.9, kind: 'deduction', frequency: 'weekly' },
+  {
+    id: 'li-mike-holden-aflac',
+    person: 'Charles Mike Holden',
+    label: 'Aflac',
+    amount: 80.26,
+    kind: 'deduction',
+    frequency: 'weekly',
+  },
+  // §24 — first pay date of the month only.
+  {
+    id: 'li-mike-holden-health',
+    person: 'Charles Mike Holden',
+    label: 'Health Insurance',
+    amount: 689.8,
+    kind: 'deduction',
+    frequency: 'firstPayDateOfMonth',
+  },
+  // §29/§34 — a blank "Reimbursements" row in addition to mileage reimb.
+  ...[
+    'Paul Good',
+    'Xavier Cuellar',
+    'Charles Mike Holden',
+    'Jeff Sherman',
+    'Jason Thompson',
+    'Ryan Frey',
+    'Terry Emry',
+  ].map(
+    (person): PayrollLineItem => ({
+      id: `li-${person.toLowerCase().replace(/\s+/g, '-')}-reimb`,
+      person,
+      label: 'Reimbursements',
+      amount: null,
+      kind: 'reimbursement',
+      frequency: 'weekly',
+    }),
+  ),
+];
+
+/** Round 9 §32 — leads charged for ALL of a job's materials, not half. */
+export const DEFAULT_FULL_MATERIALS_LEADS: string[] = ['Color Enterprises LLC'];
+
+/** Round 9 §27 — people the NV daily-overtime rule never applies to. */
+export const DEFAULT_DAILY_OT_EXEMPT: string[] = ['Tyler Dunn'];
 
 export const DEFAULT_MILEAGE_RATE = 0.625;
 
@@ -335,11 +445,23 @@ export const MIGRATION_RF_COLOR = 'r8-rf-color';
 export const MIGRATION_DB_PATTERN = 'r8-db-pattern';
 export const MIGRATION_WAGE_SEEDS = 'r8-wage-seeds';
 export const MIGRATION_CARLOS_HOURLY = 'r8-carlos-hourly-25';
+/** Round 9 — corrected wage rates + the new pay-type rates (§12/§17/§18/§21/§22/§35). */
+export const MIGRATION_R9_WAGES = 'r9-wage-seeds';
+/** Round 9 §19/§23/§24/§29 — seeded payroll line items. */
+export const MIGRATION_R9_LINE_ITEMS = 'r9-line-items';
+/** Round 9 §25/§26/§28/§34 — salaried roster additions and flags. */
+export const MIGRATION_R9_SALARIED = 'r9-salaried';
+/** Round 9 §13/§18 — retire the two person-specific rate seeds. */
+export const MIGRATION_R9_RATE_RULES = 'r9-retire-rate-seeds';
 export const ALL_MIGRATIONS: string[] = [
   MIGRATION_RF_COLOR,
   MIGRATION_DB_PATTERN,
   MIGRATION_WAGE_SEEDS,
   MIGRATION_CARLOS_HOURLY,
+  MIGRATION_R9_WAGES,
+  MIGRATION_R9_LINE_ITEMS,
+  MIGRATION_R9_SALARIED,
+  MIGRATION_R9_RATE_RULES,
 ];
 
 // v4: Round 3 payroll settings added. v3 legend/pivot values are migrated;
@@ -424,6 +546,9 @@ export function defaultSettings(): AppSettings {
     prevailingWagePatterns: [...DEFAULT_PREVAILING_PATTERNS],
     prevailingMinRate: DEFAULT_PREVAILING_MIN_RATE,
     jobRateRules: [],
+    payrollLineItems: DEFAULT_PAYROLL_LINE_ITEMS.map((e) => ({ ...e })),
+    fullMaterialsLeads: [...DEFAULT_FULL_MATERIALS_LEADS],
+    dailyOtExemptNames: [...DEFAULT_DAILY_OT_EXEMPT],
     // Fresh settings already carry every Round 8 seed.
     appliedMigrations: [...ALL_MIGRATIONS],
   };
@@ -492,7 +617,7 @@ function parsePayroll(raw: unknown): Partial<AppSettings> {
   if (Array.isArray(r.wageRates)) {
     const list: WageRateEntry[] = [];
     for (const e of r.wageRates) {
-      const x = e as { name?: unknown; rate?: unknown; hourlyRate?: unknown; crewLeadRate?: unknown };
+      const x = e as Record<string, unknown>;
       if (typeof x.name === 'string' && typeof x.rate === 'number' && Number.isFinite(x.rate)) {
         list.push({
           name: x.name,
@@ -500,6 +625,13 @@ function parsePayroll(raw: unknown): Partial<AppSettings> {
           ...(typeof x.hourlyRate === 'number' && Number.isFinite(x.hourlyRate) ? { hourlyRate: x.hourlyRate } : {}),
           ...(typeof x.crewLeadRate === 'number' && Number.isFinite(x.crewLeadRate)
             ? { crewLeadRate: x.crewLeadRate }
+            : {}),
+          // Round 9 §18 — the two new per-painter pay-type rates.
+          ...(typeof x.commercialHourlyRate === 'number' && Number.isFinite(x.commercialHourlyRate)
+            ? { commercialHourlyRate: x.commercialHourlyRate }
+            : {}),
+          ...(typeof x.wages2Rate === 'number' && Number.isFinite(x.wages2Rate)
+            ? { wages2Rate: x.wages2Rate }
             : {}),
         });
       }
@@ -572,7 +704,7 @@ function parsePayroll(raw: unknown): Partial<AppSettings> {
   if (Array.isArray(r.salariedRoster)) {
     const list: SalariedEntry[] = [];
     for (const e of r.salariedRoster) {
-      const x = e as { name?: unknown; section?: unknown; role?: unknown; amount?: unknown; entity?: unknown };
+      const x = e as Record<string, unknown>;
       if (
         typeof x.name === 'string' &&
         (x.section === 'ADMIN' || x.section === 'ESTIMATORS' || x.section === 'MANAGER SALARY') &&
@@ -586,6 +718,14 @@ function parsePayroll(raw: unknown): Partial<AppSettings> {
           amount: x.amount,
           // Round 8 §7.3 — pre-Round-8 rows have no entity; they are NV.
           entity: x.entity === 'UT' ? 'UT' : 'NV',
+          // Round 9 §25/§26/§28/§34.
+          ...(x.frequency === 'firstPayDateOfMonth' ? { frequency: 'firstPayDateOfMonth' as const } : {}),
+          ...(x.sub === true ? { sub: true } : {}),
+          ...(typeof x.reimbursementsLabel === 'string' && x.reimbursementsLabel.trim() !== ''
+            ? { reimbursementsLabel: x.reimbursementsLabel }
+            : {}),
+          ...(typeof x.taxes === 'number' && Number.isFinite(x.taxes) ? { taxes: x.taxes } : {}),
+          ...(typeof x.net === 'number' && Number.isFinite(x.net) ? { net: x.net } : {}),
         });
       }
     }
@@ -624,6 +764,34 @@ function parsePayroll(raw: unknown): Partial<AppSettings> {
       });
     }
     out.jobRateRules = rules;
+  }
+  if (Array.isArray(r.payrollLineItems)) {
+    const list: PayrollLineItem[] = [];
+    for (const e of r.payrollLineItems) {
+      if (typeof e !== 'object' || e === null) continue;
+      const x = e as Record<string, unknown>;
+      if (typeof x.person !== 'string' || typeof x.label !== 'string') continue;
+      const kind = x.kind === 'deduction' || x.kind === 'reimbursement' ? x.kind : 'note';
+      list.push({
+        id: typeof x.id === 'string' && x.id ? x.id : `li-${list.length}`,
+        person: x.person,
+        label: x.label,
+        amount: typeof x.amount === 'number' && Number.isFinite(x.amount) ? x.amount : null,
+        kind,
+        frequency: x.frequency === 'firstPayDateOfMonth' ? 'firstPayDateOfMonth' : 'weekly',
+      });
+    }
+    out.payrollLineItems = list;
+  }
+  if (Array.isArray(r.fullMaterialsLeads)) {
+    out.fullMaterialsLeads = r.fullMaterialsLeads.filter(
+      (n): n is string => typeof n === 'string' && n.trim() !== '',
+    );
+  }
+  if (Array.isArray(r.dailyOtExemptNames)) {
+    out.dailyOtExemptNames = r.dailyOtExemptNames.filter(
+      (n): n is string => typeof n === 'string' && n.trim() !== '',
+    );
   }
   if (Array.isArray(r.appliedMigrations)) {
     out.appliedMigrations = r.appliedMigrations.filter((s): s is string => typeof s === 'string');
@@ -725,6 +893,74 @@ export function applySettingsMigrations(settings: AppSettings): AppSettings {
           : DEFAULT_PER_JOB_RATE_OVERRIDES.map((r) => ({ ...r })),
     });
     done.add(MIGRATION_WAGE_SEEDS);
+  }
+
+  // Round 9 §12/§17/§18/§21/§22/§35 — corrected rates WIN over stored values,
+  // because they are corrections to numbers the app had wrong.
+  if (!done.has(MIGRATION_R9_WAGES)) {
+    patch({ wageRates: mergeWageRateSeeds(next.wageRates, ROUND9_WAGE_SEEDS, 'seedWins') });
+    done.add(MIGRATION_R9_WAGES);
+  }
+
+  // Round 9 §19/§23/§24/§29 — add the seeded line items that are missing by id.
+  if (!done.has(MIGRATION_R9_LINE_ITEMS)) {
+    const have = new Set((next.payrollLineItems ?? []).map((i) => i.id));
+    patch({
+      payrollLineItems: [
+        ...(next.payrollLineItems ?? []),
+        ...DEFAULT_PAYROLL_LINE_ITEMS.filter((i) => !have.has(i.id)).map((i) => ({ ...i })),
+      ],
+      fullMaterialsLeads:
+        next.fullMaterialsLeads && next.fullMaterialsLeads.length > 0
+          ? next.fullMaterialsLeads
+          : [...DEFAULT_FULL_MATERIALS_LEADS],
+      dailyOtExemptNames:
+        next.dailyOtExemptNames && next.dailyOtExemptNames.length > 0
+          ? next.dailyOtExemptNames
+          : [...DEFAULT_DAILY_OT_EXEMPT],
+    });
+    done.add(MIGRATION_R9_LINE_ITEMS);
+  }
+
+  // Round 9 §25/§26/§28/§34 — salaried additions + flags, matched by name.
+  if (!done.has(MIGRATION_R9_SALARIED)) {
+    const key = (n: string): string => n.trim().toLowerCase().replace(/\s+/g, ' ');
+    const bySeed = new Map(DEFAULT_SALARIED.map((e) => [key(e.name), e]));
+    const patched = next.salariedRoster.map((row) => {
+      const seed = bySeed.get(key(row.name));
+      if (!seed) return row;
+      return {
+        ...row,
+        ...(seed.frequency ? { frequency: seed.frequency } : {}),
+        ...(seed.sub ? { sub: true } : {}),
+        ...(seed.reimbursementsLabel ? { reimbursementsLabel: seed.reimbursementsLabel } : {}),
+        ...(seed.taxes !== undefined ? { taxes: seed.taxes } : {}),
+        ...(seed.net !== undefined ? { net: seed.net } : {}),
+        ...(seed.entity ? { entity: seed.entity } : {}),
+      };
+    });
+    const haveNames = new Set(patched.map((e) => key(e.name)));
+    patch({
+      salariedRoster: [
+        ...patched,
+        ...DEFAULT_SALARIED.filter((e) => !haveNames.has(key(e.name))).map((e) => ({ ...e })),
+      ],
+    });
+    done.add(MIGRATION_R9_SALARIED);
+  }
+
+  // Round 9 §13/§18 — retire the two person-specific rate seeds (the rules
+  // themselves stay available; only these seeded rows go).
+  if (!done.has(MIGRATION_R9_RATE_RULES)) {
+    patch({
+      conditionalRateRules: next.conditionalRateRules.filter(
+        (r) => r.id !== 'cond-henry-limay-flores-miguel-martin',
+      ),
+      perJobRateOverrides: next.perJobRateOverrides.filter(
+        (r) => r.id !== 'perjob-samuel-brewster-24097',
+      ),
+    });
+    done.add(MIGRATION_R9_RATE_RULES);
   }
 
   if (!done.has(MIGRATION_CARLOS_HOURLY)) {

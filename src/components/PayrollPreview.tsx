@@ -1,6 +1,13 @@
 import type { CSSProperties } from 'react';
 import { fmtAccounting, isDarkColor, parseMoneyInput, parsePercentInput } from '../lib/format';
-import type { HourlyBlock, PayrollEdit, PayrollPreviewModel, PsBlock, SalaryBlock } from '../lib/types';
+import type {
+  HourlyBlock,
+  PayrollEdit,
+  PayrollExtraLine,
+  PayrollPreviewModel,
+  PsBlock,
+  SalaryBlock,
+} from '../lib/types';
 import { CellInput } from './CellInput';
 
 interface PayrollPreviewProps {
@@ -48,6 +55,47 @@ function NumCell({
         }
       }}
     />
+  );
+}
+
+/**
+ * Round 9 §19/§23/§24/§29 — one configured extra row (Gas Reimb, Aflac,
+ * Health Insurance, Reimbursements). The amount is always editable; a blank
+ * default stays blank until someone types in it.
+ */
+function ExtraRow({
+  extra,
+  span = 1,
+  onEdit,
+}: {
+  extra: PayrollExtraLine;
+  span?: number;
+  onEdit: PayrollPreviewProps['onEdit'];
+}): JSX.Element {
+  const color =
+    extra.kind === 'deduction' ? 'text-[#FF0000]' : extra.kind === 'reimbursement' ? 'text-[#0070C0]' : '';
+  return (
+    <tr>
+      <td
+        className="xcell w-44 font-medium"
+        title={
+          extra.kind === 'deduction'
+            ? 'Entered as a positive amount and subtracted from the total'
+            : extra.kind === 'reimbursement'
+              ? 'Added to the total'
+              : 'Informational row — not part of the total'
+        }
+      >
+        {extra.label}
+      </td>
+      <td className={`xcell text-right ${color}`} colSpan={Math.max(1, span)}>
+        <NumCell
+          value={extra.amount}
+          onCommit={(n) => onEdit(extra.key, { amount: n })}
+          className={color}
+        />
+      </td>
+    </tr>
   );
 }
 
@@ -177,6 +225,37 @@ function HourlyBlockView({
             <NumCell value={block.net} onCommit={(n) => onEdit(`hb:${block.key}`, { net: n })} className="text-center" />
           </td>
         </tr>
+        {/* Round 9 §19/§23 — extra rows (Gas Reimb, Aflac, …) under the totals. */}
+        {block.extras.map((x) => (
+          <tr key={x.key}>
+            <td className="xcell font-medium" colSpan={2}>
+              {x.label}
+            </td>
+            <td className="xcell" />
+            <td className="xcell" />
+            <td
+              className={`xcell text-center ${x.kind === 'deduction' ? 'text-[#FF0000]' : x.kind === 'reimbursement' ? 'text-[#0070C0]' : ''}`}
+            >
+              <NumCell value={x.amount} onCommit={(n) => onEdit(x.key, { amount: n })} className="text-center" />
+            </td>
+            <td className="xcell" />
+            <td className="xcell" />
+            <td className="xcell" />
+          </tr>
+        ))}
+        {block.extras.some((x) => x.kind !== 'note') && (
+          <tr className="font-bold">
+            <td className="xcell" colSpan={2}>
+              Total Pay
+            </td>
+            <td className="xcell" />
+            <td className="xcell" />
+            <td className="xcell text-center">{fmtAccounting(block.netPay)}</td>
+            <td className="xcell" />
+            <td className="xcell" />
+            <td className="xcell" />
+          </tr>
+        )}
       </tbody>
     </table>
   );
@@ -206,9 +285,17 @@ function PsBlockView({ block, onEdit }: { block: PsBlock; onEdit: PayrollPreview
             {block.displayName}
             {block.sub && <span className="ml-2 rounded bg-blue-100 px-1 text-[10px] font-normal text-blue-700">sub</span>}
           </th>
+          {/* Round 9 §14 — the crew %'s on the band are editable here, like
+              every other value cell. They default to the Pivot by Job WO%
+              column (§15) and fall back to the Settings crew map. */}
           {block.jobs.map((j) => (
             <th key={j.jobRowId} className="xcell min-w-[130px] text-right" style={TAN}>
-              {j.woPct !== null ? `${Math.round(j.woPct * 100)}%` : '-'}
+              <NumCell
+                pct
+                value={j.woPct}
+                placeholder="-"
+                onCommit={(n) => onEdit(psKey(j.jobRowId), { woPct: n })}
+              />
             </th>
           ))}
           {Array.from({ length: Math.max(0, 7 - block.jobs.length) }, (_, i) => (
@@ -284,8 +371,10 @@ function PsBlockView({ block, onEdit }: { block: PsBlock; onEdit: PayrollPreview
           ))}
         </tr>
         {/* §5.6 — thin line between -½ Materials and Total Profit Share. */}
+        {/* Round 9 §32 — a lead responsible for ALL of a job's materials is
+            charged the full amount, and the row says so. */}
         <tr className="border-b border-b-neutral-500">
-          {label('-½ Materials')}
+          {label(block.jobs.some((j) => j.fullMaterials) ? '- Materials' : '-½ Materials')}
           {block.jobs.map((j) => (
             <td key={j.jobRowId} className="xcell text-right">
               <NumCell value={j.halfMaterials} onCommit={(n) => onEdit(psKey(j.jobRowId), { halfMaterials: n ?? 0 })} />
@@ -320,6 +409,10 @@ function PsBlockView({ block, onEdit }: { block: PsBlock; onEdit: PayrollPreview
             ))}
           </tr>
         )}
+        {/* Round 9 §5 — spacer row between Total Profit Share and Total. */}
+        <tr>
+          <td className="xcell" colSpan={1 + block.jobs.length} />
+        </tr>
         <SummaryRow label="Total" value={fmtAccounting(block.total)} />
         <tr>
           {label('Mileage - New')}
@@ -363,6 +456,11 @@ function PsBlockView({ block, onEdit }: { block: PsBlock; onEdit: PayrollPreview
             </td>
           )}
         </tr>
+        {/* Round 9 §19/§23 — person-scoped extra rows; deductions come out of
+            Total Pay, reimbursements go in, notes are labeled blank cells. */}
+        {block.extras.map((x) => (
+          <ExtraRow key={x.key} extra={x} span={block.jobs.length} onEdit={onEdit} />
+        ))}
         <SummaryRow label="Total Pay" value={`$${fmtAccounting(block.totalPay)}`} span={block.jobs.length} bold />
         <tr>
           <td className="xcell" colSpan={1 + block.jobs.length} />
@@ -457,6 +555,10 @@ function SalaryBlockView({
           <th className="xcell text-left" style={headerStyle} colSpan={3}>
             {block.name}
             {block.timesheetHours > 0 && <span className="ml-1 font-normal">({block.timesheetHours}hrs)</span>}
+            {/* Round 9 §26 — Kristina Benson & co. are subcontractors. */}
+            {block.sub && (
+              <span className="ml-2 rounded bg-blue-100 px-1 text-[10px] font-normal text-blue-700">sub</span>
+            )}
           </th>
         </tr>
       </thead>
@@ -466,18 +568,69 @@ function SalaryBlockView({
           <td className="xcell">{block.role}</td>
           <td className="xcell w-28 text-right">{fmtAccounting(block.amount)}</td>
         </tr>
-        <tr>
-          <td className="xcell">mileage reimb ({mileageRate.toFixed(3)}/mi)</td>
-          <td className="xcell text-right">
-            <NumCell value={block.miles} onCommit={(n) => onEdit(block.key, { miles: n ?? 0 })} />
-          </td>
-          <td className="xcell text-right">{fmtAccounting(block.mileageReimb)}</td>
-        </tr>
+        {/* Round 9 §28 — a person with a reimbursements label gets a flat
+            editable row here instead of the miles × rate mileage row. */}
+        {block.reimbursementsLabel ? (
+          <tr>
+            <td className="xcell">{block.reimbursementsLabel}</td>
+            <td className="xcell" />
+            <td className="xcell text-right text-[#0070C0]">
+              <NumCell
+                value={block.reimbursements}
+                onCommit={(n) => onEdit(block.key, { reimbursements: n ?? 0 })}
+                className="text-[#0070C0]"
+              />
+            </td>
+          </tr>
+        ) : (
+          <tr>
+            <td className="xcell">mileage reimb ({mileageRate.toFixed(3)}/mi)</td>
+            <td className="xcell text-right">
+              <NumCell value={block.miles} onCommit={(n) => onEdit(block.key, { miles: n ?? 0 })} />
+            </td>
+            <td className="xcell text-right">{fmtAccounting(block.mileageReimb)}</td>
+          </tr>
+        )}
+        {/* Round 9 §19/§23/§24/§29 — Aflac, Health Insurance, Reimbursements… */}
+        {block.extras.map((x) => (
+          <tr key={x.key}>
+            <td className="xcell">{x.label}</td>
+            <td className="xcell" />
+            <td
+              className={`xcell text-right ${x.kind === 'deduction' ? 'text-[#FF0000]' : x.kind === 'reimbursement' ? 'text-[#0070C0]' : ''}`}
+            >
+              <NumCell
+                value={x.amount}
+                onCommit={(n) => onEdit(x.key, { amount: n })}
+                className={x.kind === 'deduction' ? 'text-[#FF0000]' : x.kind === 'reimbursement' ? 'text-[#0070C0]' : ''}
+              />
+            </td>
+          </tr>
+        ))}
         <tr className="font-semibold">
           <td className="xcell">Total</td>
           <td className="xcell" />
-          <td className="xcell text-right">{fmtAccounting(block.amount + block.mileageReimb)}</td>
+          <td className="xcell text-right">{fmtAccounting(block.total)}</td>
         </tr>
+        {/* Round 9 §34 — pre-filled taxes / net when the roster carries them. */}
+        {(block.taxes !== null || block.net !== null) && (
+          <>
+            <tr>
+              <td className="xcell">(-) taxes</td>
+              <td className="xcell" />
+              <td className="xcell text-right">
+                <NumCell value={block.taxes} onCommit={(n) => onEdit(block.key, { taxes: n })} />
+              </td>
+            </tr>
+            <tr className="font-semibold">
+              <td className="xcell">net</td>
+              <td className="xcell" />
+              <td className="xcell text-right">
+                <NumCell value={block.net} onCommit={(n) => onEdit(block.key, { net: n })} />
+              </td>
+            </tr>
+          </>
+        )}
       </tbody>
     </table>
   );

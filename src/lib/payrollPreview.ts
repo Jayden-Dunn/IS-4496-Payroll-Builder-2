@@ -35,6 +35,7 @@ import {
   type LineRate,
   type OtJobHours,
 } from './payroll';
+import { classifyPayItem, payItemTag, type PayRateKind } from './payTypes';
 import { isHourlyJob, fmtMonthDay } from './pivotByJob';
 import type {
   AppSettings,
@@ -49,6 +50,7 @@ import type {
   NewLeadDefault,
   PainterSectionEntry,
   PayrollEditsMap,
+  PayrollExtraLine,
   PayrollPreviewModel,
   PercentValue,
   PivotByJobModel,
@@ -328,6 +330,24 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
   }
 
   // ----- per (employee, job) QB-adjusted hours ------------------------------
+  /**
+   * Round 9 §16/§18 — one bucket of an employee's hours on a job that share a
+   * timesheet pay item. QuickBooks Time already splits overtime onto its own
+   * rows ("Overtime Pay", "Crew Lead - Hourly Wage Overtime", "Daily
+   * Overtime"), so a segment IS the payroll line: hours, the rate slot the pay
+   * item selects, and whether those hours are overtime.
+   */
+  interface EmpJobSeg {
+    /** Line-id suffix; '' for plain straight-time Regular Pay. */
+    key: string;
+    payItem: string;
+    rateKind: PayRateKind;
+    overtime: boolean;
+    otReason: 'weekly' | 'daily' | null;
+    hours: number;
+    firstIndex: number;
+  }
+
   interface EmpJob {
     jobId: string;
     apKey: string | null;
@@ -348,6 +368,8 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     leadNames: string[];
     /** Pivot by Job Notes for this AP#. */
     notes: string;
+    /** Round 9 §16 — per-pay-item hour buckets, in first-encounter order. */
+    segments: EmpJobSeg[];
   }
   /** Round 8 §9.2 — one (job, day) bucket of an employee's hours. */
   interface EmpDayRow {
@@ -365,6 +387,33 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
   for (const r of reportRows) {
     if (r.included && r.apKey && !eventByApKey.has(r.apKey)) eventByApKey.set(r.apKey, r);
   }
+
+  /** Round 9 §16 — line-id suffix + label tag for a classified pay item. */
+  const segKeyFor = (cls: ReturnType<typeof classifyPayItem>): string => {
+    if (cls.kind === 'overtime') {
+      if (cls.reason === 'daily') return ':DOT';
+      return cls.rate === 'crewLead' ? ':CLOT' : ':OT';
+    }
+    switch (cls.rate) {
+      case 'crewLead':
+        return ':CL';
+      case 'commercialHourly':
+        return ':CH';
+      case 'wages2':
+        return ':W2';
+      case 'salary':
+        return ':SAL';
+      default:
+        return '';
+    }
+  };
+
+  /**
+   * Round 9 §13 — who clocked CREW-LEAD hours on which job. When two leads
+   * work the same job, the one on "Crew Lead - Hourly Wage" is the lead for
+   * that job; the other is paid their own regular rate.
+   */
+  const crewLeadUsersByJob = new Map<string, Set<string>>();
 
   entityRows.forEach((r, idx) => {
     if (r.hours === 0) return;
@@ -416,10 +465,39 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
                   ? leadNamesFromDisplay(nvRow.crewLead)
                   : [],
         notes: pbjJob?.analysis.notes || utRow?.notes || nvRow?.notes || '',
+        segments: [],
       };
       list.push(j);
     }
     j.hours += r.hours;
+
+    // Round 9 §16 — bucket by pay item so the timesheet's own overtime rows
+    // stay separate lines at their own rate.
+    const cls = classifyPayItem(r.payrollItem);
+    const segKey = segKeyFor(cls);
+    let seg = j.segments.find((x) => x.key === segKey);
+    if (!seg) {
+      seg = {
+        key: segKey,
+        payItem: r.payrollItem.trim(),
+        rateKind: cls.rate,
+        overtime: cls.kind === 'overtime',
+        otReason: cls.kind === 'overtime' ? cls.reason : null,
+        hours: 0,
+        firstIndex: idx,
+      };
+      j.segments.push(seg);
+    }
+    seg.hours += r.hours;
+    if (cls.rate === 'crewLead') {
+      let set = crewLeadUsersByJob.get(jobId);
+      if (!set) {
+        set = new Set<string>();
+        crewLeadUsersByJob.set(jobId, set);
+      }
+      set.add(username);
+    }
+
     const t = r.localDate ? r.localDate.getTime() : -Infinity;
     const bt = j.lastDate ? j.lastDate.getTime() : -Infinity;
     if (t > bt || (t === bt && idx > j.lastRowIndex)) {
@@ -445,7 +523,8 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
   });
 
   // Apply QB Hrs overrides (§3.3): keyed `${jobRowId}\u0000${username}`.
-  // The day buckets are scaled with them so daily OT reflects the same hours.
+  // The day buckets and pay-item segments are scaled with them, so both daily
+  // OT and the timesheet's own overtime lines reflect the same hours.
   for (const [username, jobs] of empJobs) {
     for (const j of jobs) {
       const o = qbHours[`${j.jobId}\u0000${username}`];
@@ -456,6 +535,12 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
         for (const d of dayRows) d.hours = round2((d.hours / raw) * o);
       } else if (dayRows.length > 0) {
         dayRows[dayRows.length - 1].hours = o;
+      }
+      const segRaw = j.segments.reduce((a, seg) => a + seg.hours, 0);
+      if (segRaw > 0) {
+        for (const seg of j.segments) seg.hours = round2((seg.hours / segRaw) * o);
+      } else if (j.segments.length > 0) {
+        j.segments[j.segments.length - 1].hours = o;
       }
       j.hours = o;
     }
@@ -550,6 +635,24 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     if (seenCrewOwners.has(ownerKey)) continue;
     seenCrewOwners.add(ownerKey);
     const match = [...emps.values()].find((e) => nameMatches(e.fullName, owner));
+    // Round 9 §18 — owning a crew label is NOT by itself proof of crew-lead
+    // work: Samuel Brewster's whole week is "Commercial Hourly", so he is an
+    // hourly painter, not a profit-share lead. Promote a crew owner only when
+    // the timesheet shows crew-lead pay-item hours, the Pivot by Job Crew Lead
+    // column names them, or Settings lists them as a profit-share lead.
+    const ownerUser = match?.username ?? null;
+    const clockedCrewLead =
+      ownerUser !== null &&
+      [...crewLeadUsersByJob.values()].some((set) => set.has(ownerUser));
+    const namedOnPivot = pieceRateJobs.some((pj) => {
+      const res = pj.job.analysis.crewLeadResolution;
+      const names = res && res.names.length > 0 ? res.names : pj.job.analysis.crewLead ? [pj.job.analysis.crewLead] : [];
+      return names.some((n) => nameMatches(n, match?.fullName ?? owner));
+    });
+    const inProfitShareMap = settings.profitShare.some((pentry) =>
+      nameMatches(pentry.lead, match?.fullName ?? owner),
+    );
+    if (!clockedCrewLead && !namedOnPivot && !inProfitShareMap) continue;
     addLeadName(match?.fullName ?? owner);
   }
   // Optional boost: Settings profitShare leads with hours this week.
@@ -576,77 +679,179 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       (s) => tokensSubset(s.name, fullName) || tokensSubset(fullName, s.name),
     );
 
+  // ----- Round 9 §19/§23/§24/§29 — person-scoped extra rows ------------------
+  /** True when the pay date is the FIRST pay date of its month (1st–7th). */
+  const isFirstPayDateOfMonth = payDate !== null && payDate.getDate() <= 7;
+
+  /** The extra rows configured for one person, resolved for this pay date. */
+  const extrasFor = (fullName: string, blockKey: string): PayrollExtraLine[] => {
+    const out: PayrollExtraLine[] = [];
+    for (const item of settings.payrollLineItems ?? []) {
+      if (!(tokensSubset(item.person, fullName) || tokensSubset(fullName, item.person))) continue;
+      if (item.frequency === 'firstPayDateOfMonth' && !isFirstPayDateOfMonth) continue;
+      const key = `xl:${blockKey}:${item.id}`;
+      const e = edits[key] ?? {};
+      out.push({
+        key,
+        label: item.label,
+        amount: e.amount !== undefined ? e.amount : item.amount,
+        kind: item.kind,
+      });
+    }
+    return out;
+  };
+
+  /** Reimbursements − deductions across a block's extra rows. */
+  const extrasNet = (extras: readonly PayrollExtraLine[]): number =>
+    extras.reduce((acc, x) => {
+      if (x.amount === null) return acc;
+      if (x.kind === 'reimbursement') return acc + x.amount;
+      if (x.kind === 'deduction') return acc - x.amount;
+      return acc;
+    }, 0);
+
+  /**
+   * Round 9 §1 — labor dollars per AP#, computed from the TIMESHEET: every
+   * painter's hours on the job at their resolved line rate (overtime lines at
+   * 1.5×). This is what the crew lead's "- Labor + Wages" row is charged, and
+   * it comes from the timesheets tab of this side's input, never from the P&L.
+   */
+  const timesheetLaborByAp = new Map<string, number>();
+  {
+    const empByUsername = new Map([...emps.values()].map((e) => [e.username, e] as const));
+    for (const [username, jobs] of empJobs) {
+      const emp = empByUsername.get(username);
+      if (!emp) continue;
+      const empIsLead = isLead(emp.fullName);
+      for (const j of jobs) {
+        if (!j.apKey || j.apKey === 'OFFICE') continue;
+        const leadUsers = crewLeadUsersByJob.get(j.jobId);
+        const someoneElseLeads =
+          leadUsers !== undefined && leadUsers.size > 0 && !leadUsers.has(username);
+        const segs = j.segments.length > 0
+          ? j.segments
+          : [{ key: '', payItem: '', rateKind: 'regular' as PayRateKind, overtime: false, otReason: null, hours: j.hours, firstIndex: j.firstIndex }];
+        let acc = 0;
+        for (const sg of segs) {
+          const info = resolveLineRate(emp.fullName, j.jobText, j.hourly, {
+            ...settings,
+            apKey: j.apKey,
+            jobRateRules: settings.jobRateRules,
+            forceNonDb: j.forceNonDb,
+            isCrewLead: sg.rateKind === 'crewLead' ? true : someoneElseLeads ? false : empIsLead,
+            jobLeadNames: j.leadNames,
+            payRateKind: sg.rateKind,
+          });
+          acc += sg.hours * (sg.overtime ? info.rate * 1.5 : info.rate);
+        }
+        timesheetLaborByAp.set(j.apKey, round2((timesheetLaborByAp.get(j.apKey) ?? 0) + acc));
+      }
+    }
+  }
+
   // ----- hourly block construction ------------------------------------------
   const dailyOtNotes: DailyOtNote[] = [];
+
+  /** Round 9 §27 — people the NV daily-OT rule never applies to. */
+  const dailyOtExempt = (fullName: string): boolean =>
+    (settings.dailyOtExemptNames ?? []).some(
+      (n) => tokensSubset(n, fullName) || tokensSubset(fullName, n),
+    );
 
   const buildHourlyBlock = (emp: Emp, officeStyle: boolean, isLead = false): HourlyBlock => {
     const jobs = empJobs.get(emp.username) ?? [];
 
-    // Round 8 §9.1/§9.2 — every job's rate is resolved up front: daily-OT
-    // eligibility is "resolved line rate under the threshold".
-    const rateByJob = new Map<string, LineRate>();
-    for (const j of jobs) {
-      rateByJob.set(
-        j.jobId,
-        resolveLineRate(emp.fullName, j.jobText, j.hourly, {
-          ...settings,
-          apKey: j.apKey,
-          jobRateRules: settings.jobRateRules,
-          forceNonDb: j.forceNonDb,
-          isCrewLead: isLead,
-          jobLeadNames: j.leadNames,
-        }),
-      );
-    }
-    const effectiveRate = (jobId: string): number => {
-      const e = edits[`hl:${emp.username}\u0000${jobId}`] ?? {};
-      if (e.rate !== undefined) return e.rate;
-      return rateByJob.get(jobId)?.rate ?? settings.defaultWageRate;
+    /**
+     * Round 9 §13/§18 — the rate is resolved PER SEGMENT, because the
+     * timesheet pay item decides which rate slot the hours are paid from
+     * (Regular Pay / Crew Lead - Hourly Wage / Commercial Hourly / Wages 2).
+     * `isCrewLead` still applies when the pay item itself is not crew-lead
+     * but this IS the lead's own block and no one else on the job clocked
+     * crew-lead hours.
+     */
+    const rateFor = (j: EmpJob, seg: EmpJobSeg | null): LineRate => {
+      const payRateKind: PayRateKind = seg?.rateKind ?? 'regular';
+      // §13 — when someone else on this job clocked "Crew Lead - Hourly Wage"
+      // and this person did not, this person is NOT the lead on that job.
+      const leadUsers = crewLeadUsersByJob.get(j.jobId);
+      const someoneElseLeads =
+        leadUsers !== undefined && leadUsers.size > 0 && !leadUsers.has(emp.username);
+      const isCrewLeadHere =
+        payRateKind === 'crewLead' ? true : someoneElseLeads ? false : isLead;
+      return resolveLineRate(emp.fullName, j.jobText, j.hourly, {
+        ...settings,
+        apKey: j.apKey,
+        jobRateRules: settings.jobRateRules,
+        forceNonDb: j.forceNonDb,
+        isCrewLead: isCrewLeadHere,
+        jobLeadNames: j.leadNames,
+        payRateKind,
+      });
     };
 
-    // Round 8 §9.2 — NV daily OT first, so the weekly >40 rule can exclude the
-    // hours it already paid at 1.5×.
-    const daily = splitDailyOvertime(
-      (empDayRows.get(emp.username) ?? []).map((d) => ({
-        jobId: d.jobId,
-        date: d.date,
-        hours: d.hours,
-        rowIndex: d.rowIndex,
-        eligible: d.nv && effectiveRate(d.jobId) < settings.nvDailyOtRateThreshold,
-      })),
-      settings.dailyOtHoursThreshold,
-    );
+    /** Straight-time rate on a job — what daily-OT eligibility is measured on. */
+    const straightRate = (jobId: string): number => {
+      const j = jobs.find((x) => x.jobId === jobId);
+      if (!j) return settings.defaultWageRate;
+      const seg = j.segments.find((sg) => !sg.overtime) ?? null;
+      const e = edits[`hl:${emp.username}\u0000${jobId}${seg?.key ?? ''}`] ?? {};
+      if (e.rate !== undefined) return e.rate;
+      return rateFor(j, seg).rate;
+    };
 
-    // §3.4 weekly overtime on the QB-adjusted hours.
-    const ot = splitOvertime(
-      jobs.map(
-        (j): OtJobHours => ({ jobId: j.jobId, hours: j.hours, lastDate: j.lastDate, lastRowIndex: j.lastRowIndex }),
-      ),
-      { dailyOtHours: daily.totalOtHours },
-    );
+    // Round 9 §16 — the timesheet's own overtime rows are authoritative. Only
+    // when the week carries NONE do the computed >8/day and >40/week rules run,
+    // so a QuickBooks file without OT items still splits overtime correctly.
+    const hasTimesheetOt = jobs.some((j) => j.segments.some((sg) => sg.overtime));
+
+    const daily = hasTimesheetOt
+      ? { otByJob: new Map<string, number>(), segments: [] as DailyOtSegment[], totalOtHours: 0 }
+      : splitDailyOvertime(
+          (empDayRows.get(emp.username) ?? []).map((d) => ({
+            jobId: d.jobId,
+            date: d.date,
+            hours: d.hours,
+            rowIndex: d.rowIndex,
+            eligible:
+              d.nv &&
+              !dailyOtExempt(emp.fullName) &&
+              straightRate(d.jobId) < settings.nvDailyOtRateThreshold,
+          })),
+          settings.dailyOtHoursThreshold,
+        );
+
+    // §3.4 weekly overtime on the QB-adjusted hours (computed fallback only).
+    const ot = hasTimesheetOt
+      ? { regularByJob: new Map<string, number>(), otJobId: null as string | null, otHours: 0 }
+      : splitOvertime(
+          jobs.map(
+            (j): OtJobHours => ({
+              jobId: j.jobId,
+              hours: j.hours,
+              lastDate: j.lastDate,
+              lastRowIndex: j.lastRowIndex,
+            }),
+          ),
+          { dailyOtHours: daily.totalOtHours },
+        );
 
     const lines: HourlyLine[] = [];
     const pushLine = (
       j: EmpJob,
+      seg: EmpJobSeg | null,
       hours: number,
       kind: 'regular' | 'weeklyOt' | 'dailyOt',
       segment?: DailyOtSegment,
     ): void => {
       const isOt = kind !== 'regular';
-      const suffix =
+      const computedSuffix =
         kind === 'weeklyOt' ? ':OT' : kind === 'dailyOt' ? `:DOT:${segment?.dateIso ?? ''}` : '';
+      // Timesheet-driven lines key off the pay item; computed OT keeps the
+      // Round 8 suffixes so existing manual edits still land.
+      const suffix = seg ? seg.key : computedSuffix;
       const lineId = `${emp.username}\u0000${j.jobId}${suffix}`;
       const e = edits[`hl:${lineId}`] ?? {};
-      const rateInfo =
-        rateByJob.get(j.jobId) ??
-        resolveLineRate(emp.fullName, j.jobText, j.hourly, {
-          ...settings,
-          apKey: j.apKey,
-          jobRateRules: settings.jobRateRules,
-          forceNonDb: j.forceNonDb,
-          isCrewLead: isLead,
-          jobLeadNames: j.leadNames,
-        });
+      const rateInfo = rateFor(j, seg);
       const baseRate = e.rate !== undefined ? e.rate : rateInfo.rate;
       const rate = isOt ? round2(baseRate * 1.5) : baseRate;
       const lineHours = e.hours !== undefined ? e.hours : round2(hours);
@@ -654,8 +859,16 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       const dayLabel = segment?.date ? fmtMonthDay(segment.date) : '';
       const dailyTag = segment
         ? `[Daily OT — ${dayLabel}: ${round2(hours)} hrs over ${settings.dailyOtHoursThreshold} @ 1.5× (rate < $${settings.nvDailyOtRateThreshold}, NV)]`
-        : '';
-      const otTag = kind === 'weeklyOt' ? ' [OT >40 hrs/wk]' : kind === 'dailyOt' ? ' [Daily OT]' : '';
+        : seg?.overtime
+          ? `[${seg.payItem} — timesheet overtime line, paid at 1.5× $${baseRate.toFixed(2)}]`
+          : undefined;
+      const otTag = seg
+        ? payItemTag(seg.payItem)
+        : kind === 'weeklyOt'
+          ? ' [OT >40 hrs/wk]'
+          : kind === 'dailyOt'
+            ? ' [Daily OT]'
+            : '';
       const isOfficeLine = officeStyle || j.office;
       const notesSuffix = !isOfficeLine && j.notes.trim() ? ` — ${j.notes.trim()}` : '';
       const typeTag = isOfficeLine ? '' : j.hourly ? ' [Hourly]' : ' [PS]';
@@ -665,7 +878,8 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       // §5.5 — office lines carry the week range (or "Allpro Office" inside a
       // mixed painter block) on the blue PO cell instead of an AP number.
       const poText = officeStyle ? `(${weekRange})` : j.office ? 'Allpro Office' : null;
-      if (kind === 'dailyOt' && lineHours > 0) {
+      const isDailyOtLine = kind === 'dailyOt' || (seg?.overtime === true && seg.otReason === 'daily');
+      if (isDailyOtLine && lineHours > 0) {
         dailyOtNotes.push({
           employeeName: emp.displayName,
           date: dayLabel,
@@ -693,39 +907,89 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
         fromPerJobOverride: rateInfo.fromPerJobOverride && e.rate === undefined ? true : undefined,
         fromConditionalRule: rateInfo.fromConditionalRule && e.rate === undefined ? true : undefined,
         fromCrewLeadRate: rateInfo.fromCrewLeadRate && e.rate === undefined ? true : undefined,
-        ot: kind === 'weeklyOt',
-        dailyOt: kind === 'dailyOt' ? true : undefined,
-        dailyOtDate: kind === 'dailyOt' ? dayLabel : undefined,
-        dailyOtNote: kind === 'dailyOt' ? dailyTag : undefined,
+        ot: isOt && !isDailyOtLine,
+        dailyOt: isDailyOtLine ? true : undefined,
+        dailyOtDate: isDailyOtLine && dayLabel ? dayLabel : undefined,
+        dailyOtNote: dailyTag,
+        payItem: seg?.payItem || undefined,
+        fromTimesheetOt: seg?.overtime ? true : undefined,
         hourlyJob: j.hourly,
         colorHex: j.colorHex,
         jobNotes: j.notes.trim() || undefined,
       });
     };
 
+    /** Segments in a stable order: straight time first, overtime last. */
+    const orderedSegments = (j: EmpJob): EmpJobSeg[] =>
+      j.segments
+        .filter((sg) => round2(sg.hours) !== 0)
+        .slice()
+        .sort((a, b) => Number(a.overtime) - Number(b.overtime) || a.firstIndex - b.firstIndex);
+
     if (officeStyle && jobs.length > 0) {
-      // §5.3 — single "Office" line covering the week (+ daily / weekly OT).
-      const totalHrs = jobs.reduce((a, j) => a + j.hours, 0);
-      const regular = round2(Math.max(0, totalHrs - daily.totalOtHours - ot.otHours));
+      // §5.3 — one "Office" line per pay item covering the week, so an office
+      // overtime row still shows separately at its own rate.
       const rep = jobs[0];
-      pushLine(rep, regular, 'regular');
-      for (const seg of daily.segments) pushLine(rep, seg.otHours, 'dailyOt', seg);
-      if (ot.otHours > 0) pushLine(rep, ot.otHours, 'weeklyOt');
+      const merged = new Map<string, EmpJobSeg>();
+      for (const j of jobs) {
+        for (const sg of orderedSegments(j)) {
+          const at = merged.get(sg.key);
+          if (at) at.hours = round2(at.hours + sg.hours);
+          else merged.set(sg.key, { ...sg });
+        }
+      }
+      const officeSegs = [...merged.values()].sort(
+        (a, b) => Number(a.overtime) - Number(b.overtime) || a.firstIndex - b.firstIndex,
+      );
+      if (hasTimesheetOt || officeSegs.length > 1) {
+        for (const sg of officeSegs) pushLine(rep, sg, sg.hours, sg.overtime ? 'weeklyOt' : 'regular');
+      } else {
+        const totalHrs = jobs.reduce((a, j) => a + j.hours, 0);
+        const regular = round2(Math.max(0, totalHrs - daily.totalOtHours - ot.otHours));
+        pushLine(rep, officeSegs[0] ?? null, regular, 'regular');
+        for (const seg of daily.segments) pushLine(rep, null, seg.otHours, 'dailyOt', seg);
+        if (ot.otHours > 0) pushLine(rep, null, ot.otHours, 'weeklyOt');
+      }
     } else {
       for (const j of jobs.slice().sort((a, b) => a.firstIndex - b.firstIndex)) {
-        const dailyOnJob = daily.otByJob.get(j.jobId) ?? 0;
-        const regular = round2(Math.max(0, (ot.regularByJob.get(j.jobId) ?? j.hours) - dailyOnJob));
-        pushLine(j, regular, 'regular');
-        for (const seg of daily.segments.filter((s) => s.jobId === j.jobId)) {
-          pushLine(j, seg.otHours, 'dailyOt', seg);
+        const segs = orderedSegments(j);
+        if (hasTimesheetOt) {
+          // Round 9 §10/§16 — straight-time and overtime hours keep their own
+          // lines exactly as the timesheet split them; nothing is re-derived,
+          // so a job never pays ALL of its hours at the overtime rate.
+          for (const sg of segs) pushLine(j, sg, sg.hours, sg.overtime ? 'weeklyOt' : 'regular');
+          continue;
         }
-        if (ot.otJobId === j.jobId && ot.otHours > 0) pushLine(j, ot.otHours, 'weeklyOt');
+        // Computed fallback: carve the day's / week's overtime out of this
+        // job's straight-time segments, last segment first.
+        const dailyOnJob = daily.otByJob.get(j.jobId) ?? 0;
+        const weeklyOnJob = ot.otJobId === j.jobId ? ot.otHours : 0;
+        let toRemove = round2(dailyOnJob + weeklyOnJob);
+        const straight = segs.filter((sg) => !sg.overtime);
+        const regularBySeg = new Map<string, number>(straight.map((sg) => [sg.key, round2(sg.hours)]));
+        for (let i = straight.length - 1; i >= 0 && toRemove > 0; i--) {
+          const sg = straight[i];
+          const have = regularBySeg.get(sg.key) ?? 0;
+          const take = round2(Math.min(have, toRemove));
+          regularBySeg.set(sg.key, round2(have - take));
+          toRemove = round2(toRemove - take);
+        }
+        for (const sg of straight) pushLine(j, sg, regularBySeg.get(sg.key) ?? 0, 'regular');
+        if (straight.length === 0 && segs.length === 0) {
+          pushLine(j, null, round2(Math.max(0, j.hours - dailyOnJob - weeklyOnJob)), 'regular');
+        }
+        for (const seg of daily.segments.filter((sd) => sd.jobId === j.jobId)) {
+          pushLine(j, null, seg.otHours, 'dailyOt', seg);
+        }
+        if (weeklyOnJob > 0) pushLine(j, null, weeklyOnJob, 'weeklyOt');
       }
     }
 
     const totalHours = round2(lines.reduce((a, l) => a + l.hours, 0));
     const totalPay = round2(lines.reduce((a, l) => a + l.hours * l.rate, 0));
     const blockEdit = edits[`hb:${emp.username}`] ?? {};
+    // Round 9 §19/§23 — person-scoped extra rows (Gas Reimb, Aflac, …).
+    const extras = extrasFor(emp.fullName, `hb:${emp.username}`);
     return {
       key: emp.username,
       title: officeStyle ? emp.displayName : `${emp.displayName}${emp.group ? ` (${emp.group})` : ''}`,
@@ -738,6 +1002,8 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       nest: blockEdit.nest !== undefined ? blockEdit.nest : null,
       net: blockEdit.net !== undefined ? blockEdit.net : null,
       inactive: emp.inactive,
+      extras,
+      netPay: round2(totalPay + extrasNet(extras)),
     };
   };
 
@@ -820,18 +1086,44 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     const missingFromPl = !metrics;
     const income = e.income !== undefined ? e.income : (metrics?.income ?? 0);
     const materials = e.materials !== undefined ? e.materials : (metrics?.materials ?? 0);
-    const laborWages = e.laborWages !== undefined ? e.laborWages : (metrics?.laborWagesSubs ?? 0);
+    // Round 9 §1 — labor comes from the TIMESHEET hours on this AP# (hours ×
+    // resolved rate, overtime at 1.5×). The P&L `laborWagesSubs` stays the
+    // fallback for a job with no timesheet hours this week, and is still shown
+    // verbatim on the `QB Labor-Wages-Subs` row below.
+    const timesheetLabor = apKey ? (timesheetLaborByAp.get(apKey) ?? 0) : 0;
+    const laborWages =
+      e.laborWages !== undefined
+        ? e.laborWages
+        : timesheetLabor > 0
+          ? timesheetLabor
+          : (metrics?.laborWagesSubs ?? 0);
     const mileage = e.mileage !== undefined ? e.mileage : (metrics?.mileage ?? 0);
     const travel = metrics?.travel ?? 0;
     const sundries = metrics?.sundries ?? 0;
-    const halfMaterials = e.halfMaterials !== undefined ? e.halfMaterials : materials / 2;
-    // Round 6 §6.2 — WO% from typed pivot cell, else Settings crew map
-    // (Round 8 §9.4: the crew map now always answers, auto-adding if needed).
-    const effectiveWoPct = pivotWoPct ?? leadDefaultWoPct;
+    // Round 9 §32 — a lead responsible for ALL of a job's materials is charged
+    // the full amount instead of half.
+    const fullMaterials = (settings.fullMaterialsLeads ?? []).some(
+      (n) => tokensSubset(n, leadUpper) || tokensSubset(leadUpper, n),
+    );
+    const halfMaterials =
+      e.halfMaterials !== undefined ? e.halfMaterials : fullMaterials ? materials : materials / 2;
+    // Round 6 §6.2 — WO% from the Pivot by Job `WO%` cell (Round 9 §15: that
+    // column is the source of truth), else the Settings crew map (Round 8 §9.4:
+    // the crew map now always answers, auto-adding if needed). Round 9 §14 —
+    // a typed % on the preview band header wins over both.
+    const effectiveWoPct =
+      e.woPct !== undefined ? e.woPct : (pivotWoPct ?? leadDefaultWoPct);
     const pct = effectiveWoPct ?? 0;
-    const profitShare = income * pct;
     const workOrderOverride =
       e.workOrderOverride !== undefined ? e.workOrderOverride : pivotWoOverride;
+    // Round 9 §8/§20 — the Pivot by Job `WO Override` amount IS the work-order
+    // dollar figure, so it drives Profit Share whenever it is filled in. Only
+    // an empty override falls back to Total Income × WO%, which is what left
+    // AP24097-E at $0 when its P&L income was zero.
+    const profitShare =
+      workOrderOverride !== null && workOrderOverride !== undefined
+        ? workOrderOverride
+        : income * pct;
     // A typed % Completion on the payroll band overrides the grid value.
     const effectivePercent: PercentValue =
       e.percentCompletion !== undefined ? e.percentCompletion : percent;
@@ -901,6 +1193,8 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       travel,
       sundries,
       halfMaterials,
+      fullMaterials,
+      timesheetLabor,
       totalProfitShare,
       splitWith,
       totalAfterSplit,
@@ -917,6 +1211,31 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       materials,
       notes: pbjNotes,
     };
+  };
+
+  /**
+   * Round 9 §4/§7 — a band cell must never be blank. The PO label falls back
+   * through the display chain → the Pivot by Job job text → `AP{key}`, and the
+   * customer name prefers the Pivot by Job customer column (which is where the
+   * UT rows carry their customer) before the resolved chain. A customer with
+   * several AP jobs therefore labels every column, not just the first.
+   */
+  const bandNames = (
+    apKey: string | null,
+    display: { poLabel: string; customerName: string },
+    pivotJobText: string,
+    pivotCustomer: string,
+  ): { poLabel: string; customerName: string } => {
+    const po =
+      display.poLabel.trim() ||
+      pivotJobText.trim() ||
+      (apKey && apKey !== 'OFFICE' ? `AP${apKey}` : '');
+    const cust =
+      pivotCustomer.trim() && pivotCustomer.trim() !== '(blank)'
+        ? pivotCustomer.trim()
+        : display.customerName.trim() ||
+          (apKey ? (plByJob.has(apKey) ? (pl?.byJob.get(apKey)?.customerName ?? '') : '') : '');
+    return { poLabel: po, customerName: cust };
   };
 
   const leads: PsBlock[] = [];
@@ -949,17 +1268,22 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
             : [];
       if (!names.some((n) => leadMatchesName(n, leadUpper))) continue;
       if (!markJob(job.id, job.analysis.apKey)) continue;
-      const display = jobDisplayPair(job.analysis.apKey, {
-        ...nameSources,
-        eventTitle: eventByApKey.get(job.analysis.apKey ?? '')?.event,
-      });
+      const display = bandNames(
+        job.analysis.apKey,
+        jobDisplayPair(job.analysis.apKey, {
+          ...nameSources,
+          eventTitle: eventByApKey.get(job.analysis.apKey ?? '')?.event,
+        }),
+        job.jobcode2,
+        job.id.split('\u0000')[0],
+      );
       jobs.push(
         buildPsJob(
           blockKey,
           job.id,
           job.analysis.apKey,
-          display.poLabel || job.jobcode2,
-          display.customerName || job.id.split('\u0000')[0],
+          display.poLabel,
+          display.customerName,
           job.analysis.woPct,
           job.analysis.woOverride,
           leadMapPct(leadUpper),
@@ -975,7 +1299,12 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       if (!cj.lead.some((n) => leadMatchesName(n, leadUpper))) continue;
       const calId = `cal:${cj.row.id}`;
       if (!markJob(calId, cj.row.apKey)) continue;
-      const display = jobDisplayPair(cj.row.apKey, { ...nameSources, eventTitle: cj.row.event });
+      const display = bandNames(
+        cj.row.apKey,
+        jobDisplayPair(cj.row.apKey, { ...nameSources, eventTitle: cj.row.event }),
+        '',
+        '',
+      );
       jobs.push(
         buildPsJob(
           blockKey,
@@ -1002,17 +1331,22 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       const names = leadNamesFromDisplay(row.crewLead);
       if (!names.some((n) => leadMatchesName(n, leadUpper))) continue;
       if (!markJob(row.id, row.apKey)) continue;
-      const display = jobDisplayPair(row.apKey, {
-        ...nameSources,
-        eventTitle: eventByApKey.get(row.apKey ?? '')?.event,
-      });
+      const display = bandNames(
+        row.apKey,
+        jobDisplayPair(row.apKey, {
+          ...nameSources,
+          eventTitle: eventByApKey.get(row.apKey ?? '')?.event,
+        }),
+        row.job,
+        row.customer,
+      );
       jobs.push(
         buildPsJob(
           blockKey,
           row.id,
           row.apKey,
-          display.poLabel || row.job,
-          display.customerName || row.customer,
+          display.poLabel,
+          display.customerName,
           row.woPct,
           row.woOverride,
           leadMapPct(leadUpper),
@@ -1040,17 +1374,22 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
         if (!pbjJob && !utRow) continue;
         if (!markJob(ej.jobId, ej.apKey)) continue;
         const apKey = pbjJob?.analysis.apKey ?? ej.apKey;
-        const display = jobDisplayPair(apKey, {
-          ...nameSources,
-          eventTitle: eventByApKey.get(apKey ?? '')?.event,
-        });
+        const display = bandNames(
+          apKey,
+          jobDisplayPair(apKey, {
+            ...nameSources,
+            eventTitle: eventByApKey.get(apKey ?? '')?.event,
+          }),
+          pbjJob?.jobcode2 || utRow?.job || ej.jobcode2,
+          utRow?.customer || ej.customer,
+        );
         jobs.push(
           buildPsJob(
             blockKey,
             ej.jobId,
             apKey,
-            display.poLabel || pbjJob?.jobcode2 || utRow?.job || ej.jobcode2,
-            display.customerName || utRow?.customer || ej.customer,
+            display.poLabel,
+            display.customerName,
             pbjJob?.analysis.woPct ?? utRow?.woPct ?? null,
             pbjJob?.analysis.woOverride ?? utRow?.woOverride ?? null,
             leadMapPct(leadUpper),
@@ -1080,10 +1419,13 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     const deductions = be.deductions !== undefined ? be.deductions : sundriesDefault;
     const deductMemo =
       be.deductMemo ?? (be.deductions === undefined && sundriesDefault !== 0 ? 'Sundries (P&L)' : '');
+    // Round 9 §19/§23 — extra rows on the lead's band (Aflac, Gas Reimb, …).
+    const leadDisplayName = titleCaseLeadName(leadUpper, directory, settings.subcontractors);
+    const extras = extrasFor(leadDisplayName || leadUpper, `psb:${blockKey}`);
     leads.push({
       key: blockKey,
       leadName: leadUpper,
-      displayName: titleCaseLeadName(leadUpper, directory, settings.subcontractors),
+      displayName: leadDisplayName,
       sub: meta.sub,
       jobs,
       total,
@@ -1096,8 +1438,14 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       sundriesDefault,
       // Round 8 §8.2 — deductions are entered POSITIVE and SUBTRACTED; every
       // mileage row (Mileage - New, -Mileage, Mileage in Books) is display-only.
-      totalPay: computeTotalPay({ total, hourlyPay, reimbursements, deductions }),
+      // Round 9 §23 — configured deductions/reimbursements move Total Pay too.
+      totalPay: round2(
+        computeTotalPay({ total, hourlyPay, reimbursements, deductions }) + extrasNet(extras),
+      ),
       tsheets,
+      extras,
+      // Round 9 §31 — hours pay + profit share, for the Final Payroll Breakdown.
+      totalGrossWages: round2(total + hourlyPay),
     });
   }
   leads.sort((a, b) => byText(firstNameOf(a.displayName), firstNameOf(b.displayName)));
@@ -1117,7 +1465,8 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
 
   // ----- salary sections ---------------------------------------------------
   const salaryBlock = (entry: AppSettings['salariedRoster'][number]): SalaryBlock => {
-    const e = edits[`sal:${entry.name}`] ?? {};
+    const key = `sal:${entry.name}`;
+    const e = edits[key] ?? {};
     const tsEmp = [...emps.values()].find(
       (x) => tokensSubset(x.fullName, entry.name) || tokensSubset(entry.name, x.fullName),
     );
@@ -1125,26 +1474,49 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       ? round2((empJobs.get(tsEmp.username) ?? []).reduce((a, j) => a + j.hours, 0))
       : 0;
     const miles = e.miles !== undefined ? e.miles : 0;
+    const mileageReimb = round2(miles * settings.mileageRate);
+    // Round 9 §28 — Jodi Dunn's row reads "Reimbursements" and carries a flat
+    // amount instead of miles × rate.
+    const flatReimb = entry.reimbursementsLabel
+      ? (e.reimbursements !== undefined ? e.reimbursements : 0)
+      : 0;
+    const extras = extrasFor(entry.name, key);
     return {
-      key: `sal:${entry.name}`,
+      key,
       name: stripSingleLetterTokens(entry.name),
       role: entry.role,
       amount: entry.amount,
       section: entry.section,
       timesheetHours: hours,
       miles,
-      mileageReimb: round2(miles * settings.mileageRate),
+      mileageReimb,
+      sub: entry.sub === true,
+      ...(entry.reimbursementsLabel ? { reimbursementsLabel: entry.reimbursementsLabel } : {}),
+      reimbursements: flatReimb,
+      extras,
+      taxes: e.taxes !== undefined ? e.taxes : (entry.taxes ?? null),
+      net: e.net !== undefined ? e.net : (entry.net ?? null),
+      total: round2(
+        entry.amount +
+          (entry.reimbursementsLabel ? flatReimb : mileageReimb) +
+          extrasNet(extras),
+      ),
     };
   };
   // Round 8 §7.3 — each tab shows only its own entity's salaried people, so the
   // UT tab is painters/leads-only until someone is tagged UT in Settings.
-  const roster = settings.salariedRoster.filter((r) => r.entity === entity);
-  const admin = roster.filter((r) => r.section === 'ADMIN').map(salaryBlock)
-    .sort((a, b) => byText(firstNameOf(a.name), firstNameOf(b.name)));
-  const estimators = roster.filter((r) => r.section === 'ESTIMATORS').map(salaryBlock)
-    .sort((a, b) => byText(firstNameOf(a.name), firstNameOf(b.name)));
-  const managers = roster.filter((r) => r.section === 'MANAGER SALARY').map(salaryBlock)
-    .sort((a, b) => byText(firstNameOf(a.name), firstNameOf(b.name)));
+  const roster = settings.salariedRoster.filter(
+    (r) =>
+      r.entity === entity &&
+      // Round 9 §25 — monthly people appear only on the month's first pay date.
+      (r.frequency !== 'firstPayDateOfMonth' || isFirstPayDateOfMonth),
+  );
+  // Round 9 §26 — subcontractor rows sort to the very bottom of their section.
+  const sortSalary = (a: SalaryBlock, b: SalaryBlock): number =>
+    Number(a.sub) - Number(b.sub) || byText(firstNameOf(a.name), firstNameOf(b.name));
+  const admin = roster.filter((r) => r.section === 'ADMIN').map(salaryBlock).sort(sortSalary);
+  const estimators = roster.filter((r) => r.section === 'ESTIMATORS').map(salaryBlock).sort(sortSalary);
+  const managers = roster.filter((r) => r.section === 'MANAGER SALARY').map(salaryBlock).sort(sortSalary);
 
   // ----- Round 6 §4.10 Inactive Employees tab --------------------------------
   const norm = (s: string): string => s.trim().toLowerCase();
@@ -1268,7 +1640,8 @@ export function mergePayrollPreviews(
   );
   for (const b of leads.filter((x) => x.sub)) painterSequence.push({ kind: 'ps', block: b });
   const byFirstName = (a: SalaryBlock, b: SalaryBlock): number =>
-    byText(firstNameOf(a.name), firstNameOf(b.name));
+    // Round 9 §26 — subcontractor rows stay at the bottom of the merged section.
+    Number(a.sub) - Number(b.sub) || byText(firstNameOf(a.name), firstNameOf(b.name));
   const seenLead = new Set(nv.newLeadsToAdd.map((n) => n.lead.trim().toLowerCase()));
   return {
     ...nv,
