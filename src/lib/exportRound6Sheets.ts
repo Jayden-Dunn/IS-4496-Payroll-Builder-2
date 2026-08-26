@@ -12,6 +12,7 @@ import type {
   SalesByRepMirrorRow,
   TimesheetMirrorRow,
 } from './mirrorTabs';
+import { hourSplitRows } from './payroll';
 import { buildPrFinalCheckRows } from './prFinalCheck';
 import type {
   HourlyBlock,
@@ -972,30 +973,6 @@ function writeHourlyBlockValues(
   ws.addRow([]);
 }
 
-/**
- * Round 9 §3 — regular / daily-OT / weekly-OT hour buckets for one block.
- * Returns nothing when the week is straight time only, so a plain block keeps
- * its single totals row.
- */
-function hourSplitRows(block: HourlyBlock): { label: string; hours: number; pay: number }[] {
-  const buckets: { label: string; match: (l: HourlyBlock['lines'][number]) => boolean }[] = [
-    { label: 'regular hrs', match: (l) => !l.ot && !l.dailyOt },
-    { label: 'daily OT hrs (1.5x)', match: (l) => l.dailyOt === true },
-    { label: 'overtime hrs (1.5x)', match: (l) => l.ot && !l.dailyOt },
-  ];
-  const out: { label: string; hours: number; pay: number }[] = [];
-  for (const b of buckets) {
-    const lines = block.lines.filter(b.match);
-    const hours = lines.reduce((a, l) => a + l.hours, 0);
-    if (hours === 0) continue;
-    out.push({
-      label: b.label,
-      hours: Math.round(hours * 100) / 100,
-      pay: Math.round(lines.reduce((a, l) => a + l.hours * l.rate, 0) * 100) / 100,
-    });
-  }
-  return out.length > 1 ? out : [];
-}
 
 function writeSalaryBlockValues(ws: Worksheet, block: SalaryBlock, weekRange: string, fill: string): void {
   const band = ws.addRow([

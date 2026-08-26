@@ -66,6 +66,7 @@ import { buildPivot } from './lib/pivot';
 import {
   buildPivotByJob,
   EMPTY_MANUAL_STATE,
+  pbjJobId,
   type ManualSectionState,
 } from './lib/pivotByJob';
 import { applyPivotView, EMPTY_PIVOT_VIEW, isPivotViewActive, type PivotViewState } from './lib/pivotView';
@@ -804,12 +805,24 @@ export default function App(): JSX.Element {
    */
   const payrollPivotByJob = useMemo((): PivotByJobModel | null => {
     if (!parsed.completedPercents) return null;
-    return buildPayrollPivotByJob({
-      completed: parsed.completedPercents,
-      settings,
-      qbHours,
-    });
-  }, [parsed.completedPercents, settings, qbHours]);
+    return buildPayrollPivotByJob({ completed: parsed.completedPercents, settings });
+  }, [parsed.completedPercents, settings]);
+
+  /**
+   * Round 9 §6 — QB Hrs overrides for the payroll side come from Slot A's own
+   * `QB Hrs` column, not from the %'s report's Pivot by Job tab (that map is
+   * the other rail's editing state and must not reach these numbers).
+   */
+  const payrollQbHours = useMemo((): QbHoursMap => {
+    const out: QbHoursMap = {};
+    for (const j of parsed.completedPercents?.jobs ?? []) {
+      const id = pbjJobId(j.customer || '(blank)', j.job);
+      for (const e of j.employees) {
+        if (e.qbHours != null) out[`${id}\u0000${e.username}`] = e.qbHours;
+      }
+    }
+    return out;
+  }, [parsed.completedPercents]);
 
   const pivotByJob = useMemo(
     () =>
@@ -889,7 +902,7 @@ export default function App(): JSX.Element {
       settings,
       payDate,
       edits: payrollEdits,
-      qbHours,
+      qbHours: payrollQbHours,
       knownEstimators,
       leadCtx: payrollLeadCtx,
       nvSales: null,
@@ -907,7 +920,7 @@ export default function App(): JSX.Element {
     settings,
     payDate,
     payrollEdits,
-    qbHours,
+    payrollQbHours,
     knownEstimators,
     payrollLeadCtx,
   ]);
@@ -932,7 +945,7 @@ export default function App(): JSX.Element {
       settings,
       payDate,
       edits: payrollEdits,
-      qbHours,
+      qbHours: payrollQbHours,
       knownEstimators,
       leadCtx: payrollLeadCtx,
       nvSales: null,
@@ -951,7 +964,7 @@ export default function App(): JSX.Element {
     settings,
     payDate,
     payrollEdits,
-    qbHours,
+    payrollQbHours,
     knownEstimators,
     payrollLeadCtx,
   ]);

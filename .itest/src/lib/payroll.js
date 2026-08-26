@@ -24,6 +24,7 @@ exports.resolveWageRate = resolveWageRate;
 exports.matchPerJobRateOverride = matchPerJobRateOverride;
 exports.matchConditionalRateRule = matchConditionalRateRule;
 exports.resolveLineRate = resolveLineRate;
+exports.hourSplitRows = hourSplitRows;
 exports.applyDavisBaconLeadFloor = applyDavisBaconLeadFloor;
 /**
  * Round 3 shared payroll derivations (§3): job display names, crew-lead
@@ -630,6 +631,31 @@ function resolveLineRate(employeeName, jobText, hourlyJob, settings) {
         ...(kind === 'crewLead' ? { fromCrewLeadRate: true } : {}),
         ...(kind === 'commercialHourly' || kind === 'wages2' ? { fromPayItemRate: kind } : {}),
     };
+}
+/**
+ * Round 9 §3 — regular / daily-OT / weekly-OT hour buckets for one hourly
+ * block, for the NOTES log's hour split. Returns nothing when the week is
+ * straight time only, so a plain block keeps its single totals row.
+ */
+function hourSplitRows(block) {
+    const buckets = [
+        { label: 'regular hrs', match: (l) => !l.ot && !l.dailyOt },
+        { label: 'daily OT hrs (1.5x)', match: (l) => l.dailyOt === true },
+        { label: 'overtime hrs (1.5x)', match: (l) => l.ot && !l.dailyOt },
+    ];
+    const out = [];
+    for (const b of buckets) {
+        const lines = block.lines.filter(b.match);
+        const hours = lines.reduce((a, l) => a + l.hours, 0);
+        if (hours === 0)
+            continue;
+        out.push({
+            label: b.label,
+            hours: (0, format_1.round2)(hours),
+            pay: (0, format_1.round2)(lines.reduce((a, l) => a + l.hours * l.rate, 0)),
+        });
+    }
+    return out.length > 1 ? out : [];
 }
 /**
  * Round 6 §7.1 Branch 2 — crew-lead Davis-Bacon floor on per-job pay after

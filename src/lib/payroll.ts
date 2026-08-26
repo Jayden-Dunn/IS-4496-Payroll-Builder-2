@@ -853,6 +853,36 @@ export function resolveLineRate(
 }
 
 /**
+ * Round 9 §3 — regular / daily-OT / weekly-OT hour buckets for one hourly
+ * block, for the NOTES log's hour split. Returns nothing when the week is
+ * straight time only, so a plain block keeps its single totals row.
+ */
+export function hourSplitRows(
+  block: { lines: readonly { hours: number; rate: number; ot: boolean; dailyOt?: boolean }[] },
+): { label: string; hours: number; pay: number }[] {
+  const buckets: {
+    label: string;
+    match: (l: { ot: boolean; dailyOt?: boolean }) => boolean;
+  }[] = [
+    { label: 'regular hrs', match: (l) => !l.ot && !l.dailyOt },
+    { label: 'daily OT hrs (1.5x)', match: (l) => l.dailyOt === true },
+    { label: 'overtime hrs (1.5x)', match: (l) => l.ot && !l.dailyOt },
+  ];
+  const out: { label: string; hours: number; pay: number }[] = [];
+  for (const b of buckets) {
+    const lines = block.lines.filter(b.match);
+    const hours = lines.reduce((a, l) => a + l.hours, 0);
+    if (hours === 0) continue;
+    out.push({
+      label: b.label,
+      hours: round2(hours),
+      pay: round2(lines.reduce((a, l) => a + l.hours * l.rate, 0)),
+    });
+  }
+  return out.length > 1 ? out : [];
+}
+
+/**
  * Round 6 §7.1 Branch 2 — crew-lead Davis-Bacon floor on per-job pay after
  * the §6.2 chain and any split. Never lowers pay; subcontractors exempt.
  */

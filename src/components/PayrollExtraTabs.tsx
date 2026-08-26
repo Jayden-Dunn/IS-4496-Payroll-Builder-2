@@ -6,6 +6,7 @@ import type { CSSProperties, ReactNode } from 'react';
 import { fmtAccounting, formatCrewLeadWoNote, isDarkColor, parseMoneyInput, parsePercentInput } from '../lib/format';
 import { CellInput } from './CellInput';
 import { buildJournalEntryRows } from '../lib/journalEntry';
+import { hourSplitRows } from '../lib/payroll';
 import { buildPrFinalCheckRows } from '../lib/prFinalCheck';
 import type {
   HourlyBlock,
@@ -542,6 +543,39 @@ function HourlyReadOnly({
         {/* Round 9 §3 — the NOTES log states the hour split explicitly:
             regular vs daily overtime vs weekly overtime, straight off the
             timesheet's own pay items. */}
+        {/* Round 9 §19/§23 — configured extra rows (Gas Reimb, Aflac, …) so the
+            NOTES log and the Final Payroll Breakdown show the same pay the
+            Payroll Preview does. */}
+        {block.extras.map((x) => (
+          <tr key={x.key}>
+            <td className={`xcell font-medium ${bodyCls}`} colSpan={2}>
+              {x.label}
+            </td>
+            <td className={`xcell ${bodyCls}`} />
+            <td className={`xcell ${bodyCls}`} />
+            <td
+              className={`xcell text-center ${bodyCls} ${x.kind === 'deduction' ? 'text-[#FF0000]' : x.kind === 'reimbursement' ? 'text-[#0070C0]' : ''}`}
+            >
+              {x.amount !== null ? money(x.amount) : ''}
+            </td>
+            {showTaxCols && <td className={`xcell ${bodyCls}`} />}
+            {showTaxCols && <td className={`xcell ${bodyCls}`} />}
+            {showTaxCols && !notesLayout && <td className={`xcell ${bodyCls}`} />}
+          </tr>
+        ))}
+        {block.extras.some((x) => x.kind !== 'note') && (
+          <tr className="font-bold">
+            <td className={`xcell ${bodyCls}`} colSpan={2}>
+              Total Pay
+            </td>
+            <td className={`xcell ${bodyCls}`} />
+            <td className={`xcell ${bodyCls}`} />
+            <td className={`xcell text-center ${bodyCls}`}>{money(block.netPay)}</td>
+            {showTaxCols && <td className={`xcell ${bodyCls}`} />}
+            {showTaxCols && <td className={`xcell ${bodyCls}`} />}
+            {showTaxCols && !notesLayout && <td className={`xcell ${bodyCls}`} />}
+          </tr>
+        )}
         {notesLayout &&
           hourSplitRows(block).map((row) => (
             <tr key={row.label}>
@@ -559,31 +593,6 @@ function HourlyReadOnly({
   );
 }
 
-/**
- * Round 9 §3 — regular / daily-OT / weekly-OT hour buckets for one block.
- * Rows with no hours are omitted, so a straight-time week still reads as one
- * line and only a week that actually has overtime grows extra rows.
- */
-function hourSplitRows(block: HourlyBlock): { label: string; hours: number; pay: number }[] {
-  const buckets = [
-    { label: 'regular hrs', match: (l: HourlyBlock['lines'][number]) => !l.ot && !l.dailyOt },
-    { label: 'daily OT hrs (1.5×)', match: (l: HourlyBlock['lines'][number]) => l.dailyOt === true },
-    { label: 'overtime hrs (1.5×)', match: (l: HourlyBlock['lines'][number]) => l.ot && !l.dailyOt },
-  ];
-  const out: { label: string; hours: number; pay: number }[] = [];
-  for (const b of buckets) {
-    const lines = block.lines.filter(b.match);
-    const hours = lines.reduce((a, l) => a + l.hours, 0);
-    if (hours === 0) continue;
-    out.push({
-      label: b.label,
-      hours: Math.round(hours * 100) / 100,
-      pay: lines.reduce((a, l) => a + l.hours * l.rate, 0),
-    });
-  }
-  // A block with only regular hours needs no breakdown at all.
-  return out.length > 1 ? out : [];
-}
 
 function SalaryReadOnly({
   block,

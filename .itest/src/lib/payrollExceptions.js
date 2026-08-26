@@ -322,9 +322,12 @@ function buildPayrollExceptions(input) {
     groups.push({
         key: 'nvDailyOt',
         title: 'NV daily overtime (over 8 hrs/day)',
-        note: 'Informational: NV hours past 8 in a single day at a rate under $18 pay 1.5×. These hours are excluded from the weekly >40 split, so no hour is paid overtime twice.',
-        items: previews.flatMap((p) => p.model.dailyOtNotes.map((n) => ({
-            message: `${n.employeeName} — ${n.date}: ${(0, format_1.fmtHours)(n.hours)} h over 8 @ $${n.rate.toFixed(2)} on "${n.jobLabel}"`,
+        note: 'Informational: daily-overtime hours pay 1.5×. They come from the timesheet\u2019s own "Daily Overtime" pay item when it has one; otherwise NV hours past 8 in a single day at a rate under $18 are split out here. Either way they are excluded from the weekly >40 split, so no hour is paid overtime twice.',
+        items: previews.flatMap((p) => 
+        // Round 9 §16 — a timesheet-driven daily-OT line covers the whole week
+        // for that job, so it carries no single date to name.
+        p.model.dailyOtNotes.map((n) => ({
+            message: `${n.employeeName} — ${n.date ? `${n.date}: ` : ''}${(0, format_1.fmtHours)(n.hours)} h @ $${n.rate.toFixed(2)} on "${n.jobLabel}"`,
         }))),
     });
     // 6. Job missing from P&L. Each model is judged against ITS OWN upload, so a

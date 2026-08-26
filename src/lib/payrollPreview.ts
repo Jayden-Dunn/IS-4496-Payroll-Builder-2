@@ -1039,8 +1039,10 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     const totalHours = round2(lines.reduce((a, l) => a + l.hours, 0));
     const totalPay = round2(lines.reduce((a, l) => a + l.hours * l.rate, 0));
     const blockEdit = edits[`hb:${emp.username}`] ?? {};
-    // Round 9 §19/§23 — person-scoped extra rows (Gas Reimb, Aflac, …).
-    const extras = extrasFor(emp.fullName, `hb:${emp.username}`);
+    // Round 9 §19/§23 — person-scoped extra rows (Gas Reimb, Aflac, …). A crew
+    // lead's own T-SHEETS block skips them: the PS band directly above it
+    // already carries that person's rows, and a deduction must only bite once.
+    const extras = isLead ? [] : extrasFor(emp.fullName, `hb:${emp.username}`);
     return {
       key: emp.username,
       title: officeStyle ? emp.displayName : `${emp.displayName}${emp.group ? ` (${emp.group})` : ''}`,

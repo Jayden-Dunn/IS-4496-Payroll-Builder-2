@@ -18,6 +18,7 @@ exports.buildInactiveEmployeesSheet = buildInactiveEmployeesSheet;
 exports.buildPrFinalCheckSheet = buildPrFinalCheckSheet;
 const apkey_1 = require("./apkey");
 const format_1 = require("./format");
+const payroll_1 = require("./payroll");
 const prFinalCheck_1 = require("./prFinalCheck");
 const BLACK = 'FF000000';
 const WHITE = 'FFFFFFFF';
@@ -859,7 +860,7 @@ function writeHourlyBlockValues(ws, block, opts) {
             sums.getCell(7).numFmt = HOURS_FMT;
         // Round 9 §3 — the NOTES log spells out the hour split: regular vs daily
         // overtime vs weekly overtime, taken from the timesheet's own pay items.
-        for (const split of hourSplitRows(block)) {
+        for (const split of (0, payroll_1.hourSplitRows)(block)) {
             const row = ws.addRow(['', split.label, split.hours, '', split.pay, '', '']);
             row.getCell(2).font = { name: PP_FONT, size: 10.5, italic: true };
             for (const c of [3, 5]) {
@@ -884,31 +885,6 @@ function writeHourlyBlockValues(ws, block, opts) {
         row.getCell(5).alignment = { horizontal: 'center' };
     }
     ws.addRow([]);
-}
-/**
- * Round 9 §3 — regular / daily-OT / weekly-OT hour buckets for one block.
- * Returns nothing when the week is straight time only, so a plain block keeps
- * its single totals row.
- */
-function hourSplitRows(block) {
-    const buckets = [
-        { label: 'regular hrs', match: (l) => !l.ot && !l.dailyOt },
-        { label: 'daily OT hrs (1.5x)', match: (l) => l.dailyOt === true },
-        { label: 'overtime hrs (1.5x)', match: (l) => l.ot && !l.dailyOt },
-    ];
-    const out = [];
-    for (const b of buckets) {
-        const lines = block.lines.filter(b.match);
-        const hours = lines.reduce((a, l) => a + l.hours, 0);
-        if (hours === 0)
-            continue;
-        out.push({
-            label: b.label,
-            hours: Math.round(hours * 100) / 100,
-            pay: Math.round(lines.reduce((a, l) => a + l.hours * l.rate, 0) * 100) / 100,
-        });
-    }
-    return out.length > 1 ? out : [];
 }
 function writeSalaryBlockValues(ws, block, weekRange, fill) {
     const band = ws.addRow([
