@@ -294,7 +294,8 @@ function PsBlockView({ block, onEdit }: { block: PsBlock; onEdit: PayrollPreview
                 pct
                 value={j.woPct}
                 placeholder="-"
-                onCommit={(n) => onEdit(psKey(j.jobRowId), { woPct: n })}
+                // Clearing the cell relinks it to the Pivot by Job WO% column.
+                onCommit={(n) => onEdit(psKey(j.jobRowId), { woPct: n ?? undefined })}
               />
             </th>
           ))}

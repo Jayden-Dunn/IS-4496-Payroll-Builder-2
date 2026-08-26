@@ -107,12 +107,16 @@ export function buildPayrollExceptions(input: PayrollExceptionsInput): Exception
       const res = job.analysis.crewLeadResolution;
       if (!res) {
         if (job.analysis.onCalendar !== 'NOT ON CALENDAR' && !job.analysis.crewLead) {
-          items.push({ message: `${job.jobcode2} — no crew-lead parenthetical on the calendar event` });
+          // Round 9 §6 — the payroll process reads the Crew Lead column, so
+          // point at the cell the user actually fills in.
+          items.push({
+            message: `${job.jobcode2} — the Crew Lead cell on Pivot by Job is empty, so this job has no band to pay from`,
+          });
         }
         continue;
       }
       if (!res.raw && !job.analysis.crewLead) {
-        items.push({ message: `${job.jobcode2} — the event title names no crew lead` });
+        items.push({ message: `${job.jobcode2} — no crew lead on the Pivot by Job row` });
         continue;
       }
       for (const f of res.flags) {
