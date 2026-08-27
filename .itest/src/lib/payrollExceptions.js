@@ -29,6 +29,41 @@ function buildPayrollExceptions(input) {
         ...allOffice,
         ...allLeads.flatMap((l) => (l.tsheets ? [l.tsheets] : [])),
     ];
+    /**
+     * Round 9 §9/§11 — every non-gray job below the Grand Total must reach a
+     * Payroll Preview band. A row can only fail to land when nothing names its
+     * crew lead, so say so instead of dropping it silently (Carlos Ruiz's
+     * AP25264 and Henry Limay Flores's AP25228 both went missing this way).
+     */
+    {
+        const items = [];
+        const bandedAps = new Set();
+        for (const p of previews) {
+            for (const lead of p.model.leads) {
+                for (const j of lead.jobs)
+                    if (j.apKey)
+                        bandedAps.add(j.apKey);
+            }
+        }
+        for (const row of [...pbj.balances, ...pbj.utPayroll]) {
+            if (row.excludedFromPayroll)
+                continue; // gray = deliberately off payroll
+            if (row.apKey === 'OFFICE' || !row.apKey)
+                continue;
+            if (bandedAps.has(row.apKey))
+                continue;
+            const where = row.job || row.customer || `AP${row.apKey}`;
+            items.push({
+                message: `AP${row.apKey} ${where} — below Grand Total with no timesheet hours and no crew lead on the Pivot by Job row, so it has no band to pay from`,
+            });
+        }
+        groups.push({
+            key: 'carriedJobNotPaid',
+            title: 'Job below Grand Total not on any payroll band',
+            note: 'Non-gray rows below the Grand Total pay through their crew lead\u2019s band. Fill in the Crew Lead cell on the Pivot by Job tab of the completed %\u2019s workbook.',
+            items,
+        });
+    }
     // 1. Crew-lead resolution problems.
     {
         const items = [];
@@ -38,12 +73,16 @@ function buildPayrollExceptions(input) {
             const res = job.analysis.crewLeadResolution;
             if (!res) {
                 if (job.analysis.onCalendar !== 'NOT ON CALENDAR' && !job.analysis.crewLead) {
-                    items.push({ message: `${job.jobcode2} — no crew-lead parenthetical on the calendar event` });
+                    // Round 9 §6 — the payroll process reads the Crew Lead column, so
+                    // point at the cell the user actually fills in.
+                    items.push({
+                        message: `${job.jobcode2} — the Crew Lead cell on Pivot by Job is empty, so this job has no band to pay from`,
+                    });
                 }
                 continue;
             }
             if (!res.raw && !job.analysis.crewLead) {
-                items.push({ message: `${job.jobcode2} — the event title names no crew lead` });
+                items.push({ message: `${job.jobcode2} — no crew lead on the Pivot by Job row` });
                 continue;
             }
             for (const f of res.flags) {
@@ -283,9 +322,12 @@ function buildPayrollExceptions(input) {
     groups.push({
         key: 'nvDailyOt',
         title: 'NV daily overtime (over 8 hrs/day)',
-        note: 'Informational: NV hours past 8 in a single day at a rate under $18 pay 1.5×. These hours are excluded from the weekly >40 split, so no hour is paid overtime twice.',
-        items: previews.flatMap((p) => p.model.dailyOtNotes.map((n) => ({
-            message: `${n.employeeName} — ${n.date}: ${(0, format_1.fmtHours)(n.hours)} h over 8 @ $${n.rate.toFixed(2)} on "${n.jobLabel}"`,
+        note: 'Informational: daily-overtime hours pay 1.5×. They come from the timesheet\u2019s own "Daily Overtime" pay item when it has one; otherwise NV hours past 8 in a single day at a rate under $18 are split out here. Either way they are excluded from the weekly >40 split, so no hour is paid overtime twice.',
+        items: previews.flatMap((p) => 
+        // Round 9 §16 — a timesheet-driven daily-OT line covers the whole week
+        // for that job, so it carries no single date to name.
+        p.model.dailyOtNotes.map((n) => ({
+            message: `${n.employeeName} — ${n.date ? `${n.date}: ` : ''}${(0, format_1.fmtHours)(n.hours)} h @ $${n.rate.toFixed(2)} on "${n.jobLabel}"`,
         }))),
     });
     // 6. Job missing from P&L. Each model is judged against ITS OWN upload, so a

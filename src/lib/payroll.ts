@@ -6,6 +6,7 @@
 import { AP_RE, extractApKey, normalizeApInput } from './apkey';
 import { isPercentNumber, isPercentState, round2 } from './format';
 import { baseApKey } from './jobNames';
+import type { PayRateKind } from './payTypes';
 import type {
   ConditionalRateRule,
   CrewLeadResolution,
@@ -567,6 +568,8 @@ export interface LineRate {
   fromConditionalRule?: boolean;
   /** Round 8 §9.1 — the lead's own crew-lead rate on a profit-share job. */
   fromCrewLeadRate?: boolean;
+  /** Round 9 §18 — a per-painter pay-item rate (Commercial Hourly / Wages 2). */
+  fromPayItemRate?: 'commercialHourly' | 'wages2';
 }
 
 /** How a job-rate rule's AP# matches a timesheet/calendar apKey. */
@@ -620,10 +623,20 @@ export interface WageRateLike {
   rate: number;
   hourlyRate?: number;
   crewLeadRate?: number;
+  /** Round 9 §18 — per-painter `Commercial Hourly` rate. */
+  commercialHourlyRate?: number;
+  /** Round 9 §18 — per-painter `Wages 2` rate. */
+  wages2Rate?: number;
 }
 
-/** Which of the three Round 8 §9.1 rate slots supplied a generic rate. */
-export type RateKind = 'crewLead' | 'hourlyJob' | 'painter' | 'default';
+/** Which rate slot supplied a generic rate. */
+export type RateKind =
+  | 'crewLead'
+  | 'hourlyJob'
+  | 'painter'
+  | 'commercialHourly'
+  | 'wages2'
+  | 'default';
 
 /**
  * Round 8 §9.1 — the three-rate lookup, resolved PER LINE by job type:
@@ -643,12 +656,44 @@ export function resolveWageRate(
     hourlyJob: boolean;
     /** These are the crew lead's OWN timesheet hours. */
     isCrewLead?: boolean;
+    /**
+     * Round 9 §18 — the timesheet pay item's rate slot. `commercialHourly` and
+     * `wages2` are per-painter rates that outrank the hourly-job / crew-lead
+     * slots, because the pay item is what the painter actually clocked into.
+     */
+    payRateKind?: PayRateKind;
   },
 ): { rate: number; defaulted: boolean; kind: RateKind } {
   const entry = opts.wageRates.find(
     (e) => tokensSubset(e.name, employeeName) || tokensSubset(employeeName, e.name),
   );
   const defaulted = !entry;
+
+  // Round 9 §18 — a pay item with its own rate slot wins outright. With no
+  // configured rate for that pay type the line falls back the same way an
+  // ordinary line would (hourly job → hourly rate, else the PS rate), so
+  // Round 9 §35 still pays Xavier Green $18 on an hourly job and $25 on a
+  // work-order job even though both are clocked as Commercial Hourly.
+  const genericFallback = (opts.hourlyJob ? entry?.hourlyRate : undefined) ?? entry?.rate ?? opts.defaultWageRate;
+  if (opts.payRateKind === 'commercialHourly') {
+    return {
+      rate: entry?.commercialHourlyRate ?? genericFallback,
+      defaulted,
+      kind: entry?.commercialHourlyRate !== undefined ? 'commercialHourly' : 'painter',
+    };
+  }
+  if (opts.payRateKind === 'wages2') {
+    return {
+      rate: entry?.wages2Rate ?? genericFallback,
+      defaulted,
+      kind: entry?.wages2Rate !== undefined ? 'wages2' : 'painter',
+    };
+  }
+  // Round 9 §13 — "Crew Lead - Hourly Wage" on the timesheet means these hours
+  // are crew-lead hours, whichever painter clocked them. It selects the
+  // crew-lead rate on PROFIT-SHARE jobs only: Round 8 §9.1's rule that an
+  // hourly (T&M) job pays the person's hourly-jobs rate still comes first.
+  const isCrewLead = opts.payRateKind === 'crewLead' ? true : opts.isCrewLead;
   if (opts.hourlyJob) {
     // No hourly-jobs rate on file falls through to the global default, NOT to
     // the person's profit-share rate — a piece-rate number would understate an
@@ -660,7 +705,7 @@ export function resolveWageRate(
       kind: hourly !== undefined ? 'hourlyJob' : 'default',
     };
   }
-  if (opts.isCrewLead) {
+  if (isCrewLead) {
     return {
       rate: entry?.crewLeadRate ?? opts.defaultCrewLeadRate ?? entry?.rate ?? opts.defaultWageRate,
       defaulted,
@@ -749,6 +794,8 @@ export function resolveLineRate(
     isCrewLead?: boolean;
     /** Crew-lead names resolved on this job (drives the conditional rules). */
     jobLeadNames?: readonly string[];
+    /** Round 9 §18 — rate slot selected by the timesheet pay item. */
+    payRateKind?: PayRateKind;
   },
 ): LineRate {
   const apKey = settings.apKey ?? extractApKey(jobText);
@@ -780,6 +827,7 @@ export function resolveLineRate(
       defaultCrewLeadRate: settings.defaultCrewLeadRate,
       hourlyJob,
       isCrewLead: settings.isCrewLead,
+      payRateKind: settings.payRateKind,
     });
     rate = info.rate;
     defaulted = info.defaulted;
@@ -800,7 +848,38 @@ export function resolveLineRate(
     ...(perJob ? { fromPerJobOverride: true, ...(ruleNote ? { ruleNote } : {}) } : {}),
     ...(conditional ? { fromConditionalRule: true, ...(ruleNote ? { ruleNote } : {}) } : {}),
     ...(kind === 'crewLead' ? { fromCrewLeadRate: true } : {}),
+    ...(kind === 'commercialHourly' || kind === 'wages2' ? { fromPayItemRate: kind } : {}),
   };
+}
+
+/**
+ * Round 9 §3 — regular / daily-OT / weekly-OT hour buckets for one hourly
+ * block, for the NOTES log's hour split. Returns nothing when the week is
+ * straight time only, so a plain block keeps its single totals row.
+ */
+export function hourSplitRows(
+  block: { lines: readonly { hours: number; rate: number; ot: boolean; dailyOt?: boolean }[] },
+): { label: string; hours: number; pay: number }[] {
+  const buckets: {
+    label: string;
+    match: (l: { ot: boolean; dailyOt?: boolean }) => boolean;
+  }[] = [
+    { label: 'regular hrs', match: (l) => !l.ot && !l.dailyOt },
+    { label: 'daily OT hrs (1.5x)', match: (l) => l.dailyOt === true },
+    { label: 'overtime hrs (1.5x)', match: (l) => l.ot && !l.dailyOt },
+  ];
+  const out: { label: string; hours: number; pay: number }[] = [];
+  for (const b of buckets) {
+    const lines = block.lines.filter(b.match);
+    const hours = lines.reduce((a, l) => a + l.hours, 0);
+    if (hours === 0) continue;
+    out.push({
+      label: b.label,
+      hours: round2(hours),
+      pay: round2(lines.reduce((a, l) => a + l.hours * l.rate, 0)),
+    });
+  }
+  return out.length > 1 ? out : [];
 }
 
 /**

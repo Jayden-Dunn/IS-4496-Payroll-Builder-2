@@ -6,6 +6,7 @@ import type { CSSProperties, ReactNode } from 'react';
 import { fmtAccounting, formatCrewLeadWoNote, isDarkColor, parseMoneyInput, parsePercentInput } from '../lib/format';
 import { CellInput } from './CellInput';
 import { buildJournalEntryRows } from '../lib/journalEntry';
+import { hourSplitRows } from '../lib/payroll';
 import { buildPrFinalCheckRows } from '../lib/prFinalCheck';
 import type {
   HourlyBlock,
@@ -106,6 +107,7 @@ function PsChainBody({
   defaultPsPct,
   onEdit,
   showGrossWages,
+  hideBooksRows,
   nameStyle,
   highlightFirstJob,
 }: {
@@ -114,6 +116,12 @@ function PsChainBody({
   defaultPsPct?: number;
   onEdit?: OnEdit;
   showGrossWages?: boolean;
+  /**
+   * Round 9 §30 — the Final Payroll Breakdown drops the reference rows
+   * (Total Income, Materials, Travel, QB Labor-Wages-Subs, Mileage in Books,
+   * % Materials). They stay on the main Payroll Preview.
+   */
+  hideBooksRows?: boolean;
   nameStyle?: CSSProperties;
   highlightFirstJob?: boolean;
 }): JSX.Element {
@@ -176,7 +184,11 @@ function PsChainBody({
             ['% Completion', (j: PsBlock['jobs'][number]) => (j.manualPay ? j.manualPay : pctLabel(j.percentCompletion))],
             ['- Labor + Wages', (j: PsBlock['jobs'][number]) => money(j.laborWages)],
             ['-Mileage', (j: PsBlock['jobs'][number]) => money(j.mileage)],
-            ['-½ Materials', (j: PsBlock['jobs'][number]) => money(j.halfMaterials)],
+            [
+              // Round 9 §32 — full-materials leads are charged all of it.
+              block.jobs.some((j) => j.fullMaterials) ? '- Materials' : '-½ Materials',
+              (j: PsBlock['jobs'][number]) => money(j.halfMaterials),
+            ],
           ] as [string, (j: PsBlock['jobs'][number]) => string][]
         ).map(([lab, pick]) => (
           <tr key={lab}>
@@ -234,6 +246,10 @@ function PsChainBody({
             ))}
           </tr>
         )}
+        {/* Round 9 §5 — spacer between Total Profit Share and Total. */}
+        <tr>
+          <td className="xcell" colSpan={1 + jobs.length} />
+        </tr>
         <tr className="font-semibold">
           {label('Total')}
           <td className="xcell text-right" colSpan={Math.max(jobs.length, 1)}>
@@ -309,6 +325,24 @@ function PsChainBody({
             </td>
           )}
         </tr>
+        {/* Round 9 §19/§23 — configured extra rows. */}
+        {block.extras.map((x) => (
+          <tr key={x.key}>
+            {label(x.label)}
+            <td
+              className={`xcell text-right ${x.kind === 'deduction' ? 'text-[#FF0000]' : x.kind === 'reimbursement' ? 'text-[#0070C0]' : ''}`}
+              colSpan={Math.max(jobs.length, 1)}
+            >
+              {editable && onEdit ? (
+                <NumCell value={x.amount} onCommit={(n) => onEdit(x.key, { amount: n })} />
+              ) : x.amount !== null ? (
+                money(x.amount)
+              ) : (
+                ''
+              )}
+            </td>
+          </tr>
+        ))}
         <tr className="font-bold">
           {label('Total Pay')}
           <td
@@ -319,14 +353,17 @@ function PsChainBody({
             ${money(block.totalPay)}
           </td>
         </tr>
+        {/* Round 9 §31 — hours pay + profit share for this crew lead. */}
         {showGrossWages && (
           <tr className="font-bold">
             {label('Total Gross Wages:')}
             <td className="xcell text-right" colSpan={Math.max(jobs.length, 1)}>
-              ${money(block.total + block.hourlyPay)}
+              ${money(block.totalGrossWages)}
             </td>
           </tr>
         )}
+        {hideBooksRows ? null : (
+        <>
         <tr>
           <td className="xcell" colSpan={1 + jobs.length} />
         </tr>
@@ -379,6 +416,8 @@ function PsChainBody({
             </td>
           ))}
         </tr>
+        </>
+        )}
       </tbody>
     </table>
   );
@@ -501,10 +540,59 @@ function HourlyReadOnly({
             )
           )}
         </tr>
+        {/* Round 9 §3 — the NOTES log states the hour split explicitly:
+            regular vs daily overtime vs weekly overtime, straight off the
+            timesheet's own pay items. */}
+        {/* Round 9 §19/§23 — configured extra rows (Gas Reimb, Aflac, …) so the
+            NOTES log and the Final Payroll Breakdown show the same pay the
+            Payroll Preview does. */}
+        {block.extras.map((x) => (
+          <tr key={x.key}>
+            <td className={`xcell font-medium ${bodyCls}`} colSpan={2}>
+              {x.label}
+            </td>
+            <td className={`xcell ${bodyCls}`} />
+            <td className={`xcell ${bodyCls}`} />
+            <td
+              className={`xcell text-center ${bodyCls} ${x.kind === 'deduction' ? 'text-[#FF0000]' : x.kind === 'reimbursement' ? 'text-[#0070C0]' : ''}`}
+            >
+              {x.amount !== null ? money(x.amount) : ''}
+            </td>
+            {showTaxCols && <td className={`xcell ${bodyCls}`} />}
+            {showTaxCols && <td className={`xcell ${bodyCls}`} />}
+            {showTaxCols && !notesLayout && <td className={`xcell ${bodyCls}`} />}
+          </tr>
+        ))}
+        {block.extras.some((x) => x.kind !== 'note') && (
+          <tr className="font-bold">
+            <td className={`xcell ${bodyCls}`} colSpan={2}>
+              Total Pay
+            </td>
+            <td className={`xcell ${bodyCls}`} />
+            <td className={`xcell ${bodyCls}`} />
+            <td className={`xcell text-center ${bodyCls}`}>{money(block.netPay)}</td>
+            {showTaxCols && <td className={`xcell ${bodyCls}`} />}
+            {showTaxCols && <td className={`xcell ${bodyCls}`} />}
+            {showTaxCols && !notesLayout && <td className={`xcell ${bodyCls}`} />}
+          </tr>
+        )}
+        {notesLayout &&
+          hourSplitRows(block).map((row) => (
+            <tr key={row.label}>
+              <td className={`xcell ${bodyCls}`} />
+              <td className={`xcell text-[11px] italic text-neutral-600 ${bodyCls}`}>{row.label}</td>
+              <td className={`xcell text-center ${bodyCls}`}>{row.hours.toFixed(2)}</td>
+              <td className={`xcell ${bodyCls}`} />
+              <td className={`xcell text-center ${bodyCls}`}>{money(row.pay)}</td>
+              <td className={`xcell ${bodyCls}`} />
+              <td className={`xcell ${bodyCls}`} />
+            </tr>
+          ))}
       </tbody>
     </table>
   );
 }
+
 
 function SalaryReadOnly({
   block,
@@ -522,6 +610,8 @@ function SalaryReadOnly({
           <th className="xcell text-left" style={headerStyle} colSpan={3}>
             {block.name}
             {block.timesheetHours > 0 && <span className="ml-1 font-normal">({block.timesheetHours}hrs)</span>}
+            {/* Round 9 §26/§33 — subcontractors in the salary sections. */}
+            {block.sub && <span className="ml-2 text-[10px] font-normal">(subcontractor)</span>}
           </th>
         </tr>
       </thead>
@@ -531,16 +621,47 @@ function SalaryReadOnly({
           <td className="xcell">{block.role}</td>
           <td className="xcell w-28 text-right">{money(block.amount)}</td>
         </tr>
-        <tr>
-          <td className="xcell">mileage reimb</td>
-          <td className="xcell text-right">{block.miles} mi</td>
-          <td className="xcell text-right">{money(block.mileageReimb)}</td>
-        </tr>
+        {/* Round 9 §28 — flat "Reimbursements" row instead of mileage reimb. */}
+        {block.reimbursementsLabel ? (
+          <tr>
+            <td className="xcell">{block.reimbursementsLabel}</td>
+            <td className="xcell" />
+            <td className="xcell text-right">{money(block.reimbursements)}</td>
+          </tr>
+        ) : (
+          <tr>
+            <td className="xcell">mileage reimb</td>
+            <td className="xcell text-right">{block.miles} mi</td>
+            <td className="xcell text-right">{money(block.mileageReimb)}</td>
+          </tr>
+        )}
+        {/* Round 9 §19/§23/§24/§29 — configured extra rows. */}
+        {block.extras.map((x) => (
+          <tr key={x.key}>
+            <td className="xcell">{x.label}</td>
+            <td className="xcell" />
+            <td className="xcell text-right">{x.amount !== null ? money(x.amount) : ''}</td>
+          </tr>
+        ))}
         <tr className="font-semibold">
           <td className="xcell">Total</td>
           <td className="xcell" />
-          <td className="xcell text-right">{money(block.amount + block.mileageReimb)}</td>
+          <td className="xcell text-right">{money(block.total)}</td>
         </tr>
+        {(block.taxes !== null || block.net !== null) && (
+          <>
+            <tr>
+              <td className="xcell">(-) taxes</td>
+              <td className="xcell" />
+              <td className="xcell text-right">{block.taxes !== null ? money(block.taxes) : ''}</td>
+            </tr>
+            <tr className="font-semibold">
+              <td className="xcell">net</td>
+              <td className="xcell" />
+              <td className="xcell text-right">{block.net !== null ? money(block.net) : ''}</td>
+            </tr>
+          </>
+        )}
       </tbody>
     </table>
   );
@@ -629,6 +750,7 @@ function PainterSequence({
   defaultPsPct,
   blankTaxes,
   showGrossWages,
+  hideBooksRows,
   notesMode,
   onEdit,
 }: {
@@ -637,6 +759,8 @@ function PainterSequence({
   defaultPsPct?: number;
   blankTaxes?: boolean;
   showGrossWages?: boolean;
+  /** Round 9 §30 — Final Payroll Breakdown only. */
+  hideBooksRows?: boolean;
   /** NOTES working log: materials table + T-SHEETS; no PS WO% band. */
   notesMode?: boolean;
   onEdit?: OnEdit;
@@ -673,6 +797,7 @@ function PainterSequence({
               defaultPsPct={defaultPsPct}
               onEdit={onEdit}
               showGrossWages={showGrossWages}
+              hideBooksRows={hideBooksRows}
             />
             {entry.block.tsheets && (
               <div className="mb-4 ml-4 max-w-3xl">
@@ -926,10 +1051,7 @@ export function NotesTab({
     0,
   ) +
     model.office.reduce((s, b) => s + b.totalPay, 0) +
-    [...model.admin, ...model.estimators, ...model.managers].reduce(
-      (s, b) => s + b.amount + b.mileageReimb,
-      0,
-    );
+    [...model.admin, ...model.estimators, ...model.managers].reduce((s, b) => s + b.total, 0);
   return (
     <div className="p-3" style={GARAMOND}>
       <div className="mb-3 flex max-w-4xl items-baseline justify-between gap-4">
@@ -962,6 +1084,7 @@ export function FinalPayrollTab({
         defaultPsPct={defaultPsPct}
         blankTaxes
         showGrossWages
+        hideBooksRows
       />
     </div>
   );

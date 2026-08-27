@@ -5,7 +5,10 @@ import {
   DEFAULT_DAILY_OT_HOURS_THRESHOLD,
   DEFAULT_LEGEND,
   DEFAULT_NV_DAILY_OT_RATE_THRESHOLD,
+  DEFAULT_DAILY_OT_EXEMPT,
+  DEFAULT_FULL_MATERIALS_LEADS,
   DEFAULT_PAINTER_ROSTER,
+  DEFAULT_PAYROLL_LINE_ITEMS,
   DEFAULT_PER_JOB_RATE_OVERRIDES,
   DEFAULT_PIVOT_COLUMNS,
   DEFAULT_PL_ACCOUNT_MAPPING,
@@ -25,6 +28,7 @@ import type {
   JobRateRule,
   LegendEntry,
   PainterRosterEntry,
+  PayrollLineItem,
   PerJobRateOverride,
   PlAccountMapping,
   ProfitShareEntry,
@@ -118,6 +122,14 @@ export function SettingsModal({
   const [ps, setPs] = useState<ProfitShareEntry[]>(settings.profitShare.map((e) => ({ ...e })));
   const [defaultPs, setDefaultPs] = useState(String(Math.round(settings.defaultProfitSharePct * 100)));
   const [wages, setWages] = useState<WageRateEntry[]>(settings.wageRates.map((e) => ({ ...e })));
+  // Round 9 §19/§23/§24/§29 — person-scoped extra payroll rows.
+  const [lineItems, setLineItems] = useState<PayrollLineItem[]>(
+    (settings.payrollLineItems ?? []).map((e) => ({ ...e })),
+  );
+  /** Round 9 §32 — leads charged for all of a job's materials. */
+  const [fullMatLeads, setFullMatLeads] = useState<string[]>([...(settings.fullMaterialsLeads ?? [])]);
+  /** Round 9 §27 — people exempt from NV daily overtime. */
+  const [dailyOtExempt, setDailyOtExempt] = useState<string[]>([...(settings.dailyOtExemptNames ?? [])]);
   const [defaultWage, setDefaultWage] = useState(String(settings.defaultWageRate));
   const [defaultCrewLead, setDefaultCrewLead] = useState(String(settings.defaultCrewLeadRate));
   const [nvOtRate, setNvOtRate] = useState(String(settings.nvDailyOtRateThreshold));
@@ -249,6 +261,12 @@ export function SettingsModal({
           employeeNames: r.employeeNames.map((n) => n.trim()).filter(Boolean),
         }))
         .filter((r) => r.apKey !== '' && Number.isFinite(r.rate)),
+      // Round 9 §19/§23/§24/§29/§32/§27.
+      payrollLineItems: lineItems
+        .map((r) => ({ ...r, person: r.person.trim(), label: r.label.trim() }))
+        .filter((r) => r.person !== '' && r.label !== ''),
+      fullMaterialsLeads: fullMatLeads.map((n) => n.trim()).filter(Boolean),
+      dailyOtExemptNames: dailyOtExempt.map((n) => n.trim()).filter(Boolean),
       appliedMigrations: [...settings.appliedMigrations],
     });
   };
@@ -356,7 +374,7 @@ export function SettingsModal({
             <span className="text-xs text-neutral-400">%</span>
           </div>
 
-          <SectionTitle sub="Three rates per person: PS = profit-share/default $/hr, hrly = hourly (T&M) jobs, lead = a crew lead's own timesheet hours on profit-share jobs. Blank falls back to the defaults below. OT is always 1.5× the line rate.">
+          <SectionTitle sub="Five rates per person: PS = profit-share/work-order $/hr, hrly = hourly (T&M) jobs, lead = a crew lead's own hours on profit-share jobs, comm = the &quot;Commercial Hourly&quot; pay type, wg2 = the &quot;Wages 2&quot; pay type. The timesheet's pay item picks the column; blank falls back to PS, then to the defaults below. OT lines are always 1.5× the line rate.">
             Wage rates
           </SectionTitle>
           <div className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
@@ -364,6 +382,8 @@ export function SettingsModal({
             <span className="w-16 text-right">PS</span>
             <span className="w-16 text-right">hrly</span>
             <span className="w-16 text-right">lead</span>
+            <span className="w-16 text-right">comm</span>
+            <span className="w-16 text-right">wg2</span>
             <span className="w-4" />
           </div>
           <div className="flex max-h-64 flex-col gap-1 overflow-y-auto rounded border border-neutral-100 p-1">
@@ -373,6 +393,8 @@ export function SettingsModal({
                 <input className="w-16 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs" value={e.rate} onChange={(ev) => { const n = Number(ev.target.value); if (Number.isFinite(n)) setWages((prev) => prev.map((x, j) => (j === i ? { ...x, rate: n } : x))); }} />
                 <input className="w-16 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs" value={e.hourlyRate ?? ''} placeholder="hrly" onChange={(ev) => { const t = ev.target.value.trim(); const n = Number(t); setWages((prev) => prev.map((x, j) => (j === i ? { ...x, ...(t === '' || !Number.isFinite(n) ? { hourlyRate: undefined } : { hourlyRate: n }) } : x))); }} />
                 <input className="w-16 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs" value={e.crewLeadRate ?? ''} placeholder="lead" title="Crew-lead rate on their own timesheet hours on profit-share jobs" onChange={(ev) => { const t = ev.target.value.trim(); const n = Number(t); setWages((prev) => prev.map((x, j) => (j === i ? { ...x, ...(t === '' || !Number.isFinite(n) ? { crewLeadRate: undefined } : { crewLeadRate: n }) } : x))); }} />
+                <input className="w-16 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs" value={e.commercialHourlyRate ?? ''} placeholder="comm" title="Rate on timesheet lines whose pay type is Commercial Hourly" onChange={(ev) => { const t = ev.target.value.trim(); const n = Number(t); setWages((prev) => prev.map((x, j) => (j === i ? { ...x, ...(t === '' || !Number.isFinite(n) ? { commercialHourlyRate: undefined } : { commercialHourlyRate: n }) } : x))); }} />
+                <input className="w-16 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs" value={e.wages2Rate ?? ''} placeholder="wg2" title="Rate on timesheet lines whose pay type is Wages 2" onChange={(ev) => { const t = ev.target.value.trim(); const n = Number(t); setWages((prev) => prev.map((x, j) => (j === i ? { ...x, ...(t === '' || !Number.isFinite(n) ? { wages2Rate: undefined } : { wages2Rate: n }) } : x))); }} />
                 <button type="button" className="text-neutral-400 hover:text-red-600" onClick={() => setWages((prev) => prev.filter((_, j) => j !== i))} aria-label="Remove">🗑</button>
               </div>
             ))}
@@ -406,8 +428,117 @@ export function SettingsModal({
               Reset
             </button>
           </div>
+          <div className="mt-2 flex flex-wrap items-start gap-2">
+            <span className="mt-1 text-xs">Never gets daily OT:</span>
+            <div className="flex flex-1 flex-col gap-1">
+              {dailyOtExempt.map((n, i) => (
+                <div key={i} className="flex items-center gap-1.5">
+                  <input
+                    className="flex-1 rounded border border-neutral-300 px-1.5 py-1 text-xs"
+                    value={n}
+                    placeholder="Employee"
+                    onChange={(ev) => setDailyOtExempt((prev) => prev.map((x, j) => (j === i ? ev.target.value : x)))}
+                  />
+                  <button type="button" className="text-neutral-400 hover:text-red-600" onClick={() => setDailyOtExempt((prev) => prev.filter((_, j) => j !== i))} aria-label="Remove">🗑</button>
+                </div>
+              ))}
+              <div className="flex gap-2">
+                <button type="button" className="btn text-xs" onClick={() => setDailyOtExempt((prev) => [...prev, ''])}>+ Add person</button>
+                <button type="button" className="btn text-xs" onClick={() => setDailyOtExempt([...DEFAULT_DAILY_OT_EXEMPT])}>Reset</button>
+              </div>
+            </div>
+          </div>
 
-          <SectionTitle sub="A person's rate while working a job led by someone specific — e.g. Henry earns $20/hr on Miguel Martin's jobs.">
+          <SectionTitle sub="Extra rows on a person's Payroll Preview block. Deductions come out of their total, reimbursements go in, and a note is just a labeled blank line. &quot;1st pay date&quot; rows appear only when the pay date falls on the 1st–7th of the month.">
+            Payroll line items
+          </SectionTitle>
+          <div className="flex max-h-64 flex-col gap-1 overflow-y-auto rounded border border-neutral-100 p-1">
+            {lineItems.map((r, i) => (
+              <div key={r.id} className="flex flex-wrap items-center gap-1.5">
+                <input
+                  className="min-w-[8rem] flex-1 rounded border border-neutral-300 px-1.5 py-1 text-xs"
+                  value={r.person}
+                  placeholder="Person"
+                  onChange={(ev) => setLineItems((prev) => prev.map((x, j) => (j === i ? { ...x, person: ev.target.value } : x)))}
+                />
+                <input
+                  className="min-w-[7rem] flex-1 rounded border border-neutral-300 px-1.5 py-1 text-xs"
+                  value={r.label}
+                  placeholder="Label"
+                  onChange={(ev) => setLineItems((prev) => prev.map((x, j) => (j === i ? { ...x, label: ev.target.value } : x)))}
+                />
+                <input
+                  className="w-20 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs"
+                  value={r.amount ?? ''}
+                  placeholder="blank"
+                  title="Leave blank for an empty, editable cell on the preview"
+                  onChange={(ev) => {
+                    const t = ev.target.value.trim();
+                    const n = Number(t);
+                    setLineItems((prev) =>
+                      prev.map((x, j) => (j === i ? { ...x, amount: t === '' || !Number.isFinite(n) ? null : n } : x)),
+                    );
+                  }}
+                />
+                <select
+                  className="rounded border border-neutral-300 px-1 py-1 text-xs"
+                  value={r.kind}
+                  onChange={(ev) => setLineItems((prev) => prev.map((x, j) => (j === i ? { ...x, kind: ev.target.value as PayrollLineItem['kind'] } : x)))}
+                >
+                  <option value="deduction">deduction</option>
+                  <option value="reimbursement">reimbursement</option>
+                  <option value="note">note</option>
+                </select>
+                <select
+                  className="rounded border border-neutral-300 px-1 py-1 text-xs"
+                  value={r.frequency}
+                  onChange={(ev) => setLineItems((prev) => prev.map((x, j) => (j === i ? { ...x, frequency: ev.target.value as PayrollLineItem['frequency'] } : x)))}
+                >
+                  <option value="weekly">every week</option>
+                  <option value="firstPayDateOfMonth">1st pay date</option>
+                </select>
+                <button type="button" className="text-neutral-400 hover:text-red-600" onClick={() => setLineItems((prev) => prev.filter((_, j) => j !== i))} aria-label="Remove">🗑</button>
+              </div>
+            ))}
+          </div>
+          <div className="mt-2 flex gap-2">
+            <button
+              type="button"
+              className="btn text-xs"
+              onClick={() =>
+                setLineItems((prev) => [
+                  ...prev,
+                  { id: `li-${Date.now()}`, person: '', label: '', amount: null, kind: 'note', frequency: 'weekly' },
+                ])
+              }
+            >
+              + Add line item
+            </button>
+            <button type="button" className="btn text-xs" onClick={() => setLineItems(DEFAULT_PAYROLL_LINE_ITEMS.map((e) => ({ ...e })))}>Reset</button>
+          </div>
+
+          <SectionTitle sub="These crew leads / subcontractors are charged for ALL of a job's materials instead of half — the band row reads &quot;- Materials&quot;.">
+            Full-materials leads
+          </SectionTitle>
+          <div className="flex flex-col gap-1">
+            {fullMatLeads.map((n, i) => (
+              <div key={i} className="flex items-center gap-1.5">
+                <input
+                  className="flex-1 rounded border border-neutral-300 px-1.5 py-1 text-xs"
+                  value={n}
+                  placeholder="Crew lead / subcontractor"
+                  onChange={(ev) => setFullMatLeads((prev) => prev.map((x, j) => (j === i ? ev.target.value : x)))}
+                />
+                <button type="button" className="text-neutral-400 hover:text-red-600" onClick={() => setFullMatLeads((prev) => prev.filter((_, j) => j !== i))} aria-label="Remove">🗑</button>
+              </div>
+            ))}
+          </div>
+          <div className="mt-2 flex gap-2">
+            <button type="button" className="btn text-xs" onClick={() => setFullMatLeads((prev) => [...prev, ''])}>+ Add lead</button>
+            <button type="button" className="btn text-xs" onClick={() => setFullMatLeads([...DEFAULT_FULL_MATERIALS_LEADS])}>Reset</button>
+          </div>
+
+          <SectionTitle sub="A person's rate while working a job led by someone specific. Note: the crew lead for a job comes from the Pivot by Job Crew Lead column and from who clocked the &quot;Crew Lead - Hourly Wage&quot; pay type — use these rules only for genuinely negotiated rates.">
             Conditional rate rules
           </SectionTitle>
           <div className="flex flex-col gap-1">
@@ -545,7 +676,7 @@ export function SettingsModal({
             <button type="button" className="btn text-xs" onClick={() => setPlMap(clonePlMapping(DEFAULT_PL_ACCOUNT_MAPPING))}>Reset</button>
           </div>
 
-          <SectionTitle sub="Weekly salary blocks by section on the Payroll Preview.">Salaried roster</SectionTitle>
+          <SectionTitle sub="Salary blocks by section on the Payroll Preview. wk = every week, mo = once a month on the month's first pay date (pay date on the 1st–7th). &quot;sub&quot; rows render at the very bottom of their section.">Salaried roster</SectionTitle>
           <div className="flex flex-col gap-1">
             {roster.map((e, i) => (
               <div key={i} className="flex items-center gap-1.5">
@@ -561,6 +692,16 @@ export function SettingsModal({
                 </select>
                 <input className="w-28 rounded border border-neutral-300 px-1.5 py-1 text-xs" value={e.role} placeholder="Role text" onChange={(ev) => setRoster((prev) => prev.map((x, j) => (j === i ? { ...x, role: ev.target.value } : x)))} />
                 <input className="w-20 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs" value={e.amount} onChange={(ev) => { const n = Number(ev.target.value); if (Number.isFinite(n)) setRoster((prev) => prev.map((x, j) => (j === i ? { ...x, amount: n } : x))); }} />
+                {/* Round 9 §25 — monthly people show only on the month's first pay date. */}
+                <select className="rounded border border-neutral-300 px-1 py-1 text-xs" value={e.frequency ?? 'weekly'} title="How often this person is paid" onChange={(ev) => setRoster((prev) => prev.map((x, j) => (j === i ? { ...x, frequency: ev.target.value as SalariedEntry['frequency'] } : x)))}>
+                  <option value="weekly">wk</option>
+                  <option value="firstPayDateOfMonth">mo</option>
+                </select>
+                {/* Round 9 §26 — subcontractor rows render at the bottom of the section. */}
+                <label className="flex items-center gap-1 text-[10px] text-neutral-600" title="Subcontractor — renders at the very bottom of the section">
+                  <input type="checkbox" checked={e.sub === true} onChange={(ev) => setRoster((prev) => prev.map((x, j) => (j === i ? { ...x, sub: ev.target.checked } : x)))} />
+                  sub
+                </label>
                 <button type="button" className="text-neutral-400 hover:text-red-600" onClick={() => setRoster((prev) => prev.filter((_, j) => j !== i))} aria-label="Remove">🗑</button>
               </div>
             ))}

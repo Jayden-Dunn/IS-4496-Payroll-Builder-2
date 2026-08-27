@@ -148,7 +148,10 @@ export function TimeNaviTable({ rows, colorByEstimator, estimatorOptions, onEdit
                   title={r.included ? 'Exclude this event from the report' : 'Include this event in the report'}
                 />
               </td>
-              <td className="xcell max-w-[16rem] whitespace-normal break-words">{r.event}</td>
+              {/* Round 9 §37 — single-line row height: the full title stays in the tooltip. */}
+              <td className="xcell max-w-[16rem] truncate whitespace-nowrap" title={r.event}>
+                {r.event}
+              </td>
               <td className="xcell whitespace-nowrap">{fmtDateShort(r.startDate)}</td>
               <td className="xcell whitespace-nowrap">{fmtDateShort(r.endDate)}</td>
               <td className="xcell whitespace-nowrap">{r.calendar}</td>
@@ -168,7 +171,7 @@ export function TimeNaviTable({ rows, colorByEstimator, estimatorOptions, onEdit
               )}
               <td className="xcell min-w-[144px] max-w-[192px]">
                 <div
-                  className={`cursor-pointer whitespace-pre-line ${isExpanded ? '' : 'line-clamp-2'}`}
+                  className={`cursor-pointer whitespace-pre-line ${isExpanded ? '' : 'line-clamp-1'}`}
                   onClick={() => toggleExpanded(r.id)}
                   title={isExpanded ? 'Click to collapse' : 'Click to expand'}
                 >

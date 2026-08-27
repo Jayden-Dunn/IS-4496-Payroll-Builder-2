@@ -14,6 +14,8 @@ const exportRound6Sheets_1 = require("./exportRound6Sheets");
 const fills_1 = require("./fills");
 const parsers_1 = require("./parsers");
 const payroll_1 = require("./payroll");
+const payTypes_1 = require("./payTypes");
+const payrollPivot_1 = require("./payrollPivot");
 const payrollPreview_1 = require("./payrollPreview");
 const prFinalCheck_1 = require("./prFinalCheck");
 const pivotByJob_1 = require("./pivotByJob");
@@ -777,6 +779,159 @@ function runSelfTests() {
     });
     check('crew-owner lead: employee in "X\'s Crew" becomes a lead', ownerPreview.leads.map((l) => l.leadName), ['ANTONIO ZUNIGA']);
     check('crew-owner lead: not also an hourly painter', ownerPreview.painters.length, 0);
+    // --- Round 9 §16/§18 — pay items drive the rate slot and the overtime ------
+    check('payItem: Regular Pay is straight time on the PS rate', (0, payTypes_1.classifyPayItem)('Regular Pay'), {
+        kind: 'regular',
+        rate: 'regular',
+    });
+    check('payItem: Crew Lead - Hourly Wage', (0, payTypes_1.classifyPayItem)('Crew Lead - Hourly Wage'), {
+        kind: 'regular',
+        rate: 'crewLead',
+    });
+    check('payItem: Commercial Hourly', (0, payTypes_1.classifyPayItem)('Commercial Hourly'), {
+        kind: 'regular',
+        rate: 'commercialHourly',
+    });
+    check('payItem: Wages 2', (0, payTypes_1.classifyPayItem)('Wages 2'), { kind: 'regular', rate: 'wages2' });
+    check('payItem: Overtime Pay is weekly OT on the PS rate', (0, payTypes_1.classifyPayItem)('Overtime Pay'), {
+        kind: 'overtime',
+        rate: 'regular',
+        reason: 'weekly',
+    });
+    check('payItem: Crew Lead - Hourly Wage Overtime is OT on the lead rate', (0, payTypes_1.classifyPayItem)('Crew Lead - Hourly Wage Overtime'), { kind: 'overtime', rate: 'crewLead', reason: 'weekly' });
+    check('payItem: Daily Overtime', (0, payTypes_1.classifyPayItem)('Daily Overtime'), {
+        kind: 'overtime',
+        rate: 'regular',
+        reason: 'daily',
+    });
+    check('payItem: unknown item is never overtime', (0, payTypes_1.classifyPayItem)('Holiday Bonus'), {
+        kind: 'regular',
+        rate: 'regular',
+    });
+    check('payItem: blank is never overtime', (0, payTypes_1.classifyPayItem)(''), { kind: 'regular', rate: 'regular' });
+    // Round 9 §18 — the per-painter pay-type rates.
+    const r9Rates = [
+        { name: 'Samuel Brewster', rate: 18, commercialHourlyRate: 30 },
+        { name: 'Xavier Green', rate: 25, hourlyRate: 18 },
+        { name: 'Damian Vasquez', rate: 18, wages2Rate: 21 },
+    ];
+    check('§18 Commercial Hourly uses the person\u2019s commercial rate', (0, payroll_1.resolveWageRate)('Samuel Brewster', {
+        wageRates: r9Rates,
+        defaultWageRate: 18,
+        hourlyJob: true,
+        payRateKind: 'commercialHourly',
+    }).rate, 30);
+    check('§35 Commercial Hourly with no commercial rate: hourly job \u2192 hourly rate', (0, payroll_1.resolveWageRate)('Xavier Green', {
+        wageRates: r9Rates,
+        defaultWageRate: 18,
+        hourlyJob: true,
+        payRateKind: 'commercialHourly',
+    }).rate, 18);
+    check('§35 Commercial Hourly with no commercial rate: work-order job \u2192 PS rate', (0, payroll_1.resolveWageRate)('Xavier Green', {
+        wageRates: r9Rates,
+        defaultWageRate: 18,
+        hourlyJob: false,
+        payRateKind: 'commercialHourly',
+    }).rate, 25);
+    check('§18 Wages 2 uses the person\u2019s Wages 2 rate', (0, payroll_1.resolveWageRate)('Damian Vasquez', {
+        wageRates: r9Rates,
+        defaultWageRate: 18,
+        hourlyJob: false,
+        payRateKind: 'wages2',
+    }).rate, 21);
+    check('§13 crew-lead pay item selects the crew-lead rate on a PS job', (0, payroll_1.resolveWageRate)('Samuel Brewster', {
+        wageRates: r9Rates,
+        defaultWageRate: 18,
+        defaultCrewLeadRate: 18,
+        hourlyJob: false,
+        payRateKind: 'crewLead',
+    }).kind, 'crewLead');
+    check('§9.1 still wins: an HOURLY job pays the hourly rate even on a crew-lead item', (0, payroll_1.resolveWageRate)('Xavier Green', {
+        wageRates: r9Rates,
+        defaultWageRate: 18,
+        defaultCrewLeadRate: 30,
+        hourlyJob: true,
+        payRateKind: 'crewLead',
+    }).rate, 18);
+    // --- Round 9 §6 — the payroll pivot is built from Slot A verbatim ----------
+    const slotAJobs = [
+        {
+            section: 'nv',
+            customer: 'Pepe Customer',
+            job: 'AP24258 Ext',
+            apKey: '24258',
+            onCalendar: '-',
+            estimator: 'PG',
+            crewLead: "PEPE'S PAINTING LLC",
+            split: 1,
+            woOverride: 4000,
+            woPct: 0.53,
+            percent: 0.5,
+            notes: '',
+            hourly: false,
+            excludedFromPayroll: false,
+            byDate: { '2026-08-03': 8 },
+            total: 8,
+            employees: [{ username: 'x@y.com', byDate: { '2026-08-03': 8 }, total: 8, qbHours: null }],
+        },
+        {
+            section: 'balances',
+            customer: 'Carlos Customer',
+            job: 'AP25264 Int',
+            apKey: '25264',
+            onCalendar: '-',
+            estimator: 'MH',
+            crewLead: 'CARLOS RUIZ CRUZ',
+            split: 1,
+            woOverride: null,
+            woPct: 0.38,
+            percent: 0.9,
+            notes: '',
+            hourly: false,
+            excludedFromPayroll: false,
+            byDate: {},
+            total: 0,
+            employees: [],
+        },
+        {
+            section: 'balances',
+            customer: 'Gray Customer',
+            job: 'AP20001 Int',
+            apKey: '20001',
+            onCalendar: '-',
+            estimator: 'MH',
+            crewLead: 'CARLOS RUIZ CRUZ',
+            split: 1,
+            woOverride: null,
+            woPct: null,
+            percent: 0.5,
+            notes: '',
+            hourly: false,
+            excludedFromPayroll: true, // §11 — gray rows stay off payroll
+            byDate: {},
+            total: 0,
+            employees: [],
+        },
+    ];
+    const slotAPivot = (0, payrollPivot_1.buildPayrollPivotByJob)({
+        completed: {
+            timesheet: { rows: [], lunchRemoved: 0 },
+            jobs: slotAJobs,
+            dates: [],
+            dateIsos: ['2026-08-03'],
+            title: 'NV PAYROLL: 8/14/2026',
+            lastWeekPbj: [],
+        },
+        settings: (0, settings_1.defaultSettings)(),
+    });
+    check('§6 payroll pivot: WO% comes straight off Slot A\u2019s WO% column', slotAPivot.customers[0].jobs[0].analysis.woPct, 0.53);
+    check('§8/§20 payroll pivot: WO Override comes straight off Slot A', slotAPivot.customers[0].jobs[0].analysis.woOverride, 4000);
+    check('§9/§11 payroll pivot: bottom-of-pivot rows are carried, gray flag intact', slotAPivot.balances.map((r) => [r.apKey, r.excludedFromPayroll]), [
+        ['25264', false],
+        ['20001', true],
+    ]);
+    check('§13 payroll pivot: the Crew Lead cell IS the crew lead', slotAPivot.balances[0].crewLead, 'CARLOS RUIZ CRUZ');
+    check('§6 payroll pivot: subcontractor leads still resolve as subs', slotAPivot.customers[0].jobs[0].analysis.sub, true);
     const hourlyPbj = {
         ...ownerPbj,
         customers: ownerPbj.customers.map((c) => ({

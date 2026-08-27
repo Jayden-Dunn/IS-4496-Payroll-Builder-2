@@ -24,6 +24,7 @@ exports.resolveWageRate = resolveWageRate;
 exports.matchPerJobRateOverride = matchPerJobRateOverride;
 exports.matchConditionalRateRule = matchConditionalRateRule;
 exports.resolveLineRate = resolveLineRate;
+exports.hourSplitRows = hourSplitRows;
 exports.applyDavisBaconLeadFloor = applyDavisBaconLeadFloor;
 /**
  * Round 3 shared payroll derivations (§3): job display names, crew-lead
@@ -477,6 +478,31 @@ function matchJobRateRule(employeeName, jobApKey, rules) {
 function resolveWageRate(employeeName, opts) {
     const entry = opts.wageRates.find((e) => tokensSubset(e.name, employeeName) || tokensSubset(employeeName, e.name));
     const defaulted = !entry;
+    // Round 9 §18 — a pay item with its own rate slot wins outright. With no
+    // configured rate for that pay type the line falls back the same way an
+    // ordinary line would (hourly job → hourly rate, else the PS rate), so
+    // Round 9 §35 still pays Xavier Green $18 on an hourly job and $25 on a
+    // work-order job even though both are clocked as Commercial Hourly.
+    const genericFallback = (opts.hourlyJob ? entry?.hourlyRate : undefined) ?? entry?.rate ?? opts.defaultWageRate;
+    if (opts.payRateKind === 'commercialHourly') {
+        return {
+            rate: entry?.commercialHourlyRate ?? genericFallback,
+            defaulted,
+            kind: entry?.commercialHourlyRate !== undefined ? 'commercialHourly' : 'painter',
+        };
+    }
+    if (opts.payRateKind === 'wages2') {
+        return {
+            rate: entry?.wages2Rate ?? genericFallback,
+            defaulted,
+            kind: entry?.wages2Rate !== undefined ? 'wages2' : 'painter',
+        };
+    }
+    // Round 9 §13 — "Crew Lead - Hourly Wage" on the timesheet means these hours
+    // are crew-lead hours, whichever painter clocked them. It selects the
+    // crew-lead rate on PROFIT-SHARE jobs only: Round 8 §9.1's rule that an
+    // hourly (T&M) job pays the person's hourly-jobs rate still comes first.
+    const isCrewLead = opts.payRateKind === 'crewLead' ? true : opts.isCrewLead;
     if (opts.hourlyJob) {
         // No hourly-jobs rate on file falls through to the global default, NOT to
         // the person's profit-share rate — a piece-rate number would understate an
@@ -488,7 +514,7 @@ function resolveWageRate(employeeName, opts) {
             kind: hourly !== undefined ? 'hourlyJob' : 'default',
         };
     }
-    if (opts.isCrewLead) {
+    if (isCrewLead) {
         return {
             rate: entry?.crewLeadRate ?? opts.defaultCrewLeadRate ?? entry?.rate ?? opts.defaultWageRate,
             defaulted,
@@ -585,6 +611,7 @@ function resolveLineRate(employeeName, jobText, hourlyJob, settings) {
             defaultCrewLeadRate: settings.defaultCrewLeadRate,
             hourlyJob,
             isCrewLead: settings.isCrewLead,
+            payRateKind: settings.payRateKind,
         });
         rate = info.rate;
         defaulted = info.defaulted;
@@ -602,7 +629,33 @@ function resolveLineRate(employeeName, jobText, hourlyJob, settings) {
         ...(perJob ? { fromPerJobOverride: true, ...(ruleNote ? { ruleNote } : {}) } : {}),
         ...(conditional ? { fromConditionalRule: true, ...(ruleNote ? { ruleNote } : {}) } : {}),
         ...(kind === 'crewLead' ? { fromCrewLeadRate: true } : {}),
+        ...(kind === 'commercialHourly' || kind === 'wages2' ? { fromPayItemRate: kind } : {}),
     };
+}
+/**
+ * Round 9 §3 — regular / daily-OT / weekly-OT hour buckets for one hourly
+ * block, for the NOTES log's hour split. Returns nothing when the week is
+ * straight time only, so a plain block keeps its single totals row.
+ */
+function hourSplitRows(block) {
+    const buckets = [
+        { label: 'regular hrs', match: (l) => !l.ot && !l.dailyOt },
+        { label: 'daily OT hrs (1.5x)', match: (l) => l.dailyOt === true },
+        { label: 'overtime hrs (1.5x)', match: (l) => l.ot && !l.dailyOt },
+    ];
+    const out = [];
+    for (const b of buckets) {
+        const lines = block.lines.filter(b.match);
+        const hours = lines.reduce((a, l) => a + l.hours, 0);
+        if (hours === 0)
+            continue;
+        out.push({
+            label: b.label,
+            hours: (0, format_1.round2)(hours),
+            pay: (0, format_1.round2)(lines.reduce((a, l) => a + l.hours * l.rate, 0)),
+        });
+    }
+    return out.length > 1 ? out : [];
 }
 /**
  * Round 6 §7.1 Branch 2 — crew-lead Davis-Bacon floor on per-job pay after

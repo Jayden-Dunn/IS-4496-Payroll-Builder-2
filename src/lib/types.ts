@@ -256,6 +256,44 @@ export interface WageRateEntry {
    * job is a profit-share job. Falls back to `AppSettings.defaultCrewLeadRate`.
    */
   crewLeadRate?: number;
+  /**
+   * Round 9 §18 — the person's rate on timesheet lines whose pay type is
+   * `Commercial Hourly`. Falls back to their `rate` when unset.
+   */
+  commercialHourlyRate?: number;
+  /** Round 9 §18 — the person's rate on `Wages 2` timesheet lines. */
+  wages2Rate?: number;
+}
+
+/**
+ * Round 9 §19/§23/§24/§29 — a person-scoped extra row on their payroll block
+ * (Aflac, health insurance, gas/other reimbursements). Seeded in Settings and
+ * fully editable there; the amount stays editable on the preview too.
+ */
+export interface PayrollLineItem {
+  id: string;
+  /** Person the row belongs to (token match against the block name). */
+  person: string;
+  /** Row label exactly as it should read on the Payroll Preview. */
+  label: string;
+  /** Default amount; `null` renders a blank, editable cell. */
+  amount: number | null;
+  /** `deduction` subtracts from the block total, `reimbursement` adds, `note` neither. */
+  kind: 'deduction' | 'reimbursement' | 'note';
+  /**
+   * `weekly` — every payroll run.
+   * `firstPayDateOfMonth` — only when the pay date falls on the 1st–7th.
+   */
+  frequency: 'weekly' | 'firstPayDateOfMonth';
+}
+
+/** Round 9 — one resolved extra row on a rendered payroll block. */
+export interface PayrollExtraLine {
+  /** Edit key: `xl:{blockKey}:{lineItemId}`. */
+  key: string;
+  label: string;
+  amount: number | null;
+  kind: 'deduction' | 'reimbursement' | 'note';
 }
 
 /**
@@ -293,9 +331,21 @@ export interface SalariedEntry {
   name: string;
   section: SalarySection;
   role: string;
-  amount: number; // weekly
+  amount: number; // weekly (or monthly when frequency is firstPayDateOfMonth)
   /** Round 8 §7.3 — owning entity; legacy rows migrate to 'NV'. */
   entity: EntityCode;
+  /**
+   * Round 9 §25 — `firstPayDateOfMonth` pays once a month, on the first pay
+   * date of that month (pay date on the 1st–7th). Defaults to weekly.
+   */
+  frequency?: 'weekly' | 'firstPayDateOfMonth';
+  /** Round 9 §26 — subcontractor: rendered last inside the section. */
+  sub?: boolean;
+  /** Round 9 §28 — replaces the "mileage reimb" row with a flat labeled row. */
+  reimbursementsLabel?: string;
+  /** Round 9 §34 — pre-filled taxes / net rows for this person. */
+  taxes?: number;
+  net?: number;
 }
 
 /**
@@ -355,6 +405,21 @@ export interface AppSettings {
   prevailingMinRate: number;
   /** Round 6 §7.2 — negotiated job-specific $/hr rules. */
   jobRateRules: JobRateRule[];
+  /**
+   * Round 9 §19/§23/§24/§29 — person-scoped extra rows (Aflac, health
+   * insurance, gas/other reimbursements) on the Payroll Preview blocks.
+   */
+  payrollLineItems: PayrollLineItem[];
+  /**
+   * Round 9 §32 — crew leads / subcontractors responsible for ALL of a job's
+   * materials instead of half. Matching is by token subset on the lead name.
+   */
+  fullMaterialsLeads: string[];
+  /**
+   * Round 9 §27 — people the NV daily-overtime rule never applies to (e.g.
+   * Utah crews on the NV timesheet).
+   */
+  dailyOtExemptNames: string[];
   /**
    * One-time data migrations already applied to this settings blob (e.g.
    * 'r8-rf-color'). Persisted so each runs exactly once per stored settings.
@@ -615,6 +680,17 @@ export interface HourlyLine {
   fromCrewLeadRate?: boolean;
   /** Weekly (>40 hrs/wk) overtime line. */
   ot: boolean;
+  /**
+   * Round 9 §16 — the timesheet `payroll item` this line came from
+   * ("Regular Pay", "Crew Lead - Hourly Wage", "Overtime Pay", …). Blank when
+   * the line was synthesized (office roll-ups, computed OT).
+   */
+  payItem?: string;
+  /**
+   * Round 9 §16 — the OT line came from the timesheet's own overtime pay
+   * item rather than from the computed >40 / >8 rules.
+   */
+  fromTimesheetOt?: boolean;
   /** Round 8 §9.2 — NV daily-overtime line (hours past 8 in one day). */
   dailyOt?: boolean;
   /** "7/14" — the day the daily-OT hours came from. */
@@ -640,6 +716,13 @@ export interface HourlyBlock {
   nest: number | null;
   net: number | null;
   inactive: boolean;
+  /** Round 9 §19/§23 — extra rows (Gas Reimb, Aflac, …) under the totals. */
+  extras: PayrollExtraLine[];
+  /**
+   * Round 9 §23 — `totalPay` + reimbursements − deductions from `extras`.
+   * Equals `totalPay` when the block has no money-moving extras.
+   */
+  netPay: number;
 }
 
 /** One job column inside a profit-share block. */
@@ -667,6 +750,17 @@ export interface PsJobColumn {
   /** Round 8 §8.3 — P&L sundries; seeds Deductions/Sundries, not materials. */
   sundries: number;
   halfMaterials: number;
+  /**
+   * Round 9 §32 — this band is responsible for ALL of the job's materials, so
+   * the row reads "- Materials" and carries the full amount.
+   */
+  fullMaterials: boolean;
+  /**
+   * Round 9 §1 — labor computed from the timesheet hours on this AP# (rate ×
+   * hours for every painter on the job), which is what `laborWages` defaults
+   * to. Kept for the tooltip / exceptions when a manual edit replaces it.
+   */
+  timesheetLabor: number;
   /** Round 8 §8.1 — base × %Completion − labor − ½materials (0 when manual). */
   totalProfitShare: number;
   splitWith: number; // 1 = no split
@@ -706,6 +800,10 @@ export interface PsBlock {
   /** Round 8 §8.2 — Total + Hourly Pay + Reimbursements − Deductions. */
   totalPay: number;
   tsheets: HourlyBlock | null; // the lead's own hourly block
+  /** Round 9 §19/§23 — extra rows (Aflac, Gas Reimb, …) above Total Pay. */
+  extras: PayrollExtraLine[];
+  /** Round 9 §31 — Hourly Pay + Total profit share (Final Payroll Breakdown). */
+  totalGrossWages: number;
 }
 
 /** Salary block (§5.4/§5.5). */
@@ -718,6 +816,22 @@ export interface SalaryBlock {
   timesheetHours: number; // shown as "(Nhrs)" when > 0
   miles: number; // editable
   mileageReimb: number; // miles × rate
+  /** Round 9 §26 — subcontractor row, rendered last inside its section. */
+  sub: boolean;
+  /**
+   * Round 9 §28 — when set, the mileage row is replaced by a single flat
+   * editable row with this label (Jodi Dunn's "Reimbursements").
+   */
+  reimbursementsLabel?: string;
+  /** Round 9 §28 — the flat reimbursement amount when `reimbursementsLabel` is set. */
+  reimbursements: number;
+  /** Round 9 §19/§23/§24/§29 — extra rows (Aflac, Health Insurance, …). */
+  extras: PayrollExtraLine[];
+  /** Round 9 §34 — pre-filled taxes / net rows; null hides them. */
+  taxes: number | null;
+  net: number | null;
+  /** amount + reimbursements + extra reimbursements − extra deductions. */
+  total: number;
 }
 
 /** Round 4 §5.2 — the single A→Z painter/crew-lead sequence. */
@@ -805,6 +919,10 @@ export interface PayrollEdit {
   materials?: number;
   miles?: number;
   hours?: number;
+  /** Round 9 §14 — the crew profit-share % on the band header. */
+  woPct?: number | null;
+  /** Round 9 §19/§23 — an extra line's amount (`xl:` keys). */
+  amount?: number | null;
 }
 
 export type PayrollEditsMap = Record<string, PayrollEdit>;

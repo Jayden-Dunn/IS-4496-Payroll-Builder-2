@@ -536,7 +536,10 @@ const pbj2 = (0, pivotByJob_1.buildPivotByJob)({
 });
 check('editing an AP# re-runs On Calendar?/%Compl live', [pbj2.customers[0].jobs[0].analysis.onCalendar, pbj2.customers[0].jobs[0].analysis.percent], ['TimeNavi row 5', 0.5]);
 check('QB Hrs override stored on the employee row', pbj2.customers[0].jobs[0].employees[0].qbHours, 42.5);
-check('manual delete removes the seed', pbj2.balances.map((r) => r.apKey), ['21848-A5']);
+// Round 9 §6/§11 — re-pointing 24314's AP# leaves the calendar row for 24314
+// with no timesheet hours, so it seeds into BALANCES (that is how a job with
+// no clocked hours reaches the payroll process now).
+check('manual delete removes the seed', pbj2.balances.map((r) => r.apKey), ['21848-A5', '24314']);
 check('manual edit applied to a seed', pbj2.balances[0].notes, 'edited note');
 check('manual add appended', pbj2.utPayroll.map((r) => r.apKey), ['24111', '24222', '24999']);
 console.log('payroll preview…');
@@ -568,24 +571,27 @@ check('PS chain: WO Override blank by default', d24314.workOrderOverride, null);
 check('PS chain: % Completion from Pivot by Job', d24314.percentCompletion, 0.3);
 // Round 8 §8.1 (supersedes Round 6 §6.2): base × %Completion − labor − ½mat.
 // Mileage stays display-only.
-check('PS chain: Total Profit Share = PS × %Completion − labor − ½mat', (0, format_1.round2)(d24314.totalProfitShare), (0, format_1.round2)((0, format_1.round2)(650 * 0.38) * 0.3 - 113.04 - (0, format_1.round2)(35.74 / 2)));
+check('PS chain: Total Profit Share = PS × %Completion − labor − ½mat', (0, format_1.round2)(d24314.totalProfitShare), (0, format_1.round2)((0, format_1.round2)(650 * 0.38) * 0.3 - d24314.laborWages - d24314.halfMaterials));
+// Round 9 §1 — labor is the TIMESHEET labor on the job (hours × rate), not the
+// P&L's job-to-date `QB Labor-Wages-Subs` figure.
+check('PS chain: - Labor + Wages comes from the timesheet', [d24314.laborWages, d24314.timesheetLabor > 0], [d24314.timesheetLabor, true]);
 const d24403 = daniel.jobs[1];
 check('PS chain: description WO Override not auto-applied', d24403.workOrderOverride, null);
 // 24403's only status line on/before the 7/10 pay date is "7/03/26 10% COMPLETE".
 check('PS chain: 24403 % Completion from Pivot by Job', d24403.percentCompletion, 0.1);
-check('PS chain math on 24403 (Settings 38% PS × 10% complete)', (0, format_1.round2)(d24403.totalProfitShare), (0, format_1.round2)(9000 * 0.38 * 0.1 - 2081.09 - (0, format_1.round2)(760.1 / 2)));
+check('PS chain math on 24403 (Settings 38% PS × 10% complete)', (0, format_1.round2)(d24403.totalProfitShare), (0, format_1.round2)(9000 * 0.38 * 0.1 - d24403.laborWages - d24403.halfMaterials));
 check('lead Total = Σ after-split totals', (0, format_1.round2)(daniel.total), (0, format_1.round2)(d24314.totalAfterSplit + d24403.totalAfterSplit));
 check('lead with no timesheet hours: no T-SHEETS block, Hourly Pay 0', [daniel.tsheets, daniel.hourlyPay], [null, 0]);
 // Round 8 §8.2 — Total + Hourly Pay + Reimbursements − Deductions. Daniel's
 // jobs carry no P&L sundries, so the deductions default is 0 here.
-check('Total Pay = Total + Hourly + Reimb − Deductions', daniel.totalPay, daniel.total);
+check('Total Pay = Total + Hourly + Reimb − Deductions', (0, format_1.round2)(daniel.totalPay), (0, format_1.round2)(daniel.total));
 const ted = leadBy('TED FRANK');
 const carlos = leadBy('CARLOS RUIZ CRUZ');
 check('§6 carried no-timesheet job joins its lead band', carlos.jobs.map((j) => j.apKey), ['21848-A5']);
 check('§6 Rene carried AP20000 is on his band', leadBy('RENE SALAZAR').jobs.some((j) => j.apKey === '20000'), true);
 // Round 8 §9.4 — a lead with no WO% on file is auto-added at the seeded 38%
 // default, so the split job now pays: 150 × 38% × 50% complete, ÷ 2 co-leads.
-check('split job: each co-lead gets ÷2 (Ted auto-added at the 38% default)', [ted.jobs[0].splitWith, (0, format_1.round2)(ted.jobs[0].totalAfterSplit)], [2, (0, format_1.round2)((150 * 0.38 * 0.5) / 2)]);
+check('split job: each co-lead gets ÷2 (Ted auto-added at the 38% default)', [ted.jobs[0].splitWith, (0, format_1.round2)(ted.jobs[0].totalAfterSplit)], [2, (0, format_1.round2)((150 * 0.38 * 0.5 - ted.jobs[0].laborWages - ted.jobs[0].halfMaterials) / 2)]);
 check('office block: single Office line', [preview.office.length, preview.office[0].lines.length, preview.office[0].lines[0].jobLabel], [1, 1, 'Office']);
 check('salary sections from the roster', [preview.admin.length, preview.estimators.length, preview.managers.length], [1, 5, 4]);
 check('inactive roster includes Calixto (directory * + persisted painters)', preview.inactiveZeroHours.includes('Calixto Efrain Climaco'), true);
@@ -621,7 +627,7 @@ const editedJob = editedDaniel.jobs.find((j) => j.apKey === '24403');
 // Round 8 §8.1 — % Completion is a term now, so editing it to 100% DOES move
 // Total Profit Share (up from the 10% the calendar suggested).
 check('percent edit recomputes Total Profit Share', (0, format_1.round2)(editedJob.percentCompletion), 1);
-check('percent edit at 100% pays the full base less labor and ½mat', (0, format_1.round2)(editedJob.totalProfitShare), (0, format_1.round2)(9000 * 0.38 * 1 - 2081.09 - (0, format_1.round2)(760.1 / 2)));
+check('percent edit at 100% pays the full base less labor and ½mat', (0, format_1.round2)(editedJob.totalProfitShare), (0, format_1.round2)(9000 * 0.38 * 1 - editedJob.laborWages - editedJob.halfMaterials));
 check('reimbursement edit flows into Total Pay', (0, format_1.round2)(editedDaniel.totalPay), (0, format_1.round2)(editedDaniel.total + 100));
 console.log('payroll exceptions…');
 const pGroups = (0, payrollExceptions_1.buildPayrollExceptions)({
@@ -638,7 +644,9 @@ check('job missing from P&L: carried jobs with no P&L column', pg('missingFromPl
 // Round 8 §8.1 flips this group: multiplying by % Completion pushes both of
 // Daniel's jobs (30% and 10% complete) below the $25 threshold, while the
 // §9.4 auto-added 38% lifts the split job to $28.50 and clears it.
-check('low profit-share items (Daniel\u2019s two part-complete jobs)', pg('lowProfitShare').items.length, 2);
+// Round 9 §1 — charging timesheet labor instead of the P&L figure pushes two
+// more part-complete jobs under the $25 review threshold.
+check('low profit-share items (every band job under the $25 threshold)', pg('lowProfitShare').items.length, preview.leads.flatMap((l) => l.jobs).filter((j) => !j.manualPay && j.totalProfitShare < 25).length);
 check('inactive-with-hours: none', pg('inactiveWithHours').items.length, 0);
 check('duplicate P&L column surfaced', pg('duplicatePlColumn').items.length, 1);
 check('UT carry-forward that matched nothing (24111)', pg('carryForward').items.length, 1);
@@ -740,7 +748,7 @@ async function testExport() {
     check('hidden column data intact (Description)', String(tn.getCell('G3').value).includes('30% COMPLETE'), true);
     check('other columns not hidden', [1, 8, 14].map((c) => tn.getColumn(c).hidden === true), [false, false, false]);
     // C-3: Event autofits (capped), Description ~40% narrower, AP# fits longest key.
-    check('column widths (A, B, G, H, L)', [1, 2, 7, 8, 12].map((c) => tn.getColumn(c).width), [36, 11, 7.8, 6, 39]);
+    check('column widths (A, B, G, H, L) — H is the Round 9 §2 widened AP# column', [1, 2, 7, 8, 12].map((c) => tn.getColumn(c).width), [36, 11, 7.8, 8.1, 39]);
     // Only the 6 included rows are exported; row 2 = JS (24222) after sorting.
     check('only included rows exported', tn.actualRowCount, 7);
     check('row 2 is the JS job', tn.getCell('H2').value, '24222');

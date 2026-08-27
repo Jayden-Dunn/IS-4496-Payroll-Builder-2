@@ -18,6 +18,7 @@ exports.buildInactiveEmployeesSheet = buildInactiveEmployeesSheet;
 exports.buildPrFinalCheckSheet = buildPrFinalCheckSheet;
 const apkey_1 = require("./apkey");
 const format_1 = require("./format");
+const payroll_1 = require("./payroll");
 const prFinalCheck_1 = require("./prFinalCheck");
 const BLACK = 'FF000000';
 const WHITE = 'FFFFFFFF';
@@ -457,7 +458,12 @@ function writePsChainValues(ws, block, startCol, opts) {
         },
         { label: '- Labor + Wages', vals: cut.map((j) => j.laborWages), fmt: MONEY_FMT },
         { label: '-Mileage', vals: cut.map((j) => j.mileage), fmt: MONEY_FMT },
-        { label: '-½ Materials', vals: cut.map((j) => j.halfMaterials), fmt: MONEY_FMT },
+        {
+            // Round 9 §32 — a full-materials lead is charged all of it.
+            label: block.jobs.some((j) => j.fullMaterials) ? '- Materials' : '-½ Materials',
+            vals: cut.map((j) => j.halfMaterials),
+            fmt: MONEY_FMT,
+        },
         {
             label: 'Total Profit Share',
             vals: cut.map((j) => (j.manualPay ? '' : j.totalProfitShare)),
@@ -465,9 +471,10 @@ function writePsChainValues(ws, block, startCol, opts) {
             bold: true,
         },
     ];
+    const materialsLabel = block.jobs.some((j) => j.fullMaterials) ? '- Materials' : '-½ Materials';
     let halfMatRow = 0;
     for (const rr of rows) {
-        if (rr.label === '-½ Materials')
+        if (rr.label === materialsLabel)
             halfMatRow = r;
         set(r, startCol, rr.label);
         if (rr.bold)
@@ -508,6 +515,12 @@ function writePsChainValues(ws, block, startCol, opts) {
         { label: 'Hourly Pay', value: block.hourlyPay, highlight: true, formula: opts.hourlyPayRef },
         { label: 'Reimbursements', value: block.reimbursements, memo: block.reimbMemo, color: REIMB_BLUE },
         { label: 'Deductions/Sundries', value: block.deductions, memo: block.deductMemo, color: DEDUCT_RED, formula: opts.deductionsRef },
+        // Round 9 §19/§23 — configured extra rows, directly above Total Pay.
+        ...block.extras.map((x) => ({
+            label: x.label,
+            value: x.amount ?? '',
+            color: x.kind === 'deduction' ? DEDUCT_RED : x.kind === 'reimbursement' ? REIMB_BLUE : undefined,
+        })),
         { label: 'Total Pay', value: block.totalPay, bold: true, money: true, cream: style === 'profitshare' },
     ];
     let deductFooterRow = 0;
@@ -545,13 +558,17 @@ function writePsChainValues(ws, block, startCol, opts) {
         }
     }
     if (opts.showGrossWages) {
-        const gross = block.total + block.hourlyPay;
+        // Round 9 §31 — hours pay + profit share for this crew lead.
+        const gross = block.totalGrossWages;
         set(r, startCol, 'Total Gross Wages:');
         set(r, startCol + 1, gross, MONEY_FMT);
         ws.getCell(r, startCol).font = { ...baseFont, bold: true };
         ws.getCell(r, startCol + 1).font = { ...baseFont, bold: true };
         r++;
     }
+    // Round 9 §30 — the Final Payroll Breakdown stops here.
+    if (opts.hideBooksRows)
+        return r;
     r++; // blank before income block
     const info = [
         { label: 'Total Income', vals: block.jobs.slice(0, jobCount).map((j) => j.income), fmt: MONEY_FMT },
@@ -841,20 +858,65 @@ function writeHourlyBlockValues(ws, block, opts) {
             sums.getCell(6).numFmt = HOURS_FMT;
         if (typeof block.net === 'number')
             sums.getCell(7).numFmt = HOURS_FMT;
+        // Round 9 §3 — the NOTES log spells out the hour split: regular vs daily
+        // overtime vs weekly overtime, taken from the timesheet's own pay items.
+        for (const split of (0, payroll_1.hourSplitRows)(block)) {
+            const row = ws.addRow(['', split.label, split.hours, '', split.pay, '', '']);
+            row.getCell(2).font = { name: PP_FONT, size: 10.5, italic: true };
+            for (const c of [3, 5]) {
+                row.getCell(c).numFmt = HOURS_FMT;
+                row.getCell(c).alignment = { horizontal: 'center' };
+                row.getCell(c).font = { name: PP_FONT, size: 11 };
+            }
+        }
+    }
+    // Round 9 §19/§23 — configured extra rows under an hourly block.
+    for (const x of block.extras) {
+        const row = ws.addRow(notesLayout
+            ? [x.label, '', '', '', x.amount ?? '', '', '']
+            : [x.label, '', '', '', x.amount ?? '']);
+        row.getCell(5).numFmt = ACCOUNTING_FMT;
+        row.getCell(5).alignment = { horizontal: 'center' };
+    }
+    if (block.extras.some((x) => x.kind !== 'note')) {
+        const row = ws.addRow(notesLayout ? ['Total Pay', '', '', '', block.netPay, '', ''] : ['Total Pay', '', '', '', block.netPay]);
+        row.font = { name: PP_FONT, bold: true, size: 12 };
+        row.getCell(5).numFmt = ACCOUNTING_FMT;
+        row.getCell(5).alignment = { horizontal: 'center' };
     }
     ws.addRow([]);
 }
 function writeSalaryBlockValues(ws, block, weekRange, fill) {
-    const band = ws.addRow([`${block.name}${block.timesheetHours > 0 ? ` (${block.timesheetHours}hrs)` : ''}`]);
+    const band = ws.addRow([
+        `${block.name}${block.timesheetHours > 0 ? ` (${block.timesheetHours}hrs)` : ''}` +
+            // Round 9 §26/§33 — subcontractors in the salary sections.
+            (block.sub ? ' (subcontractor)' : ''),
+    ]);
     band.getCell(1).fill = solidFill(fill);
     band.getCell(1).font = { name: PP_FONT, bold: true, size: 12 };
     const r1 = ws.addRow([weekRange ? `(${weekRange})` : '', block.role, block.amount]);
     r1.getCell(3).numFmt = ACCOUNTING_FMT;
-    const r2 = ws.addRow([`mileage reimb: ${block.name} - ${block.miles} miles`, '', block.mileageReimb]);
+    // Round 9 §28 — flat labeled reimbursements row instead of mileage reimb.
+    const r2 = block.reimbursementsLabel
+        ? ws.addRow([block.reimbursementsLabel, '', block.reimbursements])
+        : ws.addRow([`mileage reimb: ${block.name} - ${block.miles} miles`, '', block.mileageReimb]);
     r2.getCell(3).numFmt = ACCOUNTING_FMT;
-    const r3 = ws.addRow(['Total', '', block.amount + block.mileageReimb]);
+    // Round 9 §19/§23/§24/§29 — configured extra rows.
+    for (const x of block.extras) {
+        const rx = ws.addRow([x.label, '', x.amount ?? '']);
+        rx.getCell(3).numFmt = ACCOUNTING_FMT;
+    }
+    const r3 = ws.addRow(['Total', '', block.total]);
     r3.getCell(3).numFmt = ACCOUNTING_FMT;
     r3.font = { name: PP_FONT, bold: true, size: 12 };
+    // Round 9 §34 — pre-filled taxes / net when the roster carries them.
+    if (block.taxes !== null || block.net !== null) {
+        const rt = ws.addRow(['(-) taxes', '', block.taxes ?? '']);
+        rt.getCell(3).numFmt = ACCOUNTING_FMT;
+        const rn = ws.addRow(['net', '', block.net ?? '']);
+        rn.getCell(3).numFmt = ACCOUNTING_FMT;
+        rn.font = { name: PP_FONT, bold: true, size: 12 };
+    }
     ws.addRow([]);
 }
 /**
@@ -883,6 +945,8 @@ function writePreviewSequence(ws, model, opts) {
                 skipWoBand: true,
                 defaultPsPct: opts.defaultPsPct,
                 showGrossWages: true,
+                // Round 9 §30 — FINAL drops the books/reference rows.
+                hideBooksRows: true,
             });
             ws.addRow([]);
             if (entry.block.tsheets)
@@ -903,17 +967,17 @@ function writePreviewSequence(ws, model, opts) {
     section('ADMIN');
     for (const b of model.admin) {
         writeSalaryBlockValues(ws, b, model.weekRange, TAN);
-        grossSum += b.amount + b.mileageReimb;
+        grossSum += b.total;
     }
     section('ESTIMATORS');
     for (const b of model.estimators) {
         writeSalaryBlockValues(ws, b, model.weekRange, TAN);
-        grossSum += b.amount + b.mileageReimb;
+        grossSum += b.total;
     }
     section('MANAGER SALARY');
     for (const b of model.managers) {
         writeSalaryBlockValues(ws, b, model.weekRange, 'FFD99694');
-        grossSum += b.amount + b.mileageReimb;
+        grossSum += b.total;
     }
     return grossSum;
 }
