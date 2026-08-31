@@ -685,7 +685,14 @@ check(
 );
 
 check('office block: single Office line', [preview.office.length, preview.office[0].lines.length, preview.office[0].lines[0].jobLabel], [1, 1, 'Office']);
-check('salary sections from the roster', [preview.admin.length, preview.estimators.length, preview.managers.length], [1, 5, 4]);
+// Round 10 — Kristina Benson moved out of MANAGER SALARY into the
+// subcontractor bands at the end of the painter sequence.
+check('salary sections from the roster', [preview.admin.length, preview.estimators.length, preview.managers.length], [1, 5, 3]);
+check(
+  'Round 10 subcontractor salary block renders with the subs',
+  preview.painterSequence.filter((e) => e.kind === 'salary').map((e) => (e.block as { name: string }).name),
+  ['Kristina Benson'],
+);
 check(
   'inactive roster includes Calixto (directory * + persisted painters)',
   preview.inactiveZeroHours.includes('Calixto Efrain Climaco'),
@@ -697,7 +704,9 @@ check('inactive roster is the persisted painter list', preview.inactiveZeroHours
 // subs last (none here). §5.3 — lead bands in Title Case. §5.5 — office PO text.
 check(
   'painter sequence interleaved A→Z by first name',
-  preview.painterSequence.map((e) => (e.kind === 'hourly' ? e.block.employeeName : e.block.displayName)),
+  preview.painterSequence.map((e) =>
+    e.kind === 'hourly' ? e.block.employeeName : e.kind === 'ps' ? e.block.displayName : e.block.name,
+  ),
   [
     'Carlos Ruiz Cruz',
     'Daniel Gonzales Bonilla',
@@ -706,6 +715,7 @@ check(
     'Rafael Aguilar',
     'Rene Salazar',
     'Ted Frank',
+    'Kristina Benson',
   ],
 );
 check('week range on the model', preview.weekRange, '6/29 - 7/3');

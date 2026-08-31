@@ -897,10 +897,14 @@ function writeSalaryBlockValues(ws, block, weekRange, fill) {
     const r1 = ws.addRow([weekRange ? `(${weekRange})` : '', block.role, block.amount]);
     r1.getCell(3).numFmt = ACCOUNTING_FMT;
     // Round 9 §28 — flat labeled reimbursements row instead of mileage reimb.
+    // Round 10 — some people carry no mileage row at all.
     const r2 = block.reimbursementsLabel
         ? ws.addRow([block.reimbursementsLabel, '', block.reimbursements])
-        : ws.addRow([`mileage reimb: ${block.name} - ${block.miles} miles`, '', block.mileageReimb]);
-    r2.getCell(3).numFmt = ACCOUNTING_FMT;
+        : block.noMileageRow
+            ? null
+            : ws.addRow([`mileage reimb: ${block.name} - ${block.miles} miles`, '', block.mileageReimb]);
+    if (r2)
+        r2.getCell(3).numFmt = ACCOUNTING_FMT;
     // Round 9 §19/§23/§24/§29 — configured extra rows.
     for (const x of block.extras) {
         const rx = ws.addRow([x.label, '', x.amount ?? '']);
@@ -931,6 +935,11 @@ function writePreviewSequence(ws, model, opts) {
         if (entry.kind === 'hourly') {
             writeHourlyBlockValues(ws, entry.block, { notesLayout: opts.mode === 'notes' });
             grossSum += entry.block.totalPay;
+        }
+        else if (entry.kind === 'salary') {
+            // Round 10 — a subcontractor's salary block, in with the subs.
+            writeSalaryBlockValues(ws, entry.block, model.weekRange, TAN);
+            grossSum += entry.block.total;
         }
         else if (opts.mode === 'notes') {
             // Working log: materials table → T-SHEETS (not the full PS WO% band).
@@ -1065,7 +1074,7 @@ function buildJobsSheet(wb, input) {
             }
         }
         for (const entry of input.payrollPreview?.painterSequence ?? []) {
-            const block = entry.kind === 'hourly' ? entry.block : entry.block.tsheets;
+            const block = entry.kind === 'hourly' ? entry.block : entry.kind === 'ps' ? entry.block.tsheets : null;
             if (!block)
                 continue;
             for (const l of block.lines) {

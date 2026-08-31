@@ -1,5 +1,6 @@
 import { useMemo, useState, type CSSProperties } from 'react';
 import { normalizeApInput } from '../lib/apkey';
+import { parseDate } from '../lib/parsers';
 import {
   fmtAccounting,
   fmtDate,
@@ -40,7 +41,7 @@ const CENTERED_HEADERS = new Set(['AP#', '% Completion', 'Estimator', 'Last % Pa
  * Round 8 §2.1 — hidden in the export, so collapsed to a stub on screen too.
  * The data stays in the DOM (and in the model); the header toggle expands it.
  */
-const COLLAPSIBLE_HEADERS = ['Attendees', 'Location'] as const;
+const COLLAPSIBLE_HEADERS = ['Attendees', 'Location', 'QBO Job Name'] as const;
 type CollapsibleHeader = (typeof COLLAPSIBLE_HEADERS)[number];
 
 /** Round 4 §1.1 — Excel's classic "bad" style. */
@@ -148,13 +149,20 @@ export function TimeNaviTable({ rows, colorByEstimator, estimatorOptions, onEdit
                   title={r.included ? 'Exclude this event from the report' : 'Include this event in the report'}
                 />
               </td>
-              {/* Round 9 §37 — single-line row height: the full title stays in the tooltip. */}
-              <td className="xcell max-w-[16rem] truncate whitespace-nowrap" title={r.event}>
-                {r.event}
+              {/* Round 9 §37 / Round 10 — one line, sized to the content; the
+                  full title stays in the tooltip and is editable in place. */}
+              <td className="xcell max-w-[12rem] truncate whitespace-nowrap" title={r.event}>
+                <CellInput
+                  value={r.event}
+                  onCommit={(text) => onEdit(r.id, { event: text })}
+                  title={r.event}
+                />
               </td>
-              <td className="xcell whitespace-nowrap">{fmtDateShort(r.startDate)}</td>
-              <td className="xcell whitespace-nowrap">{fmtDateShort(r.endDate)}</td>
-              <td className="xcell whitespace-nowrap">{r.calendar}</td>
+              <td className="xcell w-px whitespace-nowrap">{fmtDateShort(r.startDate)}</td>
+              <td className="xcell w-px whitespace-nowrap">{fmtDateShort(r.endDate)}</td>
+              <td className="xcell max-w-[7rem] truncate whitespace-nowrap" title={r.calendar}>
+                <CellInput value={r.calendar} onCommit={(text) => onEdit(r.id, { calendar: text })} />
+              </td>
               {isCollapsed('Attendees') ? (
                 stubCell(r.attendees)
               ) : (
@@ -169,7 +177,7 @@ export function TimeNaviTable({ rows, colorByEstimator, estimatorOptions, onEdit
                   {r.location}
                 </td>
               )}
-              <td className="xcell min-w-[144px] max-w-[192px]">
+              <td className="xcell min-w-[7rem] max-w-[9rem]">
                 <div
                   className={`cursor-pointer whitespace-pre-line ${isExpanded ? '' : 'line-clamp-1'}`}
                   onClick={() => toggleExpanded(r.id)}
@@ -178,7 +186,8 @@ export function TimeNaviTable({ rows, colorByEstimator, estimatorOptions, onEdit
                   {r.description}
                 </div>
               </td>
-              <td className="xcell w-px whitespace-nowrap text-center font-mono">
+              {/* Round 10 — the AP# column is never collapsed or clipped. */}
+              <td className="xcell w-px min-w-[5.5rem] whitespace-nowrap text-center font-mono">
                 <CellInput
                   value={r.apKey ?? ''}
                   onCommit={(text) => onEdit(r.id, { apKey: normalizeApInput(text) })}
@@ -222,12 +231,41 @@ export function TimeNaviTable({ rows, colorByEstimator, estimatorOptions, onEdit
                     ))}
                 </select>
               </td>
-              <td className="xcell w-16 text-center">{r.lastPaid === null ? '-' : fmtPercent(r.lastPaid)}</td>
-              <td className="xcell max-w-[240px] truncate" title={r.qboJobName}>
-                {r.qboJobName}
+              {/* Round 10 — carried from last week's `% Completion` for this
+                  AP#, and editable when the carry-forward needs correcting. */}
+              <td className="xcell w-16 text-center">
+                <CellInput
+                  value={r.lastPaid === null ? '' : fmtPercent(r.lastPaid)}
+                  placeholder="-"
+                  className="text-center"
+                  title="Last % Paid — last week's % Completion for this AP#"
+                  onCommit={(text) => {
+                    const t = text.trim();
+                    if (t === '' || t === '-') {
+                      onEdit(r.id, { lastPaid: null });
+                      return;
+                    }
+                    if (/^hourly$/i.test(t)) {
+                      onEdit(r.id, { lastPaid: 'HOURLY' });
+                      return;
+                    }
+                    const p = parsePercentInput(t);
+                    onEdit(r.id, { lastPaid: typeof p === 'number' ? p : null });
+                  }}
+                />
               </td>
+              {isCollapsed('QBO Job Name') ? (
+                stubCell(r.qboJobName)
+              ) : (
+                <td className="xcell max-w-[10rem] truncate" title={r.qboJobName}>
+                  <CellInput
+                    value={r.qboJobName}
+                    onCommit={(text) => onEdit(r.id, { qboJobName: text })}
+                  />
+                </td>
+              )}
               <td
-                className="xcell max-w-[200px] truncate"
+                className="xcell max-w-[9rem] truncate"
                 style={
                   r.included && (r.inQboTime === 'NotClockedIn' || dupInQbo.has(r.inQboTime.trim()))
                     ? PINK
@@ -235,9 +273,32 @@ export function TimeNaviTable({ rows, colorByEstimator, estimatorOptions, onEdit
                 }
                 title={r.inQboTime}
               >
-                {r.inQboTime}
+                <CellInput
+                  value={r.inQboTime}
+                  onCommit={(text) => onEdit(r.id, { inQboTime: text })}
+                  style={
+                    r.included && (r.inQboTime === 'NotClockedIn' || dupInQbo.has(r.inQboTime.trim()))
+                      ? PINK
+                      : undefined
+                  }
+                />
               </td>
-              <td className="xcell whitespace-nowrap text-right">{fmtJobTotal(r.jobTotal)}</td>
+              <td className="xcell w-24 whitespace-nowrap text-right">
+                <CellInput
+                  value={fmtJobTotal(r.jobTotal)}
+                  className="text-right"
+                  title="Job Total $ — from the Sales by Customer Summary; type to override"
+                  onCommit={(text) => {
+                    const t = text.trim();
+                    if (t === '' || t.toUpperCase() === '#N/A') {
+                      onEdit(r.id, { jobTotal: '#N/A' });
+                      return;
+                    }
+                    const n = parseMoneyInput(t);
+                    onEdit(r.id, { jobTotal: n === null ? '#N/A' : n });
+                  }}
+                />
+              </td>
               <td className="xcell w-24 text-right">
                 <CellInput
                   value={r.apptivo === null ? '' : fmtAccounting(r.apptivo)}
@@ -256,8 +317,14 @@ export function TimeNaviTable({ rows, colorByEstimator, estimatorOptions, onEdit
                 {r.dollarDiff === null ? '' : fmtAccounting(r.dollarDiff)}
               </td>
               <td className="xcell w-14 text-right">{fmtPercent(r.percent)}</td>
-              <td className="xcell whitespace-nowrap">{fmtDate(r.invoiceDate)}</td>
-              <td className="xcell text-right">{r.dateDiff === null ? '' : r.dateDiff}</td>
+              <td className="xcell w-px whitespace-nowrap">
+                <CellInput
+                  value={fmtDate(r.invoiceDate)}
+                  title="Invoice Date — from the books; type to override (M/D/YYYY)"
+                  onCommit={(text) => onEdit(r.id, { invoiceDate: parseDate(text.trim() || null) })}
+                />
+              </td>
+              <td className="xcell w-px text-right">{r.dateDiff === null ? '' : r.dateDiff}</td>
             </tr>
           );
         })}

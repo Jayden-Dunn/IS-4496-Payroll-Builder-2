@@ -97,15 +97,15 @@ const BASE_WAGE_RATES: WageRateEntry[] = [
 ];
 
 /**
- * Round 8 §9.1/§9.3 — three-rate seeds ("hourly" = hourlyRate, "PS" = rate,
- * "crew-lead" = crewLeadRate). Merged by name into BASE_WAGE_RATES: matching
+ * Round 8 §9.3 — rate seeds ("hourly" = hourlyRate, "PS" = rate).
+ * Merged by name into BASE_WAGE_RATES: matching
  * names are patched field-by-field, new names are appended. SEEDS ONLY —
  * fully editable in Settings, never referenced as constants by rate logic.
  */
 export const ROUND8_WAGE_SEEDS: WageRateEntry[] = [
   { name: 'Adriana Lopez Barajas', rate: 25, hourlyRate: 20 },
-  { name: 'Antonio Zuniga', rate: 18, hourlyRate: 25, crewLeadRate: 18 },
-  { name: 'Carlos Ruiz Cruz', rate: 18, hourlyRate: 25, crewLeadRate: 18 },
+  { name: 'Antonio Zuniga', rate: 18, hourlyRate: 25 },
+  { name: 'Carlos Ruiz Cruz', rate: 18, hourlyRate: 25 },
   { name: 'Damian Vasquez', rate: 18, hourlyRate: 18 },
   { name: 'Daniel Gonzales Bonilla', rate: 18, hourlyRate: 20 },
   { name: 'Henry Limay Flores', rate: 18 },
@@ -141,6 +141,26 @@ export const ROUND9_WAGE_SEEDS: WageRateEntry[] = [
   { name: 'Tyler Dunn', rate: 15, hourlyRate: 15 },
   // §21/§35 — $25 on profit-share / work-order jobs, $18 on hourly jobs.
   { name: 'Xavier Green', rate: 25, hourlyRate: 18 },
+];
+
+/**
+ * Round 10 — corrected rates. `rate` is the profit-share / work-order rate
+ * (crew leads included, now that the separate crew-lead rate is gone) and
+ * `hourlyRate` is the T&M rate. SEEDS ONLY — editable in Settings.
+ */
+export const ROUND10_WAGE_SEEDS: WageRateEntry[] = [
+  // $20/hr on profit-share jobs.
+  { name: 'Gertrudis Campoverde Anguiano', rate: 20 },
+  // $30/hr on every hourly job, whatever the pay item says.
+  { name: 'Rafael Aguilar Echevarria', rate: 18, hourlyRate: 30 },
+  { name: 'Rafael Aguilar', rate: 18, hourlyRate: 30 },
+  // $30/hr on hourly jobs.
+  { name: 'Thomas Slater', rate: 18, hourlyRate: 30 },
+  // $25/hr on hourly AND profit-share jobs.
+  { name: 'Marvin Ealey', rate: 25, hourlyRate: 25, commercialHourlyRate: 25 },
+  { name: 'Xavier Green', rate: 25, hourlyRate: 25, commercialHourlyRate: 25 },
+  // $15/hr on hourly AND profit-share jobs.
+  { name: 'Rocio Sanchez', rate: 15, hourlyRate: 15 },
 ];
 
 /** Name key for wage-map merges (case/whitespace-insensitive). */
@@ -180,23 +200,17 @@ export function mergeWageRateSeeds(
             ...(row.hourlyRate === undefined && seed.hourlyRate !== undefined
               ? { hourlyRate: seed.hourlyRate }
               : {}),
-            ...(row.crewLeadRate === undefined && seed.crewLeadRate !== undefined
-              ? { crewLeadRate: seed.crewLeadRate }
-              : {}),
           };
   }
   return out;
 }
 
 export const DEFAULT_WAGE_RATES: WageRateEntry[] = mergeWageRateSeeds(
-  mergeWageRateSeeds(BASE_WAGE_RATES, ROUND8_WAGE_SEEDS),
-  ROUND9_WAGE_SEEDS,
+  mergeWageRateSeeds(mergeWageRateSeeds(BASE_WAGE_RATES, ROUND8_WAGE_SEEDS), ROUND9_WAGE_SEEDS),
+  ROUND10_WAGE_SEEDS,
 );
 
 export const DEFAULT_WAGE_RATE = 18;
-
-/** Round 8 §9.1 — fallback lead rate on own timesheet hours on PS jobs. */
-export const DEFAULT_CREW_LEAD_RATE = 18;
 
 /**
  * Round 8 §9.1 — seeded conditional rate rules.
@@ -317,7 +331,16 @@ export const DEFAULT_PAINTER_ROSTER: PainterRosterEntry[] = [
   };
 });
 
-export const DEFAULT_SALARIED: SalariedEntry[] = [
+const NO_MILEAGE_ROW_NAMES = [
+  'Paul Good',
+  'Charles Mike Holden',
+  'Nathan Dunn',
+  'Maria Donofrio',
+  'Jeff Sherman',
+  'Kristina Benson',
+];
+
+const RAW_SALARIED: SalariedEntry[] = [
   // Round 9 §28 — Jodi's mileage row reads "Reimbursements" and is a flat cell.
   {
     name: 'Jodi Dunn',
@@ -354,16 +377,25 @@ export const DEFAULT_SALARIED: SalariedEntry[] = [
     entity: 'NV',
     frequency: 'firstPayDateOfMonth',
   },
-  // Round 9 §26/§33 — subcontractor; renders at the very bottom of the section.
+  /**
+   * Round 10 — Kristina Benson is a subcontractor, so her block renders with
+   * the subcontractor bands (below Pepe's Painting LLC) rather than in the
+   * MANAGER SALARY section.
+   */
   {
     name: 'Kristina Benson',
-    section: 'MANAGER SALARY',
+    section: 'SUBCONTRACTORS',
     role: 'Subcontractor',
     amount: 150,
     entity: 'NV',
     sub: true,
   },
 ];
+
+/** Round 10 — the named people carry no mileage-reimbursement row. */
+export const DEFAULT_SALARIED: SalariedEntry[] = RAW_SALARIED.map((e) =>
+  NO_MILEAGE_ROW_NAMES.includes(e.name) ? { ...e, noMileageRow: true } : e,
+);
 
 /**
  * Round 9 §19/§23/§24/§29 — person-scoped extra rows on the Payroll Preview.
@@ -402,6 +434,8 @@ export const DEFAULT_PAYROLL_LINE_ITEMS: PayrollLineItem[] = [
     'Jason Thompson',
     'Ryan Frey',
     'Terry Emry',
+    // Round 10 — Jayden Dunn gets one too.
+    'Jayden Dunn',
   ].map(
     (person): PayrollLineItem => ({
       id: `li-${person.toLowerCase().replace(/\s+/g, '-')}-reimb`,
@@ -412,10 +446,37 @@ export const DEFAULT_PAYROLL_LINE_ITEMS: PayrollLineItem[] = [
       frequency: 'weekly',
     }),
   ),
+  // Round 10 — Jason Thompson's weekly c/s deduction.
+  {
+    id: 'li-jason-thompson-cs',
+    person: 'Jason Thompson',
+    label: 'c/s',
+    amount: 134,
+    kind: 'deduction',
+    frequency: 'weekly',
+  },
+];
+
+/**
+ * Round 10 — salaried people whose block has NO mileage-reimbursement row at
+ * all. (Distinct from `reimbursementsLabel`, which swaps the mileage row for a
+ * flat reimbursements row.) Seed data — editable in Settings.
+ */
+export const DEFAULT_NO_MILEAGE_ROW: string[] = [
+  'Paul Good',
+  'Charles Mike Holden',
+  'Nathan Dunn',
+  'Maria Donofrio',
+  'Jeff Sherman',
+  'Kristina Benson',
 ];
 
 /** Round 9 §32 — leads charged for ALL of a job's materials, not half. */
-export const DEFAULT_FULL_MATERIALS_LEADS: string[] = ['Color Enterprises LLC'];
+export const DEFAULT_FULL_MATERIALS_LEADS: string[] = [
+  'Color Enterprises LLC',
+  // Round 10 — Pepe's pays all of the materials on his jobs too.
+  "Pepe's Painting LLC",
+];
 
 /** Round 9 §27 — people the NV daily-overtime rule never applies to. */
 export const DEFAULT_DAILY_OT_EXEMPT: string[] = ['Tyler Dunn'];
@@ -453,6 +514,12 @@ export const MIGRATION_R9_LINE_ITEMS = 'r9-line-items';
 export const MIGRATION_R9_SALARIED = 'r9-salaried';
 /** Round 9 §13/§18 — retire the two person-specific rate seeds. */
 export const MIGRATION_R9_RATE_RULES = 'r9-retire-rate-seeds';
+/** Round 10 — corrected rates + the retired crew-lead rate column. */
+export const MIGRATION_R10_WAGES = 'r10-wage-seeds';
+/** Round 10 — new line items, Kristina's section, no-mileage rows, Pepe's materials. */
+export const MIGRATION_R10_ROSTER = 'r10-roster';
+/** Round 10 — subcontractor labor out of the materials mapping. */
+export const MIGRATION_R10_PL_MAPPING = 'r10-pl-mapping';
 export const ALL_MIGRATIONS: string[] = [
   MIGRATION_RF_COLOR,
   MIGRATION_DB_PATTERN,
@@ -462,6 +529,9 @@ export const ALL_MIGRATIONS: string[] = [
   MIGRATION_R9_LINE_ITEMS,
   MIGRATION_R9_SALARIED,
   MIGRATION_R9_RATE_RULES,
+  MIGRATION_R10_WAGES,
+  MIGRATION_R10_ROSTER,
+  MIGRATION_R10_PL_MAPPING,
 ];
 
 // v4: Round 3 payroll settings added. v3 legend/pivot values are migrated;
@@ -529,7 +599,6 @@ export function defaultSettings(): AppSettings {
     defaultProfitSharePct: DEFAULT_PROFIT_SHARE_PCT,
     wageRates: DEFAULT_WAGE_RATES.map((e) => ({ ...e })),
     defaultWageRate: DEFAULT_WAGE_RATE,
-    defaultCrewLeadRate: DEFAULT_CREW_LEAD_RATE,
     conditionalRateRules: DEFAULT_CONDITIONAL_RATE_RULES.map((r) => ({
       ...r,
       condition: { ...r.condition },
@@ -623,10 +692,8 @@ function parsePayroll(raw: unknown): Partial<AppSettings> {
           name: x.name,
           rate: x.rate,
           ...(typeof x.hourlyRate === 'number' && Number.isFinite(x.hourlyRate) ? { hourlyRate: x.hourlyRate } : {}),
-          ...(typeof x.crewLeadRate === 'number' && Number.isFinite(x.crewLeadRate)
-            ? { crewLeadRate: x.crewLeadRate }
-            : {}),
-          // Round 9 §18 — the two new per-painter pay-type rates.
+          // Round 9 §18 — the two per-painter pay-type rates. (Round 10 —
+          // a stored `crewLeadRate` is intentionally dropped here.)
           ...(typeof x.commercialHourlyRate === 'number' && Number.isFinite(x.commercialHourlyRate)
             ? { commercialHourlyRate: x.commercialHourlyRate }
             : {}),
@@ -640,9 +707,6 @@ function parsePayroll(raw: unknown): Partial<AppSettings> {
   }
   if (typeof r.defaultWageRate === 'number' && Number.isFinite(r.defaultWageRate)) {
     out.defaultWageRate = r.defaultWageRate;
-  }
-  if (typeof r.defaultCrewLeadRate === 'number' && Number.isFinite(r.defaultCrewLeadRate)) {
-    out.defaultCrewLeadRate = r.defaultCrewLeadRate;
   }
   if (typeof r.nvDailyOtRateThreshold === 'number' && Number.isFinite(r.nvDailyOtRateThreshold)) {
     out.nvDailyOtRateThreshold = r.nvDailyOtRateThreshold;
@@ -961,6 +1025,81 @@ export function applySettingsMigrations(settings: AppSettings): AppSettings {
       ),
     });
     done.add(MIGRATION_R9_RATE_RULES);
+  }
+
+  /**
+   * Round 10 — the corrected rates win over stored values (they are fixes to
+   * numbers the app had wrong), and the retired crew-lead column is dropped:
+   * a crew lead on their own job is on a profit-share job, so the PS rate is
+   * their crew-lead rate.
+   */
+  if (!done.has(MIGRATION_R10_WAGES)) {
+    const merged = mergeWageRateSeeds(next.wageRates, ROUND10_WAGE_SEEDS, 'seedWins');
+    patch({
+      wageRates: merged.map((row) => {
+        const { crewLeadRate: _dropped, ...rest } = row as WageRateEntry & { crewLeadRate?: number };
+        return rest;
+      }),
+    });
+    done.add(MIGRATION_R10_WAGES);
+  }
+
+  // Round 10 — roster/line-item changes, matched by id and by name.
+  if (!done.has(MIGRATION_R10_ROSTER)) {
+    const key = (n: string): string => n.trim().toLowerCase().replace(/\s+/g, ' ');
+    const haveItems = new Set((next.payrollLineItems ?? []).map((i) => i.id));
+    const seedByName = new Map(DEFAULT_SALARIED.map((e) => [key(e.name), e]));
+    patch({
+      payrollLineItems: [
+        ...(next.payrollLineItems ?? []),
+        ...DEFAULT_PAYROLL_LINE_ITEMS.filter((i) => !haveItems.has(i.id)).map((i) => ({ ...i })),
+      ],
+      salariedRoster: next.salariedRoster.map((row) => {
+        const seed = seedByName.get(key(row.name));
+        if (!seed) return row;
+        return {
+          ...row,
+          section: seed.section,
+          ...(seed.noMileageRow ? { noMileageRow: true } : {}),
+        };
+      }),
+      fullMaterialsLeads: [
+        ...next.fullMaterialsLeads,
+        ...DEFAULT_FULL_MATERIALS_LEADS.filter(
+          (n) => !next.fullMaterialsLeads.some((h) => key(h) === key(n)),
+        ),
+      ],
+    });
+    done.add(MIGRATION_R10_ROSTER);
+  }
+
+  /**
+   * Round 10 — a saved mapping that listed a labor account (e.g.
+   * `Subcontractor Labor`) under materials made a subcontractor's ½ Materials
+   * line swallow their own pay. Labor labels are removed from materials, and
+   * the default labor labels are re-seeded when they went missing.
+   */
+  if (!done.has(MIGRATION_R10_PL_MAPPING)) {
+    const key = (n: string): string => n.trim().toLowerCase();
+    const healed = { ...next.plAccountMapping };
+    for (const entity of ['NV', 'UT'] as EntityCode[]) {
+      const m = healed[entity];
+      const defaults = DEFAULT_PL_ACCOUNT_MAPPING[entity];
+      const labor = [
+        ...m.laborWagesSubs,
+        ...defaults.laborWagesSubs.filter(
+          (d) => !m.laborWagesSubs.some((h) => key(h) === key(d)),
+        ),
+      ];
+      const laborKeys = new Set(labor.map(key));
+      healed[entity] = {
+        ...m,
+        laborWagesSubs: labor,
+        materials: m.materials.filter((l) => !laborKeys.has(key(l))),
+      };
+    }
+    patch({ plAccountMapping: healed });
+    done.add(MIGRATION_R10_PL_MAPPING);
   }
 
   if (!done.has(MIGRATION_CARLOS_HOURLY)) {

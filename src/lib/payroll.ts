@@ -622,7 +622,6 @@ export interface WageRateLike {
   name: string;
   rate: number;
   hourlyRate?: number;
-  crewLeadRate?: number;
   /** Round 9 §18 — per-painter `Commercial Hourly` rate. */
   commercialHourlyRate?: number;
   /** Round 9 §18 — per-painter `Wages 2` rate. */
@@ -639,27 +638,28 @@ export type RateKind =
   | 'default';
 
 /**
- * Round 8 §9.1 — the three-rate lookup, resolved PER LINE by job type:
+ * The rate lookup, resolved PER LINE by job type:
  *
- * - job is HOURLY → the person's `hourlyRate` (their own rate, then the global
- *   fallback, when they have none)
- * - crew lead's own hours on a profit-share job → their `crewLeadRate`, else
- *   the global `defaultCrewLeadRate`
- * - everyone else → their profit-share `rate`
+ * - job is HOURLY → the person's `hourlyRate` (the global fallback when they
+ *   have none)
+ * - everyone else, crew leads included → their profit-share `rate`
+ *
+ * Round 10 — the separate crew-lead rate is GONE. A crew lead working a job
+ * they lead is on a profit-share job by definition, so the PS rate already is
+ * their crew-lead rate; keeping two numbers only let them drift apart.
  */
 export function resolveWageRate(
   employeeName: string,
   opts: {
     wageRates: readonly WageRateLike[];
     defaultWageRate: number;
-    defaultCrewLeadRate?: number;
     hourlyJob: boolean;
-    /** These are the crew lead's OWN timesheet hours. */
+    /** These are the crew lead's OWN timesheet hours (kept for callers/tags). */
     isCrewLead?: boolean;
     /**
      * Round 9 §18 — the timesheet pay item's rate slot. `commercialHourly` and
-     * `wages2` are per-painter rates that outrank the hourly-job / crew-lead
-     * slots, because the pay item is what the painter actually clocked into.
+     * `wages2` are per-painter rates that outrank the hourly-job slot, because
+     * the pay item is what the painter actually clocked into.
      */
     payRateKind?: PayRateKind;
   },
@@ -689,11 +689,6 @@ export function resolveWageRate(
       kind: entry?.wages2Rate !== undefined ? 'wages2' : 'painter',
     };
   }
-  // Round 9 §13 — "Crew Lead - Hourly Wage" on the timesheet means these hours
-  // are crew-lead hours, whichever painter clocked them. It selects the
-  // crew-lead rate on PROFIT-SHARE jobs only: Round 8 §9.1's rule that an
-  // hourly (T&M) job pays the person's hourly-jobs rate still comes first.
-  const isCrewLead = opts.payRateKind === 'crewLead' ? true : opts.isCrewLead;
   if (opts.hourlyJob) {
     // No hourly-jobs rate on file falls through to the global default, NOT to
     // the person's profit-share rate — a piece-rate number would understate an
@@ -705,17 +700,13 @@ export function resolveWageRate(
       kind: hourly !== undefined ? 'hourlyJob' : 'default',
     };
   }
-  if (isCrewLead) {
-    return {
-      rate: entry?.crewLeadRate ?? opts.defaultCrewLeadRate ?? entry?.rate ?? opts.defaultWageRate,
-      defaulted,
-      kind: 'crewLead',
-    };
-  }
+  // Round 10 — crew-lead hours on a profit-share job pay the PS rate, which is
+  // the same row everyone else reads. `isCrewLead` only tags the line now.
+  const isCrewLead = opts.payRateKind === 'crewLead' ? true : opts.isCrewLead === true;
   return {
     rate: entry?.rate ?? opts.defaultWageRate,
     defaulted,
-    kind: entry ? 'painter' : 'default',
+    kind: isCrewLead ? 'crewLead' : entry ? 'painter' : 'default',
   };
 }
 
@@ -786,8 +777,6 @@ export function resolveLineRate(
     apKey?: string | null;
     /** Pivot-by-Job §7.1 toggle: skip Davis-Bacon floor even when patterns match. */
     forceNonDb?: boolean;
-    /** Round 8 §9.1 — global crew-lead rate (seed 18). */
-    defaultCrewLeadRate?: number;
     conditionalRateRules?: readonly ConditionalRateRule[];
     perJobRateOverrides?: readonly PerJobRateOverride[];
     /** True when these are the crew lead's own timesheet hours. */
@@ -824,7 +813,6 @@ export function resolveLineRate(
     const info = resolveWageRate(employeeName, {
       wageRates: settings.wageRates,
       defaultWageRate: settings.defaultWageRate,
-      defaultCrewLeadRate: settings.defaultCrewLeadRate,
       hourlyJob,
       isCrewLead: settings.isCrewLead,
       payRateKind: settings.payRateKind,

@@ -583,7 +583,7 @@ function SalaryBlockView({
               />
             </td>
           </tr>
-        ) : (
+        ) : block.noMileageRow ? null : (
           <tr>
             <td className="xcell">mileage reimb ({mileageRate.toFixed(3)}/mi)</td>
             <td className="xcell text-right">
@@ -671,6 +671,16 @@ export function PayrollPreview({ model, mileageRate, onEdit }: PayrollPreviewPro
       {model.painterSequence.map((entry) =>
         entry.kind === 'hourly' ? (
           <HourlyBlockView key={entry.block.key} block={entry.block} onEdit={onEdit} />
+        ) : entry.kind === 'salary' ? (
+          /* Round 10 — subcontractor salary block, rendered with the subs. */
+          <SalaryBlockView
+            key={entry.block.key}
+            block={entry.block}
+            mileageRate={mileageRate}
+            weekRange={model.weekRange}
+            onEdit={onEdit}
+            headerStyle={TAN}
+          />
         ) : (
           <div key={entry.block.key}>
             <PsBlockView block={entry.block} onEdit={onEdit} />

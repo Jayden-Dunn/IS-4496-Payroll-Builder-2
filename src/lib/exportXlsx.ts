@@ -1483,10 +1483,13 @@ function buildPayrollPreviewSheet(
     r1.getCell(3).numFmt = ACCOUNTING_FMT;
     // Round 9 §28 — a flat labeled reimbursements row replaces mileage reimb
     // for the people configured that way (Jodi Dunn).
+    // Round 10 — some people carry no mileage row at all.
     const r2 = block.reimbursementsLabel
       ? ws.addRow([block.reimbursementsLabel, '', block.reimbursements])
-      : ws.addRow([`mileage reimb: ${block.name} - ${block.miles} miles`, '', block.mileageReimb]);
-    r2.getCell(3).numFmt = ACCOUNTING_FMT;
+      : block.noMileageRow
+        ? null
+        : ws.addRow([`mileage reimb: ${block.name} - ${block.miles} miles`, '', block.mileageReimb]);
+    if (r2) r2.getCell(3).numFmt = ACCOUNTING_FMT;
     // Round 9 §19/§23/§24/§29 — configured extra rows.
     const extraRows = block.extras.map((x) => ({
       extra: x,
@@ -1508,7 +1511,9 @@ function buildPayrollPreviewSheet(
       .map((r) => `${r.extra.kind === 'deduction' ? '-' : '+'}N(C${r.row})`)
       .join('');
     const r3 = ws.addRow(['Total', '', '']);
-    r3.getCell(3).value = { formula: `C${r1.number}+C${r2.number}${extraTerms}` };
+    r3.getCell(3).value = {
+      formula: `C${r1.number}${r2 ? `+C${r2.number}` : ''}${extraTerms}`,
+    };
     r3.getCell(3).numFmt = ACCOUNTING_FMT;
     r3.font = { ...baseFont, bold: true };
     // Round 9 §34 — pre-filled taxes / net when the roster carries them.
@@ -1526,6 +1531,8 @@ function buildPayrollPreviewSheet(
   // interleaved; subcontractor blocks last), then the black section headers.
   for (const entry of model.painterSequence) {
     if (entry.kind === 'hourly') hourlyBlock(entry.block);
+    // Round 10 — subcontractor salary blocks render with the subs.
+    else if (entry.kind === 'salary') salaryBlock(entry.block, TAN);
     else psBlock(entry.block);
   }
 

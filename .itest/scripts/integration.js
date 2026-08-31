@@ -593,12 +593,15 @@ check('§6 Rene carried AP20000 is on his band', leadBy('RENE SALAZAR').jobs.som
 // default, so the split job now pays: 150 × 38% × 50% complete, ÷ 2 co-leads.
 check('split job: each co-lead gets ÷2 (Ted auto-added at the 38% default)', [ted.jobs[0].splitWith, (0, format_1.round2)(ted.jobs[0].totalAfterSplit)], [2, (0, format_1.round2)((150 * 0.38 * 0.5 - ted.jobs[0].laborWages - ted.jobs[0].halfMaterials) / 2)]);
 check('office block: single Office line', [preview.office.length, preview.office[0].lines.length, preview.office[0].lines[0].jobLabel], [1, 1, 'Office']);
-check('salary sections from the roster', [preview.admin.length, preview.estimators.length, preview.managers.length], [1, 5, 4]);
+// Round 10 — Kristina Benson moved out of MANAGER SALARY into the
+// subcontractor bands at the end of the painter sequence.
+check('salary sections from the roster', [preview.admin.length, preview.estimators.length, preview.managers.length], [1, 5, 3]);
+check('Round 10 subcontractor salary block renders with the subs', preview.painterSequence.filter((e) => e.kind === 'salary').map((e) => e.block.name), ['Kristina Benson']);
 check('inactive roster includes Calixto (directory * + persisted painters)', preview.inactiveZeroHours.includes('Calixto Efrain Climaco'), true);
 check('inactive roster is the persisted painter list', preview.inactiveZeroHours.length >= 50, true);
 // Round 4 §5.2 — one A→Z painter sequence interleaving painters and leads,
 // subs last (none here). §5.3 — lead bands in Title Case. §5.5 — office PO text.
-check('painter sequence interleaved A→Z by first name', preview.painterSequence.map((e) => (e.kind === 'hourly' ? e.block.employeeName : e.block.displayName)), [
+check('painter sequence interleaved A→Z by first name', preview.painterSequence.map((e) => e.kind === 'hourly' ? e.block.employeeName : e.kind === 'ps' ? e.block.displayName : e.block.name), [
     'Carlos Ruiz Cruz',
     'Daniel Gonzales Bonilla',
     'Juan Perez',
@@ -606,6 +609,7 @@ check('painter sequence interleaved A→Z by first name', preview.painterSequenc
     'Rafael Aguilar',
     'Rene Salazar',
     'Ted Frank',
+    'Kristina Benson',
 ]);
 check('week range on the model', preview.weekRange, '6/29 - 7/3');
 check('office PO cell text = "(week range)"', preview.office[0].lines[0].poText, '(6/29 - 7/3)');

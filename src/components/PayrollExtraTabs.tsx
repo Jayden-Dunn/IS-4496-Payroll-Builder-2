@@ -628,7 +628,7 @@ function SalaryReadOnly({
             <td className="xcell" />
             <td className="xcell text-right">{money(block.reimbursements)}</td>
           </tr>
-        ) : (
+        ) : block.noMileageRow ? null : (
           <tr>
             <td className="xcell">mileage reimb</td>
             <td className="xcell text-right">{block.miles} mi</td>
@@ -774,6 +774,14 @@ function PainterSequence({
             block={entry.block}
             blankTaxes={blankTaxes}
             notesLayout={notesMode}
+          />
+        ) : entry.kind === 'salary' ? (
+          /* Round 10 — a subcontractor's salary block, in with the subs. */
+          <SalaryReadOnly
+            key={entry.block.key}
+            block={entry.block}
+            weekRange={model.weekRange}
+            headerStyle={TAN}
           />
         ) : notesMode ? (
           <div key={entry.block.key} className="mb-4">
@@ -1047,7 +1055,7 @@ export function NotesTab({
 }): JSX.Element {
   if (!model) return <EmptyPayroll label="Notes needs Payroll Preview" />;
   const gross = model.painterSequence.reduce(
-    (s, e) => s + (e.kind === 'hourly' ? e.block.totalPay : e.block.totalPay),
+    (s, e) => s + (e.kind === 'salary' ? e.block.total : e.block.totalPay),
     0,
   ) +
     model.office.reduce((s, b) => s + b.totalPay, 0) +
@@ -1218,7 +1226,8 @@ export function JobsListTab({
     }
   }
   for (const entry of model.painterSequence) {
-    const block = entry.kind === 'hourly' ? entry.block : entry.block.tsheets;
+    const block =
+      entry.kind === 'hourly' ? entry.block : entry.kind === 'ps' ? entry.block.tsheets : null;
     if (!block) continue;
     for (const l of block.lines) {
       if (!l.apKey || l.apKey === 'OFFICE') continue;

@@ -17,6 +17,10 @@ const payroll_1 = require("./payroll");
 const payTypes_1 = require("./payTypes");
 const pivotByJob_1 = require("./pivotByJob");
 const byText = (a, b) => a.localeCompare(b, 'en', { sensitivity: 'base' });
+/** Display name of a painter-sequence entry, whatever kind it is. */
+function sequenceName(e) {
+    return e.kind === 'hourly' ? e.block.employeeName : e.kind === 'ps' ? e.block.displayName : e.block.name;
+}
 /** First name for alphabetical block ordering. */
 function firstNameOf(name) {
     return name.trim().split(/\s+/)[0] ?? '';
@@ -65,10 +69,13 @@ function plMetricsByJob(pl, mapping, entity) {
         }
         return [...set];
     };
+    const laborLabels = labelsFor((m) => m.laborWagesSubs);
+    const laborLabelSet = new Set(laborLabels);
     const metricLabels = {
         income: labelsFor((m) => m.income),
-        materials: labelsFor((m) => m.materials),
-        laborWagesSubs: labelsFor((m) => m.laborWagesSubs),
+        // Round 10 — subcontractor labor is a LABOR line, never a materials line.
+        materials: labelsFor((m) => m.materials).filter((l) => !laborLabelSet.has(l)),
+        laborWagesSubs: laborLabels,
         sundries: labelsFor((m) => m.sundries),
         travel: labelsFor((m) => m.travel),
         mileage: labelsFor((m) => m.mileage),
@@ -1189,7 +1196,7 @@ function buildPayrollPreview(input) {
     const painterSequence = [
         ...painters.map((b) => ({ kind: 'hourly', block: b })),
         ...leads.filter((b) => !b.sub).map((b) => ({ kind: 'ps', block: b })),
-    ].sort((a, b) => byText(firstNameOf(a.kind === 'hourly' ? a.block.employeeName : a.block.displayName), firstNameOf(b.kind === 'hourly' ? b.block.employeeName : b.block.displayName)));
+    ].sort((a, b) => byText(firstNameOf(sequenceName(a)), firstNameOf(sequenceName(b))));
     for (const b of leads.filter((x) => x.sub))
         painterSequence.push({ kind: 'ps', block: b });
     // ----- salary sections ---------------------------------------------------
@@ -1218,13 +1225,15 @@ function buildPayrollPreview(input) {
             miles,
             mileageReimb,
             sub: entry.sub === true,
+            // Round 10 — these people carry no mileage-reimbursement row at all.
+            noMileageRow: entry.noMileageRow === true,
             ...(entry.reimbursementsLabel ? { reimbursementsLabel: entry.reimbursementsLabel } : {}),
             reimbursements: flatReimb,
             extras,
             taxes: e.taxes !== undefined ? e.taxes : (entry.taxes ?? null),
             net: e.net !== undefined ? e.net : (entry.net ?? null),
             total: (0, format_1.round2)(entry.amount +
-                (entry.reimbursementsLabel ? flatReimb : mileageReimb) +
+                (entry.reimbursementsLabel ? flatReimb : entry.noMileageRow ? 0 : mileageReimb) +
                 extrasNet(extras)),
         };
     };
@@ -1238,6 +1247,15 @@ function buildPayrollPreview(input) {
     const admin = roster.filter((r) => r.section === 'ADMIN').map(salaryBlock).sort(sortSalary);
     const estimators = roster.filter((r) => r.section === 'ESTIMATORS').map(salaryBlock).sort(sortSalary);
     const managers = roster.filter((r) => r.section === 'MANAGER SALARY').map(salaryBlock).sort(sortSalary);
+    // Round 10 — subcontractor salary rows render with the subcontractor crew-lead
+    // bands at the end of the painter sequence, not in their own black section.
+    const subcontractorSalaries = roster
+        .filter((r) => r.section === 'SUBCONTRACTORS')
+        .map(salaryBlock)
+        .sort(sortSalary);
+    // Round 10 — Kristina Benson & co. render right under Pepe's Painting LLC.
+    for (const b of subcontractorSalaries)
+        painterSequence.push({ kind: 'salary', block: b });
     // ----- Round 6 §4.10 Inactive Employees tab --------------------------------
     const norm = (s) => s.trim().toLowerCase();
     const namesWithHours = new Set();
@@ -1254,6 +1272,8 @@ function buildPayrollPreview(input) {
     for (const entry of painterSequence) {
         if (entry.kind === 'ps')
             namesWithHours.add(norm(entry.block.leadName));
+        else if (entry.kind === 'salary')
+            namesWithHours.add(norm(entry.block.name));
         else if (entry.block.totalHours > 0)
             namesWithHours.add(norm(entry.block.employeeName));
     }
@@ -1344,9 +1364,15 @@ function mergePayrollPreviews(nv, ut) {
     const painterSequence = [
         ...painters.map((b) => ({ kind: 'hourly', block: b })),
         ...leads.filter((b) => !b.sub).map((b) => ({ kind: 'ps', block: b })),
-    ].sort((a, b) => byText(firstNameOf(a.kind === 'hourly' ? a.block.employeeName : a.block.displayName), firstNameOf(b.kind === 'hourly' ? b.block.employeeName : b.block.displayName)));
+    ].sort((a, b) => byText(firstNameOf(sequenceName(a)), firstNameOf(sequenceName(b))));
     for (const b of leads.filter((x) => x.sub))
         painterSequence.push({ kind: 'ps', block: b });
+    // Round 10 — subcontractor salary blocks stay with the subcontractor bands.
+    for (const m of [nv, ut]) {
+        for (const e of m.painterSequence)
+            if (e.kind === 'salary')
+                painterSequence.push(e);
+    }
     const byFirstName = (a, b) => 
     // Round 9 §26 — subcontractor rows stay at the bottom of the merged section.
     Number(a.sub) - Number(b.sub) || byText(firstNameOf(a.name), firstNameOf(b.name));

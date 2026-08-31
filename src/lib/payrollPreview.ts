@@ -93,6 +93,11 @@ export interface PayrollPreviewInput {
 
 const byText = (a: string, b: string): number => a.localeCompare(b, 'en', { sensitivity: 'base' });
 
+/** Display name of a painter-sequence entry, whatever kind it is. */
+function sequenceName(e: PainterSectionEntry): string {
+  return e.kind === 'hourly' ? e.block.employeeName : e.kind === 'ps' ? e.block.displayName : e.block.name;
+}
+
 /** First name for alphabetical block ordering. */
 function firstNameOf(name: string): string {
   return name.trim().split(/\s+/)[0] ?? '';
@@ -167,10 +172,13 @@ export function plMetricsByJob(
     }
     return [...set];
   };
+  const laborLabels = labelsFor((m) => m.laborWagesSubs);
+  const laborLabelSet = new Set(laborLabels);
   const metricLabels = {
     income: labelsFor((m) => m.income),
-    materials: labelsFor((m) => m.materials),
-    laborWagesSubs: labelsFor((m) => m.laborWagesSubs),
+    // Round 10 — subcontractor labor is a LABOR line, never a materials line.
+    materials: labelsFor((m) => m.materials).filter((l) => !laborLabelSet.has(l)),
+    laborWagesSubs: laborLabels,
     sundries: labelsFor((m) => m.sundries),
     travel: labelsFor((m) => m.travel),
     mileage: labelsFor((m) => m.mileage),
@@ -1508,12 +1516,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
   const painterSequence: PainterSectionEntry[] = [
     ...painters.map((b): PainterSectionEntry => ({ kind: 'hourly', block: b })),
     ...leads.filter((b) => !b.sub).map((b): PainterSectionEntry => ({ kind: 'ps', block: b })),
-  ].sort((a, b) =>
-    byText(
-      firstNameOf(a.kind === 'hourly' ? a.block.employeeName : a.block.displayName),
-      firstNameOf(b.kind === 'hourly' ? b.block.employeeName : b.block.displayName),
-    ),
-  );
+  ].sort((a, b) => byText(firstNameOf(sequenceName(a)), firstNameOf(sequenceName(b))));
   for (const b of leads.filter((x) => x.sub)) painterSequence.push({ kind: 'ps', block: b });
 
   // ----- salary sections ---------------------------------------------------
@@ -1544,6 +1547,8 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       miles,
       mileageReimb,
       sub: entry.sub === true,
+      // Round 10 — these people carry no mileage-reimbursement row at all.
+      noMileageRow: entry.noMileageRow === true,
       ...(entry.reimbursementsLabel ? { reimbursementsLabel: entry.reimbursementsLabel } : {}),
       reimbursements: flatReimb,
       extras,
@@ -1551,7 +1556,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       net: e.net !== undefined ? e.net : (entry.net ?? null),
       total: round2(
         entry.amount +
-          (entry.reimbursementsLabel ? flatReimb : mileageReimb) +
+          (entry.reimbursementsLabel ? flatReimb : entry.noMileageRow ? 0 : mileageReimb) +
           extrasNet(extras),
       ),
     };
@@ -1570,6 +1575,14 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
   const admin = roster.filter((r) => r.section === 'ADMIN').map(salaryBlock).sort(sortSalary);
   const estimators = roster.filter((r) => r.section === 'ESTIMATORS').map(salaryBlock).sort(sortSalary);
   const managers = roster.filter((r) => r.section === 'MANAGER SALARY').map(salaryBlock).sort(sortSalary);
+  // Round 10 — subcontractor salary rows render with the subcontractor crew-lead
+  // bands at the end of the painter sequence, not in their own black section.
+  const subcontractorSalaries = roster
+    .filter((r) => r.section === 'SUBCONTRACTORS')
+    .map(salaryBlock)
+    .sort(sortSalary);
+  // Round 10 — Kristina Benson & co. render right under Pepe's Painting LLC.
+  for (const b of subcontractorSalaries) painterSequence.push({ kind: 'salary', block: b });
 
   // ----- Round 6 §4.10 Inactive Employees tab --------------------------------
   const norm = (s: string): string => s.trim().toLowerCase();
@@ -1583,6 +1596,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
   for (const b of leads) namesWithHours.add(norm(b.leadName));
   for (const entry of painterSequence) {
     if (entry.kind === 'ps') namesWithHours.add(norm(entry.block.leadName));
+    else if (entry.kind === 'salary') namesWithHours.add(norm(entry.block.name));
     else if (entry.block.totalHours > 0) namesWithHours.add(norm(entry.block.employeeName));
   }
 
@@ -1685,13 +1699,12 @@ export function mergePayrollPreviews(
   const painterSequence: PainterSectionEntry[] = [
     ...painters.map((b): PainterSectionEntry => ({ kind: 'hourly', block: b })),
     ...leads.filter((b) => !b.sub).map((b): PainterSectionEntry => ({ kind: 'ps', block: b })),
-  ].sort((a, b) =>
-    byText(
-      firstNameOf(a.kind === 'hourly' ? a.block.employeeName : a.block.displayName),
-      firstNameOf(b.kind === 'hourly' ? b.block.employeeName : b.block.displayName),
-    ),
-  );
+  ].sort((a, b) => byText(firstNameOf(sequenceName(a)), firstNameOf(sequenceName(b))));
   for (const b of leads.filter((x) => x.sub)) painterSequence.push({ kind: 'ps', block: b });
+  // Round 10 — subcontractor salary blocks stay with the subcontractor bands.
+  for (const m of [nv, ut]) {
+    for (const e of m.painterSequence) if (e.kind === 'salary') painterSequence.push(e);
+  }
   const byFirstName = (a: SalaryBlock, b: SalaryBlock): number =>
     // Round 9 §26 — subcontractor rows stay at the bottom of the merged section.
     Number(a.sub) - Number(b.sub) || byText(firstNameOf(a.name), firstNameOf(b.name));

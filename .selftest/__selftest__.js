@@ -444,21 +444,22 @@ function runSelfTests() {
         apKey: '24393',
         forceNonDb: true,
     }).prevailing, false);
-    // --- Round 8 §9.1: three crew-lead rates -------------------------------------------------------
+    // --- Round 8 §9.1 / Round 10: hourly vs profit-share rates ------------------
     const r9 = {
         wageRates: [
-            { name: 'Antonio Zuniga', rate: 16, hourlyRate: 27, crewLeadRate: 21 },
+            { name: 'Antonio Zuniga', rate: 16, hourlyRate: 27 },
             { name: 'Rafael Aguilar', rate: 25 },
             { name: 'Hilda Ruiz', rate: 16 },
         ],
         defaultWageRate: 18,
-        defaultCrewLeadRate: 18,
         prevailingWagePatterns: ['SNRHA'],
         prevailingMinRate: 19.18,
     };
     check('§9.1 lead on an HOURLY job → hourly-jobs rate', (0, payroll_1.resolveLineRate)('ANTONIO ZUNIGA', 'AP24000 T&M repair', true, { ...r9, isCrewLead: true }).rate, 27);
-    check("§9.1 lead's T-SHEETS on a profit-share job → crew-lead rate", (0, payroll_1.resolveLineRate)('ANTONIO ZUNIGA', 'AP24314 Ext', false, { ...r9, isCrewLead: true }), { rate: 21, defaulted: false, prevailing: false, fromCrewLeadRate: true });
-    check('§9.1 lead without a crewLeadRate falls back to the global 18', (0, payroll_1.resolveLineRate)('RAFAEL AGUILAR', 'AP24314 Ext', false, { ...r9, isCrewLead: true }).rate, 18);
+    // Round 10 — a lead on a job they lead is on a profit-share job, so the PS
+    // rate IS their crew-lead rate; the separate rate column is gone.
+    check("Round 10 lead's T-SHEETS on a profit-share job → their PS rate", (0, payroll_1.resolveLineRate)('ANTONIO ZUNIGA', 'AP24314 Ext', false, { ...r9, isCrewLead: true }), { rate: 16, defaulted: false, prevailing: false, fromCrewLeadRate: true });
+    check('Round 10 lead with only a PS rate on file → that rate, not a global lead rate', (0, payroll_1.resolveLineRate)('RAFAEL AGUILAR', 'AP24314 Ext', false, { ...r9, isCrewLead: true }).rate, 25);
     check('§9.1 helper on a profit-share job → their painter rate', (0, payroll_1.resolveLineRate)('ANTONIO ZUNIGA', 'AP24314 Ext', false, r9).rate, 16);
     check('§9.1 helper with no hourlyRate on an HOURLY job → default', (0, payroll_1.resolveLineRate)('HILDA RUIZ', 'AP24000 T&M repair', true, r9).rate, 18);
     check('§9.1 SNRHA substring floors a $16 painter at 19.18', (0, payroll_1.resolveLineRate)('ANTONIO ZUNIGA', 'AP24393 SNRHA *SS* 210 N 16th', false, r9).rate, 19.18);
@@ -466,7 +467,6 @@ function runSelfTests() {
     check('Carlos Ruiz Cruz HOURLY job → $25 (not the $18 PS/crew-lead rate)', (0, payroll_1.resolveLineRate)('Carlos Ruiz Cruz', 'AP24000 repair', true, {
         wageRates: (0, settings_1.defaultSettings)().wageRates,
         defaultWageRate: 18,
-        defaultCrewLeadRate: 18,
         prevailingWagePatterns: ['SNRHA'],
         prevailingMinRate: 19.18,
         isCrewLead: true,
@@ -474,7 +474,6 @@ function runSelfTests() {
     check("Carlos Ruiz Cruz profit-share hours as lead → $18", (0, payroll_1.resolveLineRate)('Carlos Ruiz Cruz', 'AP24314 Ext', false, {
         wageRates: (0, settings_1.defaultSettings)().wageRates,
         defaultWageRate: 18,
-        defaultCrewLeadRate: 18,
         prevailingWagePatterns: ['SNRHA'],
         prevailingMinRate: 19.18,
         isCrewLead: true,
@@ -839,17 +838,15 @@ function runSelfTests() {
         hourlyJob: false,
         payRateKind: 'wages2',
     }).rate, 21);
-    check('§13 crew-lead pay item selects the crew-lead rate on a PS job', (0, payroll_1.resolveWageRate)('Samuel Brewster', {
+    check('§13 crew-lead pay item is tagged as crew-lead hours (paid at the PS rate)', (0, payroll_1.resolveWageRate)('Samuel Brewster', {
         wageRates: r9Rates,
         defaultWageRate: 18,
-        defaultCrewLeadRate: 18,
         hourlyJob: false,
         payRateKind: 'crewLead',
-    }).kind, 'crewLead');
+    }), { rate: 18, defaulted: false, kind: 'crewLead' });
     check('§9.1 still wins: an HOURLY job pays the hourly rate even on a crew-lead item', (0, payroll_1.resolveWageRate)('Xavier Green', {
         wageRates: r9Rates,
         defaultWageRate: 18,
-        defaultCrewLeadRate: 30,
         hourlyJob: true,
         payRateKind: 'crewLead',
     }).rate, 18);
@@ -1351,7 +1348,7 @@ function runSelfTests() {
     check("§10.1 sheet name apostrophe is doubled", (0, exportRound6Sheets_1.inputNumsSheetFormula)('C11'), { formula: `'Input #''s'!C11` });
     check('§5 RF seed color is C4A484', settings_1.DEFAULT_LEGEND.find((l) => l.estimator === 'RF')?.color, 'C4A484');
     const carlosWages = (0, settings_1.defaultSettings)().wageRates.find((w) => w.name === 'Carlos Ruiz Cruz');
-    check('Carlos Ruiz Cruz seeds: PS $18 / hourly $25 / crew-lead $18', [carlosWages?.rate, carlosWages?.hourlyRate, carlosWages?.crewLeadRate], [18, 25, 18]);
+    check('Carlos Ruiz Cruz seeds: PS $18 / hourly $25 (Round 10 — no crew-lead column)', [carlosWages?.rate, carlosWages?.hourlyRate, carlosWages?.crewLeadRate], [18, 25, undefined]);
     check('§11 inactive roster seeds 52 unique painters', new Set(settings_1.DEFAULT_PAINTER_ROSTER.map((p) => p.name)).size, 52);
     const failed = results.filter((r) => !r.pass);
     const label = `[% of Completion Builder self-test] ${results.length - failed.length}/${results.length} passed`;

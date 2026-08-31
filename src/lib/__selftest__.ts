@@ -714,15 +714,14 @@ export function runSelfTests(): boolean {
     false,
   );
 
-  // --- Round 8 §9.1: three crew-lead rates -------------------------------------------------------
+  // --- Round 8 §9.1 / Round 10: hourly vs profit-share rates ------------------
   const r9 = {
     wageRates: [
-      { name: 'Antonio Zuniga', rate: 16, hourlyRate: 27, crewLeadRate: 21 },
+      { name: 'Antonio Zuniga', rate: 16, hourlyRate: 27 },
       { name: 'Rafael Aguilar', rate: 25 },
       { name: 'Hilda Ruiz', rate: 16 },
     ],
     defaultWageRate: 18,
-    defaultCrewLeadRate: 18,
     prevailingWagePatterns: ['SNRHA'],
     prevailingMinRate: 19.18,
   };
@@ -731,15 +730,17 @@ export function runSelfTests(): boolean {
     resolveLineRate('ANTONIO ZUNIGA', 'AP24000 T&M repair', true, { ...r9, isCrewLead: true }).rate,
     27,
   );
+  // Round 10 — a lead on a job they lead is on a profit-share job, so the PS
+  // rate IS their crew-lead rate; the separate rate column is gone.
   check(
-    "§9.1 lead's T-SHEETS on a profit-share job → crew-lead rate",
+    "Round 10 lead's T-SHEETS on a profit-share job → their PS rate",
     resolveLineRate('ANTONIO ZUNIGA', 'AP24314 Ext', false, { ...r9, isCrewLead: true }),
-    { rate: 21, defaulted: false, prevailing: false, fromCrewLeadRate: true },
+    { rate: 16, defaulted: false, prevailing: false, fromCrewLeadRate: true },
   );
   check(
-    '§9.1 lead without a crewLeadRate falls back to the global 18',
+    'Round 10 lead with only a PS rate on file → that rate, not a global lead rate',
     resolveLineRate('RAFAEL AGUILAR', 'AP24314 Ext', false, { ...r9, isCrewLead: true }).rate,
-    18,
+    25,
   );
   check(
     '§9.1 helper on a profit-share job → their painter rate',
@@ -766,7 +767,6 @@ export function runSelfTests(): boolean {
     resolveLineRate('Carlos Ruiz Cruz', 'AP24000 repair', true, {
       wageRates: defaultSettings().wageRates,
       defaultWageRate: 18,
-      defaultCrewLeadRate: 18,
       prevailingWagePatterns: ['SNRHA'],
       prevailingMinRate: 19.18,
       isCrewLead: true,
@@ -778,7 +778,6 @@ export function runSelfTests(): boolean {
     resolveLineRate('Carlos Ruiz Cruz', 'AP24314 Ext', false, {
       wageRates: defaultSettings().wageRates,
       defaultWageRate: 18,
-      defaultCrewLeadRate: 18,
       prevailingWagePatterns: ['SNRHA'],
       prevailingMinRate: 19.18,
       isCrewLead: true,
@@ -1261,22 +1260,20 @@ export function runSelfTests(): boolean {
     21,
   );
   check(
-    '§13 crew-lead pay item selects the crew-lead rate on a PS job',
+    '§13 crew-lead pay item is tagged as crew-lead hours (paid at the PS rate)',
     resolveWageRate('Samuel Brewster', {
       wageRates: r9Rates,
       defaultWageRate: 18,
-      defaultCrewLeadRate: 18,
       hourlyJob: false,
       payRateKind: 'crewLead',
-    }).kind,
-    'crewLead',
+    }),
+    { rate: 18, defaulted: false, kind: 'crewLead' },
   );
   check(
     '§9.1 still wins: an HOURLY job pays the hourly rate even on a crew-lead item',
     resolveWageRate('Xavier Green', {
       wageRates: r9Rates,
       defaultWageRate: 18,
-      defaultCrewLeadRate: 30,
       hourlyJob: true,
       payRateKind: 'crewLead',
     }).rate,
@@ -1983,9 +1980,9 @@ export function runSelfTests(): boolean {
   check('§5 RF seed color is C4A484', DEFAULT_LEGEND.find((l) => l.estimator === 'RF')?.color, 'C4A484');
   const carlosWages = defaultSettings().wageRates.find((w) => w.name === 'Carlos Ruiz Cruz');
   check(
-    'Carlos Ruiz Cruz seeds: PS $18 / hourly $25 / crew-lead $18',
-    [carlosWages?.rate, carlosWages?.hourlyRate, carlosWages?.crewLeadRate],
-    [18, 25, 18],
+    'Carlos Ruiz Cruz seeds: PS $18 / hourly $25 (Round 10 — no crew-lead column)',
+    [carlosWages?.rate, carlosWages?.hourlyRate, (carlosWages as { crewLeadRate?: number })?.crewLeadRate],
+    [18, 25, undefined],
   );
   check(
     '§11 inactive roster seeds 52 unique painters',
