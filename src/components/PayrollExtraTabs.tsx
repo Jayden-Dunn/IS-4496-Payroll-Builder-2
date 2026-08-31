@@ -119,6 +119,7 @@ function PsChainBody({
   onEdit,
   showGrossWages,
   hideBooksRows,
+  showTravel,
   nameStyle,
   highlightFirstJob,
 }: {
@@ -133,6 +134,8 @@ function PsChainBody({
    * % Materials). They stay on the main Payroll Preview.
    */
   hideBooksRows?: boolean;
+  /** Round 10 — the Travel row is UT-only. */
+  showTravel?: boolean;
   nameStyle?: CSSProperties;
   highlightFirstJob?: boolean;
 }): JSX.Element {
@@ -197,7 +200,7 @@ function PsChainBody({
             ['-Mileage', (j: PsBlock['jobs'][number]) => money(j.mileage)],
             [
               // Round 9 §32 — full-materials leads are charged all of it.
-              block.jobs.some((j) => j.fullMaterials) ? '- Materials' : '-½ Materials',
+              block.jobs.some((j) => j.fullMaterials) ? '- ALL Materials' : '-½ Materials',
               (j: PsBlock['jobs'][number]) => money(j.halfMaterials),
             ],
           ] as [string, (j: PsBlock['jobs'][number]) => string][]
@@ -225,6 +228,17 @@ function PsChainBody({
             ))}
           </tr>
         ))}
+        {/* Round 10 §UT — hotel charge-back, when the band carries one. */}
+        {jobs.some((j) => j.hotels !== null) && (
+          <tr>
+            {label('- Hotels')}
+            {jobs.map((j) => (
+              <td key={j.jobRowId} className="xcell text-right">
+                {j.hotels === null ? '' : money(j.hotels)}
+              </td>
+            ))}
+          </tr>
+        )}
         <tr className="font-semibold border-t border-neutral-400">
           {label('Total Profit Share')}
           {jobs.map((j) => {
@@ -267,19 +281,23 @@ function PsChainBody({
             {money(block.total)}
           </td>
         </tr>
+        {/* Round 10 — one column per job, like every other chain row. */}
         <tr>
           {label('Mileage - New')}
-          <td className="xcell text-right" colSpan={Math.max(jobs.length, 1)}>
-            {editable && onEdit ? (
-              <NumCell value={block.mileageNew} onCommit={(n) => onEdit(`psb:${block.key}`, { mileageNew: n ?? 0 })} />
-            ) : (
-              money(block.mileageNew)
-            )}
-          </td>
+          {jobs.map((j, i) => (
+            <td key={j.jobRowId} className="xcell text-right">
+              {i > 0 ? null : editable && onEdit ? (
+                <NumCell value={block.mileageNew} onCommit={(n) => onEdit(`psb:${block.key}`, { mileageNew: n ?? 0 })} />
+              ) : (
+                money(block.mileageNew)
+              )}
+            </td>
+          ))}
         </tr>
+        {/* Round 10 — one cell immediately right of the label. */}
         <tr className="font-semibold">
           <td className="xcell w-40">Hourly Pay</td>
-          <td className="xcell text-right" colSpan={Math.max(jobs.length, 1)} style={HOURLY_PAY_YELLOW}>
+          <td className="xcell text-right" style={HOURLY_PAY_YELLOW}>
             {editable && onEdit ? (
               <NumCell
                 value={block.hourlyPay}
@@ -289,6 +307,7 @@ function PsChainBody({
               money(block.hourlyPay)
             )}
           </td>
+          {jobs.length > 1 && <td className="xcell" colSpan={jobs.length - 1} />}
         </tr>
         <tr>
           {label('Reimbursements')}
@@ -394,15 +413,7 @@ function PsChainBody({
             </td>
           ))}
         </tr>
-        {/* Round 8 §8.5 — informational, directly beneath Materials. */}
-        <tr>
-          {label('Travel')}
-          {jobs.map((j) => (
-            <td key={j.jobRowId} className="xcell text-right">
-              {money(j.travel)}
-            </td>
-          ))}
-        </tr>
+        {/* Round 10 — Travel is UT-only and sits below QB Labor-Wages-Subs. */}
         <tr>
           {label('QB Labor-Wages-Subs')}
           {jobs.map((j) => (
@@ -411,6 +422,16 @@ function PsChainBody({
             </td>
           ))}
         </tr>
+        {showTravel && (
+          <tr>
+            {label('Travel')}
+            {jobs.map((j) => (
+              <td key={j.jobRowId} className="xcell text-right">
+                {money(j.travel)}
+              </td>
+            ))}
+          </tr>
+        )}
         <tr>
           {label('Mileage in Books')}
           {jobs.map((j) => (
@@ -817,6 +838,7 @@ function PainterSequence({
               onEdit={onEdit}
               showGrossWages={showGrossWages}
               hideBooksRows={hideBooksRows}
+              showTravel={model.entity === 'UT'}
             />
             {entry.block.tsheets && (
               <div className="mb-4 ml-4 max-w-3xl">

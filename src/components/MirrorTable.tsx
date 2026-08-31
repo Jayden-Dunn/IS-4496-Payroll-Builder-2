@@ -30,11 +30,11 @@ export function MirrorTable({ headers, rows, boldFirstCol, compact }: MirrorTabl
   /** Round 10 — the same width buckets the export uses, in rem. */
   const widthFor = (header: string, i: number): string | undefined => {
     if (!compact) return undefined;
-    if (i === 0) return '4rem';
+    if (i === 0) return '3.5rem';
     const h = header.trim();
-    if (/^(customer|name(\s*[12])?|memo(\/description)?)$/i.test(h)) return '11rem';
-    if (/^product\s*\/\s*service$/i.test(h)) return '8rem';
-    return '4.5rem';
+    if (/^(customer|name(\s*[12])?|memo(\/description)?)$/i.test(h)) return '8rem';
+    if (/^product\s*\/\s*service$/i.test(h)) return '5.5rem';
+    return '3.5rem';
   };
   return (
     <div className="p-2">

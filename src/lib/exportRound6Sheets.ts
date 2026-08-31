@@ -117,10 +117,10 @@ const PRODUCT_SERVICE_HEADER = /^product\s*\/\s*service$/i;
  * cell, it just no longer sets the column width.
  */
 function salesByRepColWidth(header: string, colIndex0: number): number {
-  if (colIndex0 === 0) return 8; // AP#
-  if (WIDE_TEXT_HEADERS.test(header.trim())) return 24;
-  if (PRODUCT_SERVICE_HEADER.test(header.trim())) return 16;
-  return 7;
+  if (colIndex0 === 0) return 7; // AP#
+  if (WIDE_TEXT_HEADERS.test(header.trim())) return 16;
+  if (PRODUCT_SERVICE_HEADER.test(header.trim())) return 11;
+  return 6;
 }
 
 export function buildSalesByRepMirrorSheet(
@@ -562,10 +562,14 @@ function writePsChainValues(
     { label: '-Mileage', vals: cut.map((j) => j.mileage), fmt: MONEY_FMT },
     {
       // Round 9 §32 — a full-materials lead is charged all of it.
-      label: block.jobs.some((j) => j.fullMaterials) ? '- Materials' : '-½ Materials',
+      label: block.jobs.some((j) => j.fullMaterials) ? '- ALL Materials' : '-½ Materials',
       vals: cut.map((j) => j.halfMaterials),
       fmt: MONEY_FMT,
     },
+    // Round 10 §UT — the hotel charge-back, when the band carries one.
+    ...(cut.some((j) => j.hotels !== null)
+      ? [{ label: '- Hotels', vals: cut.map((j) => j.hotels ?? ''), fmt: MONEY_FMT }]
+      : []),
     {
       label: 'Total Profit Share',
       vals: cut.map((j) => (j.manualPay ? '' : j.totalProfitShare)),
@@ -573,7 +577,7 @@ function writePsChainValues(
       bold: true,
     },
   ];
-  const materialsLabel = block.jobs.some((j) => j.fullMaterials) ? '- Materials' : '-½ Materials';
+  const materialsLabel = block.jobs.some((j) => j.fullMaterials) ? '- ALL Materials' : '-½ Materials';
   let halfMatRow = 0;
   let mileageRow = 0;
   for (const rr of rows) {

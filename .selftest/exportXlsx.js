@@ -980,6 +980,8 @@ function buildPayrollPreviewSheet(wb, model,
 // Round 8 §7.3 — `Payroll Preview - UT` renders through this exact writer.
 sheetName = 'PAYROLL PREVIEW', inputRefsByLeadKey) {
     const ws = wb.addWorksheet(sheetName);
+    /** Round 10 — Travel is a UT-only row. */
+    const isUtSheet = model.entity === 'UT';
     ws.columns = [{ width: 22 }, { width: 41.4 }, { width: 32.4 }, { width: 16.2 }, { width: 9.4 }, { width: 12 }, { width: 12 }, { width: 12 }];
     const baseFont = { name: PP_FONT, size: 12 };
     const band = (values, fill, color, bold = true, upTo = 7) => {
@@ -1195,8 +1197,17 @@ sheetName = 'PAYROLL PREVIEW', inputRefsByLeadKey) {
         const laborRow = ws.addRow(['- Labor + Wages', ...block.jobs.map((j) => j.laborWages)]).number;
         const milesRow = ws.addRow(['-Mileage', ...block.jobs.map((j) => j.mileage)]).number;
         // Round 9 §32 — a full-materials lead is charged all of it, and the row says so.
-        const materialsLabel = block.jobs.some((j) => j.fullMaterials) ? '- Materials' : '-½ Materials';
+        // Round 10 — a full-materials band reads "- ALL Materials".
+        const materialsLabel = block.jobs.some((j) => j.fullMaterials) ? '- ALL Materials' : '-½ Materials';
         const halfRow = ws.addRow([materialsLabel, ...block.jobs.map((j) => j.halfMaterials)]).number;
+        /**
+         * Round 10 §UT — the painter pays their own lodging, so the job's travel is
+         * charged back here. `halfMaterials` already carries the hotel amount into
+         * the chain, so this row is the visible half of that deduction.
+         */
+        const hotelsRow = block.jobs.some((j) => j.hotels !== null)
+            ? ws.addRow(['- Hotels', ...block.jobs.map((j) => j.hotels ?? '')]).number
+            : 0;
         const tpsRow = ws.addRow(['Total Profit Share']).number;
         let splitRow = 0;
         if (block.jobs.some((j) => j.splitWith > 1)) {
@@ -1204,7 +1215,12 @@ sheetName = 'PAYROLL PREVIEW', inputRefsByLeadKey) {
         }
         ws.addRow([]);
         const totalRow = ws.addRow(['Total']).number;
-        const mileNewRow = ws.addRow(['Mileage - New', block.mileageNew]).number;
+        // Round 10 — one column per job, like every other chain row.
+        const mileNewRow = ws.addRow([
+            'Mileage - New',
+            block.mileageNew,
+            ...block.jobs.slice(1).map(() => ''),
+        ]).number;
         const hourlyPayRow = ws.addRow(['Hourly Pay']).number;
         const reimbRow = ws.addRow(['Reimbursements', block.reimbursements, block.reimbMemo]).number;
         const deductRow = ws.addRow(['Deductions/Sundries']).number;
@@ -1229,8 +1245,10 @@ sheetName = 'PAYROLL PREVIEW', inputRefsByLeadKey) {
         const incomeRow = ws.addRow(['Total Income', ...block.jobs.map((j) => j.income)]).number;
         const matRow = ws.addRow(['Materials', ...block.jobs.map((j) => j.materials)]).number;
         // Round 8 §8.5 — informational, directly beneath Materials.
-        ws.addRow(['Travel', ...block.jobs.map((j) => j.travel)]);
+        // Round 10 — Travel is UT-only and sits BELOW QB Labor-Wages-Subs.
         ws.addRow(['QB Labor-Wages-Subs', ...block.jobs.map((j) => j.laborWages)]);
+        if (isUtSheet)
+            ws.addRow(['Travel', ...block.jobs.map((j) => j.travel)]);
         // Round 10 — `-Mileage` above IS this books figure (the P&L Mileage
         // Expense for the AP#), so it points here instead of repeating the number.
         const booksMileageRow = ws.addRow(['Mileage in Books', ...block.jobs.map((j) => j.mileage)]).number;
@@ -1258,7 +1276,7 @@ sheetName = 'PAYROLL PREVIEW', inputRefsByLeadKey) {
                 tps.value = {
                     // N() so the blank-override cell compares as 0 — in Excel raw text
                     // sorts above every number, so a bare `>0` would take the WO branch.
-                    formula: `IF(N(${L}${woRow})>0,${L}${woRow}*${L}${pctRow},${L}${psRow}*${L}${pctRow})-${L}${halfRow}-${L}${laborRow}`,
+                    formula: `IF(N(${L}${woRow})>0,${L}${woRow}*${L}${pctRow},${L}${psRow}*${L}${pctRow})-${L}${halfRow}-${L}${laborRow}${hotelsRow > 0 ? `-N(${L}${hotelsRow})` : ''}`,
                 };
             }
             tps.font = { ...baseFont, bold: true };
@@ -1272,6 +1290,8 @@ sheetName = 'PAYROLL PREVIEW', inputRefsByLeadKey) {
             for (const rn of [psRow, laborRow, milesRow, halfRow, incomeRow, matRow]) {
                 ws.getCell(`${L}${rn}`).numFmt = MONEY_FMT;
             }
+            if (hotelsRow > 0)
+                ws.getCell(`${L}${hotelsRow}`).numFmt = MONEY_FMT;
             for (const rn of [woRow, tpsRow]) {
                 ws.getCell(`${L}${rn}`).numFmt = ACCOUNTING_FMT;
             }
