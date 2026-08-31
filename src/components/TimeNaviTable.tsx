@@ -158,8 +158,20 @@ export function TimeNaviTable({ rows, colorByEstimator, estimatorOptions, onEdit
                   title={r.event}
                 />
               </td>
-              <td className="xcell w-px whitespace-nowrap">{fmtDateShort(r.startDate)}</td>
-              <td className="xcell w-px whitespace-nowrap">{fmtDateShort(r.endDate)}</td>
+              <td className="xcell w-px whitespace-nowrap">
+                <CellInput
+                  value={fmtDateShort(r.startDate)}
+                  title="Start Date — type to override (M/D/YYYY)"
+                  onCommit={(text) => onEdit(r.id, { startDate: parseDate(text.trim() || null) })}
+                />
+              </td>
+              <td className="xcell w-px whitespace-nowrap">
+                <CellInput
+                  value={fmtDateShort(r.endDate)}
+                  title="End Date — type to override (M/D/YYYY)"
+                  onCommit={(text) => onEdit(r.id, { endDate: parseDate(text.trim() || null) })}
+                />
+              </td>
               <td className="xcell max-w-[7rem] truncate whitespace-nowrap" title={r.calendar}>
                 <CellInput value={r.calendar} onCommit={(text) => onEdit(r.id, { calendar: text })} />
               </td>

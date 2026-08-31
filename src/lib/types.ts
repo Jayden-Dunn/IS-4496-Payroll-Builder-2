@@ -148,6 +148,8 @@ export interface RowEdit {
   apptivo?: number;
   included?: boolean;
   event?: string;
+  startDate?: Date | null;
+  endDate?: Date | null;
   calendar?: string;
   attendees?: string;
   location?: string;

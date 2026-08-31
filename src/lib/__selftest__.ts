@@ -10,6 +10,9 @@ import {
   isPercentText,
   matchesSetRate,
   matchesSubbedOut,
+  NEGATIVE_TEXT_CLASS,
+  negativeClass,
+  parseMoneyInput,
   parsePercentInput,
   percentText,
 } from './format';
@@ -25,6 +28,7 @@ import { isExclusionGray, resolveThemeTintToRgb } from './fills';
 import type { SalesByCustMirrorRow } from './mirrorTabs';
 import {
   parseDate,
+  parseLastWeek,
   parseLastWeekPivotByJob,
   parseNumberLoose,
   type LastWeekPbjRow,
@@ -68,6 +72,7 @@ import { applyPivotView, EMPTY_PIVOT_VIEW } from './pivotView';
 import {
   baseApKey,
   cleanEventTitle,
+  isOfficeCustomer,
   jobDisplayPair,
   type JobDisplaySources,
 } from './jobNames';
@@ -1176,6 +1181,66 @@ export function runSelfTests(): boolean {
     'crew-owner lead: not also an hourly painter',
     ownerPreview.painters.length,
     0,
+  );
+
+
+  // --- Round 10 --------------------------------------------------------------
+  check(
+    'R10 accounting negatives parse back from parentheses',
+    [parseMoneyInput('(39.90)'), parseMoneyInput('$1,234.50'), parseMoneyInput('(1,000)')],
+    [-39.9, 1234.5, -1000],
+  );
+  check(
+    'R10 negatives carry the red class, positives do not',
+    [negativeClass(-1), negativeClass(0), negativeClass(12), negativeClass(null)],
+    [NEGATIVE_TEXT_CLASS, '', '', ''],
+  );
+  check(
+    'R10 percents filename leads with the % symbol',
+    percentsExportFilename(new Date(2026, 7, 14)),
+    '% of Completion 08-14-2026.xlsx',
+  );
+  check(
+    'R10 the office jobcode is not a customer name',
+    [isOfficeCustomer('ALLPRO OFFICE'), isOfficeCustomer('Allpro  Office'), isOfficeCustomer('Allpro Painters')],
+    [true, true, false],
+  );
+  check(
+    'R10 Sales by Rep Name 1 outranks the timesheet customer',
+    jobDisplayPair('24473', {
+      timesheetByAp: new Map([['24473', { customer: 'ALLPRO OFFICE', job: 'AP24473 Int' }]]),
+      carryByAp: new Map(),
+      salesByAp: new Map([['24473', { name1: 'Cerris Systems', name2: 'AP24473 Int' }]]),
+      pl: null,
+    }),
+    { poLabel: 'AP24473 Int', customerName: 'Cerris Systems', usedBaseKey: false, unresolved: false },
+  );
+  check(
+    'R10 "Regular Pay Overtime" is overtime at the regular rate slot',
+    classifyPayItem('Regular Pay Overtime'),
+    { kind: 'overtime', rate: 'regular', reason: 'weekly' },
+  );
+  check(
+    'R10 last % paid takes the LAST non-blank % for an AP#',
+    [
+      ...parseLastWeek({
+        sheets: [
+          {
+            name: 'TimeNavi Export',
+            rows: [
+              ['AP#', '% Completion'],
+              ['24473', 0.5],
+              ['24500', 0.9],
+              ['24473', 0.75],
+            ],
+          },
+        ],
+      }).entries(),
+    ],
+    [
+      ['24473', 0.75],
+      ['24500', 0.9],
+    ],
   );
 
   // --- Round 9 §16/§18 — pay items drive the rate slot and the overtime ------

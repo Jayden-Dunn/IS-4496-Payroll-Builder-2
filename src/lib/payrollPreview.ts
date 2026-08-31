@@ -288,6 +288,27 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       if (j.analysis.apKey && !pbjJobByAp.has(j.analysis.apKey)) pbjJobByAp.set(j.analysis.apKey, j);
     }
   }
+  /**
+   * Round 10 §17 — AP# → `WO%` from the payroll input's Pivot by Job, across
+   * every section. That column is the source of truth for a job's crew
+   * profit-share percentage, so a band job whose own row left it blank still
+   * finds the percentage the sheet states for that AP#, and only then falls
+   * back to the Settings crew map.
+   */
+  const woPctByAp = new Map<string, number>();
+  for (const c of pbj.customers) {
+    for (const j of c.jobs) {
+      if (j.analysis.apKey && j.analysis.woPct !== null && !woPctByAp.has(j.analysis.apKey)) {
+        woPctByAp.set(j.analysis.apKey, j.analysis.woPct);
+      }
+    }
+  }
+  for (const row of [...pbj.balances, ...pbj.utPayroll]) {
+    if (row.apKey && row.woPct !== null && !woPctByAp.has(row.apKey)) {
+      woPctByAp.set(row.apKey, row.woPct);
+    }
+  }
+
   const carriedIsHourly = (row: ManualSectionRow): boolean =>
     isHourlyJob(row.percent, row.crewLead, `${row.customer} ${row.job}`);
 
@@ -1205,7 +1226,9 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     // the crew map now always answers, auto-adding if needed). Round 9 §14 —
     // a typed % on the preview band header wins over both.
     const effectiveWoPct =
-      e.woPct !== undefined ? e.woPct : (pivotWoPct ?? leadDefaultWoPct);
+      e.woPct !== undefined
+        ? e.woPct
+        : (pivotWoPct ?? (apKey ? woPctByAp.get(apKey) : undefined) ?? leadDefaultWoPct);
     const pct = effectiveWoPct ?? 0;
     const workOrderOverride =
       e.workOrderOverride !== undefined ? e.workOrderOverride : pivotWoOverride;

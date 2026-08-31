@@ -203,7 +203,8 @@ export function buildReportRows(
     const dollarDiff =
       jobTotalFound && apptivo !== null ? matchedTotal - apptivo : null;
 
-    const dateDiff = invoiceDate && ev.startDate ? dateDiffDays(invoiceDate, ev.startDate) : null;
+    const effectiveStart = edit.startDate !== undefined ? edit.startDate : ev.startDate;
+    const dateDiff = invoiceDate && effectiveStart ? dateDiffDays(invoiceDate, effectiveStart) : null;
 
     return {
       id,
@@ -211,8 +212,8 @@ export function buildReportRows(
       included,
       // Round 10 — every displayed column is overridable on the grid.
       event: edit.event !== undefined ? edit.event : ev.event,
-      startDate: ev.startDate,
-      endDate: ev.endDate,
+      startDate: edit.startDate !== undefined ? edit.startDate : ev.startDate,
+      endDate: edit.endDate !== undefined ? edit.endDate : ev.endDate,
       calendar: edit.calendar !== undefined ? edit.calendar : ev.calendar,
       attendees: edit.attendees !== undefined ? edit.attendees : ev.attendees,
       location: edit.location !== undefined ? edit.location : ev.location,
