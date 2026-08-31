@@ -1343,6 +1343,7 @@ export function runSelfTests(): boolean {
   const slotAPivot = buildPayrollPivotByJob({
     completed: {
       timesheet: { rows: [], lunchRemoved: 0 },
+      customerNameByAp: new Map(),
       jobs: slotAJobs,
       dates: [],
       dateIsos: ['2026-08-03'],
@@ -1966,11 +1967,27 @@ export function runSelfTests(): boolean {
     false,
   );
   check(
-    "§10 Input #'s Hourly Pay / Deductions cells (first lead)",
+    // Round 10 — the ref map also carries Reimbursements, both note cells and
+    // the Miles cell, so the Profitshare Output can reference them live.
+    "§10 Input #'s cell refs (first two leads)",
     inputNumbersCellRefs(2),
     [
-      { hourlyCell: 'C10', deductCell: 'C11' },
-      { hourlyCell: 'C21', deductCell: 'C22' },
+      {
+        hourlyCell: 'C10',
+        deductCell: 'C11',
+        reimbCell: 'C9',
+        reimbNoteCell: 'D9',
+        deductNoteCell: 'D11',
+        milesCell: 'C12',
+      },
+      {
+        hourlyCell: 'C21',
+        deductCell: 'C22',
+        reimbCell: 'C20',
+        reimbNoteCell: 'D20',
+        deductNoteCell: 'D22',
+        milesCell: 'C23',
+      },
     ],
   );
   check(

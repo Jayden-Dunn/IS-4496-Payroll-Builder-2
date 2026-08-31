@@ -913,6 +913,7 @@ function runSelfTests() {
     const slotAPivot = (0, payrollPivot_1.buildPayrollPivotByJob)({
         completed: {
             timesheet: { rows: [], lunchRemoved: 0 },
+            customerNameByAp: new Map(),
             jobs: slotAJobs,
             dates: [],
             dateIsos: ['2026-08-03'],
@@ -1343,9 +1344,26 @@ function runSelfTests() {
     // Round 10 — the % symbol leads and "Percentages" is gone.
     '§13 percents filename leads with the % symbol', (0, exportXlsx_1.percentsExportFilename)(new Date(2026, 7, 14)), '% of Completion 08-14-2026.xlsx');
     check('§13 payroll filename has no %', (0, exportXlsx_1.payrollExportFilename)(new Date(2026, 7, 14), new Date(2026, 7, 8), new Date(2026, 7, 14)).includes('%'), false);
-    check("§10 Input #'s Hourly Pay / Deductions cells (first lead)", (0, exportRound6Sheets_1.inputNumbersCellRefs)(2), [
-        { hourlyCell: 'C10', deductCell: 'C11' },
-        { hourlyCell: 'C21', deductCell: 'C22' },
+    check(
+    // Round 10 — the ref map also carries Reimbursements, both note cells and
+    // the Miles cell, so the Profitshare Output can reference them live.
+    "§10 Input #'s cell refs (first two leads)", (0, exportRound6Sheets_1.inputNumbersCellRefs)(2), [
+        {
+            hourlyCell: 'C10',
+            deductCell: 'C11',
+            reimbCell: 'C9',
+            reimbNoteCell: 'D9',
+            deductNoteCell: 'D11',
+            milesCell: 'C12',
+        },
+        {
+            hourlyCell: 'C21',
+            deductCell: 'C22',
+            reimbCell: 'C20',
+            reimbNoteCell: 'D20',
+            deductNoteCell: 'D22',
+            milesCell: 'C23',
+        },
     ]);
     check("§10.1 sheet name apostrophe is doubled", (0, exportRound6Sheets_1.inputNumsSheetFormula)('C11'), { formula: `'Input #''s'!C11` });
     check('§5 RF seed color is C4A484', settings_1.DEFAULT_LEGEND.find((l) => l.estimator === 'RF')?.color, 'C4A484');

@@ -62,6 +62,20 @@ function solidFill(argb) {
 const EXCLUSION_GRAY_HEX = 'A6A6A6';
 /** Text format, so AP# columns compare as text on both sides of a MATCH. */
 const TEXT_FMT = '@';
+/**
+ * Round 10 — AP# → estimator fill hex, from the resolved estimator map and the
+ * Settings palette. Used to color the Input #'s `PO #'s:` cells.
+ */
+function estimatorFillByApKey(estimatorByApKey, legend) {
+    const palette = new Map((legend ?? []).map((l) => [l.estimator, l.color.toUpperCase()]));
+    const out = new Map();
+    for (const [ap, est] of estimatorByApKey ?? []) {
+        const hex = palette.get(est);
+        if (hex)
+            out.set(ap, hex);
+    }
+    return out;
+}
 /** 1-based column number → Excel letters ("H", "AA"). */
 function excelColumnLetter(col) {
     let n = Math.max(1, Math.trunc(col));
@@ -250,7 +264,9 @@ function assemblePayrollWorkbook(input) {
         buildPayrollPreviewSheet(wb, input.payrollPreviewUt, 'Payroll Preview - UT', refsByLeadKey);
     }
     (0, exportRound6Sheets_1.buildProfitshareOutputSheet)(wb, shared, input.defaultProfitSharePct ?? 0.38, input.mileageRate ?? 0.625);
-    (0, exportRound6Sheets_1.buildInputNumbersSheet)(wb, shared);
+    (0, exportRound6Sheets_1.buildInputNumbersSheet)(wb, shared, input.mileageRate ?? 0.625, 
+    // Round 10 — PO#'s cells wear the estimator's color for that AP#.
+    estimatorFillByApKey(input.estimatorByApKey, input.legend));
     (0, exportRound6Sheets_1.buildNotesSheet)(wb, sharedInput);
     (0, exportRound6Sheets_1.buildFinalPayrollSheet)(wb, sharedInput);
     (0, exportRound6Sheets_1.buildJournalEntrySheet)(wb);
@@ -1215,7 +1231,15 @@ sheetName = 'PAYROLL PREVIEW', inputRefsByLeadKey) {
         // Round 8 §8.5 — informational, directly beneath Materials.
         ws.addRow(['Travel', ...block.jobs.map((j) => j.travel)]);
         ws.addRow(['QB Labor-Wages-Subs', ...block.jobs.map((j) => j.laborWages)]);
-        ws.addRow(['Mileage in Books', ...block.jobs.map((j) => j.mileage)]);
+        // Round 10 — `-Mileage` above IS this books figure (the P&L Mileage
+        // Expense for the AP#), so it points here instead of repeating the number.
+        const booksMileageRow = ws.addRow(['Mileage in Books', ...block.jobs.map((j) => j.mileage)]).number;
+        for (let i = 0; i < jobCount; i++) {
+            const L = colLetter(1 + i);
+            const cell = ws.getCell(`${L}${milesRow}`);
+            cell.value = { formula: `${L}${booksMileageRow}` };
+            cell.numFmt = MONEY_FMT;
+        }
         const pctMatRow = ws.addRow(['% Materials']).number;
         for (let i = 0; i < jobCount; i++) {
             const L = colLetter(1 + i); // B, C, …

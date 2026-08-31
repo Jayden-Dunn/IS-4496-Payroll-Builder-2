@@ -61,6 +61,13 @@ export interface CompletedPbjJob {
 
 export interface CompletedPercentsResult {
   timesheet: TimesheetParseResult;
+  /**
+   * Round 10 — AP# → `Name 1` from the workbook's own `Sales by Rep` sheets.
+   * This is the authoritative customer name for a job: the timesheet's
+   * `jobcode_1` says "ALLPRO OFFICE" whenever someone clocked office time
+   * against the AP#, which is not the customer.
+   */
+  customerNameByAp: Map<string, string>;
   jobs: CompletedPbjJob[];
   dates: Date[];
   dateIsos: string[];
@@ -522,6 +529,53 @@ function toLastWeekPbj(jobs: CompletedPbjJob[]): LastWeekPbjRow[] {
   }));
 }
 
+/**
+ * Round 10 — read `AP# → Name 1` off the workbook's `Sales by Rep` sheets
+ * (NV first, then UT). Both are written by the %'s export, so the payroll
+ * process gets the customer names from its OWN upload.
+ */
+function parseSalesByRepNames(wbd: WorkbookData): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const name of ['Sales by Rep', 'UT SalesbyRep']) {
+    const sheet = findSheet(wbd, name);
+    if (!sheet) continue;
+    let apCol = -1;
+    let nameCol = -1;
+    let headerRow = -1;
+    for (let i = 0; i < Math.min(6, sheet.rows.length); i++) {
+      const row = sheet.rows[i];
+      if (!row) continue;
+      let ap = -1;
+      let nm = -1;
+      for (let c = 0; c < row.length; c++) {
+        const v = row[c];
+        if (typeof v !== 'string') continue;
+        const key = v.trim().toLowerCase();
+        if (key === 'ap#' && ap < 0) ap = c;
+        else if (key === 'name 1' && nm < 0) nm = c;
+      }
+      if (ap >= 0 && nm >= 0) {
+        apCol = ap;
+        nameCol = nm;
+        headerRow = i;
+        break;
+      }
+    }
+    if (headerRow < 0) continue;
+    for (let i = headerRow + 1; i < sheet.rows.length; i++) {
+      const row = sheet.rows[i];
+      if (!row) continue;
+      const apRaw = cellAt(row, apCol);
+      if (apRaw == null || apRaw === '') continue;
+      const key = normalizeApInput(String(apRaw));
+      if (!key || out.has(key)) continue;
+      const customer = asString(cellAt(row, nameCol));
+      if (customer) out.set(key, customer);
+    }
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -547,6 +601,7 @@ export function parseCompletedPercentsWorkbook(
 
   return {
     timesheet,
+    customerNameByAp: parseSalesByRepNames(wbd),
     jobs: pbj.jobs,
     dates: pbj.dates,
     dateIsos: pbj.dateIsos,

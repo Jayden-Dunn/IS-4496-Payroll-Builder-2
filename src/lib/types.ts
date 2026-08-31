@@ -810,7 +810,9 @@ export interface PsBlock {
   sub: boolean;
   jobs: PsJobColumn[];
   total: number; // Σ totalAfterSplit
-  mileageNew: number; // editable, default 0
+  mileageNew: number; // miles × the mileage rate (or a typed override)
+  /** Round 10 — the miles entered on the Input #'s tab. */
+  mileageMiles: number;
   hourlyPay: number; // own T-SHEETS gross
   reimbursements: number; // editable
   reimbMemo: string;

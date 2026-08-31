@@ -393,7 +393,29 @@ export function buildPlImportSheet(
 
 type PsChainStyle = 'default' | 'profitshare' | 'management';
 
-export type InputNumsLeadRefs = { hourlyCell: string; deductCell: string };
+/** 1-based column number → Excel letters ("B", "AA"). */
+function colLetters(col: number): string {
+  let n = Math.max(1, Math.trunc(col));
+  let out = '';
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    out = String.fromCharCode(65 + rem) + out;
+    n = Math.floor((n - 1) / 26);
+  }
+  return out;
+}
+
+export type InputNumsLeadRefs = {
+  hourlyCell: string;
+  deductCell: string;
+  /** Round 10 — Reimbursements amount + its note cell. */
+  reimbCell: string;
+  reimbNoteCell: string;
+  /** Round 10 — the Deductions/Sundries note cell. */
+  deductNoteCell: string;
+  /** Round 10 — the Miles: entry cell (× the mileage rate = Mileage - New). */
+  milesCell: string;
+};
 
 /** Round 8 §10 — `'Input #''s'!C10` (escaped apostrophe in the sheet name). */
 export function inputNumsSheetFormula(cell: string): { formula: string } {
@@ -411,7 +433,14 @@ export function inputNumbersCellRefs(leadCount: number): InputNumsLeadRefs[] {
   const out: InputNumsLeadRefs[] = [];
   let row = 3;
   for (let i = 0; i < leadCount; i++) {
-    out.push({ hourlyCell: `C${row + 7}`, deductCell: `C${row + 8}` });
+    out.push({
+      hourlyCell: `C${row + 7}`,
+      deductCell: `C${row + 8}`,
+      reimbCell: `C${row + 6}`,
+      reimbNoteCell: `D${row + 6}`,
+      deductNoteCell: `D${row + 8}`,
+      milesCell: `C${row + 9}`,
+    });
     row += 11;
   }
   return out;
@@ -438,6 +467,13 @@ function writePsChainValues(
     /** Round 8 §10 — live `'Input #''s'!` refs for Hourly Pay / Deductions. */
     hourlyPayRef?: string;
     deductionsRef?: string;
+    /** Round 10 — live refs for Reimbursements, the two notes, and Miles. */
+    reimbRef?: string;
+    reimbNoteRef?: string;
+    deductNoteRef?: string;
+    milesRef?: string;
+    /** Round 10 — $/mile applied to the Miles cell for `Mileage - New`. */
+    mileageRate?: number;
   },
 ): number {
   const jobCount = Math.min(block.jobs.length, 6);
@@ -539,8 +575,10 @@ function writePsChainValues(
   ];
   const materialsLabel = block.jobs.some((j) => j.fullMaterials) ? '- Materials' : '-½ Materials';
   let halfMatRow = 0;
+  let mileageRow = 0;
   for (const rr of rows) {
     if (rr.label === materialsLabel) halfMatRow = r;
+    if (rr.label === '-Mileage') mileageRow = r;
     set(r, startCol, rr.label);
     if (rr.bold) ws.getCell(r, startCol).font = { ...baseFont, bold: true };
     for (let i = 0; i < jobCount; i++) {
@@ -584,12 +622,39 @@ function writePsChainValues(
     bold?: boolean;
     money?: boolean;
     formula?: string;
+    /** Round 10 — a raw formula (no `Input #'s` prefixing) for this cell. */
+    rawFormula?: string;
+    /** Round 10 — the note cell mirrors an Input #'s note. */
+    memoFormula?: string;
   }[] = [
     { label: 'Total', value: block.total, bold: true },
-    { label: 'Mileage - New', value: block.mileageNew },
+    {
+      // Round 10 — Miles on the Input #'s tab × the mileage rate, as a live
+      // formula, so typing miles there fills this in.
+      label: 'Mileage - New',
+      value: block.mileageNew,
+      ...(opts.milesRef
+        ? { rawFormula: `'Input #''s'!${opts.milesRef}*${(opts.mileageRate ?? 0.625).toFixed(3)}` }
+        : {}),
+    },
     { label: 'Hourly Pay', value: block.hourlyPay, highlight: true, formula: opts.hourlyPayRef },
-    { label: 'Reimbursements', value: block.reimbursements, memo: block.reimbMemo, color: REIMB_BLUE },
-    { label: 'Deductions/Sundries', value: block.deductions, memo: block.deductMemo, color: DEDUCT_RED, formula: opts.deductionsRef },
+    {
+      label: 'Reimbursements',
+      value: block.reimbursements,
+      memo: block.reimbMemo,
+      color: REIMB_BLUE,
+      // Round 10 — amount AND note come from the Input #'s tab.
+      formula: opts.reimbRef,
+      memoFormula: opts.reimbNoteRef,
+    },
+    {
+      label: 'Deductions/Sundries',
+      value: block.deductions,
+      memo: block.deductMemo,
+      color: DEDUCT_RED,
+      formula: opts.deductionsRef,
+      memoFormula: opts.deductNoteRef,
+    },
     // Round 9 §19/§23 — configured extra rows, directly above Total Pay.
     ...block.extras.map((x) => ({
       label: x.label,
@@ -602,14 +667,23 @@ function writePsChainValues(
   for (const f of footer) {
     if (f.label === 'Deductions/Sundries') deductFooterRow = r;
     set(r, startCol, f.label);
-    if (f.formula) {
-      ws.getCell(r, startCol + 1).value = inputNumsSheetFormula(f.formula);
+    if (f.formula || f.rawFormula) {
+      ws.getCell(r, startCol + 1).value = f.rawFormula
+        ? { formula: f.rawFormula }
+        : inputNumsSheetFormula(f.formula as string);
       ws.getCell(r, startCol + 1).numFmt = f.money ? MONEY_FMT : ACCOUNTING_FMT;
       ws.getCell(r, startCol + 1).font = { ...baseFont };
     } else {
       set(r, startCol + 1, f.value, f.money ? MONEY_FMT : ACCOUNTING_FMT);
     }
-    if (f.memo) set(r, startCol + 2, f.memo);
+    // Round 10 — the note beside the amount mirrors the Input #'s note.
+    if (f.memoFormula) {
+      const cell = ws.getCell(r, startCol + 2);
+      cell.value = inputNumsSheetFormula(f.memoFormula);
+      cell.font = { ...baseFont };
+    } else if (f.memo) {
+      set(r, startCol + 2, f.memo);
+    }
     if (f.bold) {
       ws.getCell(r, startCol).font = { ...baseFont, bold: true };
       ws.getCell(r, startCol + 1).font = { ...baseFont, bold: true };
@@ -657,6 +731,17 @@ function writePsChainValues(
   for (const ir of info) {
     set(r, startCol, ir.label);
     for (let i = 0; i < jobCount; i++) set(r, startCol + 1 + i, ir.vals[i], ir.fmt);
+    // Round 10 — `-Mileage` IS the books mileage (the P&L `Mileage Expense`
+    // for that AP#), so it references the row rather than repeating a value
+    // that could drift once someone edits one of them.
+    if (ir.label === 'Mileage in Books' && mileageRow > 0) {
+      for (let i = 0; i < jobCount; i++) {
+        const col = startCol + 1 + i;
+        const cell = ws.getCell(mileageRow, col);
+        cell.value = { formula: `${colLetters(col)}${r}` };
+        cell.numFmt = MONEY_FMT;
+      }
+    }
     r++;
   }
   return r;
@@ -731,6 +816,13 @@ export function buildProfitshareOutputSheet(
       style: 'profitshare',
       hourlyPayRef: refs?.hourlyCell,
       deductionsRef: refs?.deductCell,
+      // Round 10 — Reimbursements, both notes and Mileage - New come live off
+      // the Input #'s tab.
+      reimbRef: refs?.reimbCell,
+      reimbNoteRef: refs?.reimbNoteCell,
+      deductNoteRef: refs?.deductNoteCell,
+      milesRef: refs?.milesCell,
+      mileageRate,
     });
     if (end > maxEndRow) maxEndRow = end;
   });
@@ -780,7 +872,14 @@ export function buildManagementReportSheet(
   applyGaramond(ws);
 }
 
-export function buildInputNumbersSheet(wb: Workbook, model: PayrollPreviewModel | null): void {
+export function buildInputNumbersSheet(
+  wb: Workbook,
+  model: PayrollPreviewModel | null,
+  /** Round 10 — $/mile, shown on the Miles row and used by Mileage - New. */
+  mileageRate = 0.625,
+  /** Round 10 — estimator initial → fill hex, for the PO#'s color coding. */
+  estimatorColorByAp?: ReadonlyMap<string, string>,
+): void {
   const ws = wb.addWorksheet("Input #'s");
   // Col A gutter ~3.4; data starts in B.
   ws.columns = [{ width: 3.4 }, ...Array.from({ length: 8 }, () => ({ width: 16 }))];
@@ -812,10 +911,23 @@ export function buildInputNumbersSheet(wb: Workbook, model: PayrollPreviewModel 
     poRow.getCell(2).fill = solidFill(HEADER_GRAY);
     poRow.getCell(2).font = { name: PP_FONT, bold: true, size: 12, color: { argb: WHITE } };
     for (let i = 0; i < jobCount; i++) {
-      poRow.getCell(3 + i).value = block.jobs[i].jobShort;
-      poRow.getCell(3 + i).font = { name: PP_FONT, size: 11, bold: true };
-      if (i === 0) poRow.getCell(3 + i).fill = solidFill(HOURLY_PAY_YELLOW);
-      else poRow.getCell(3 + i).fill = solidFill(HEADER_GRAY);
+      const job = block.jobs[i];
+      const cell = poRow.getCell(3 + i);
+      cell.value = job.jobShort;
+      /**
+       * Round 10 — the PO cell wears the ESTIMATOR's color for that job (the
+       * same fill the TimeNavi Export row carries), so the sheet says at a
+       * glance who estimated it. Falls back to the old grey/yellow when the
+       * AP# has no estimator color.
+       */
+      const hex = job.apKey ? estimatorColorByAp?.get(job.apKey) : undefined;
+      if (hex) {
+        cell.fill = solidFill('FF' + hex);
+        cell.font = { name: PP_FONT, size: 11, bold: true, color: { argb: textOn(hex) } };
+      } else {
+        cell.font = { name: PP_FONT, size: 11, bold: true };
+        cell.fill = solidFill(i === 0 ? HOURLY_PAY_YELLOW : HEADER_GRAY);
+      }
     }
     row++;
 
@@ -874,9 +986,13 @@ export function buildInputNumbersSheet(wb: Workbook, model: PayrollPreviewModel 
     deduct.getCell(3).font = { name: PP_FONT, size: 12, color: { argb: DEDUCT_RED } };
     row++;
 
+    // Round 10 — the miles cell is the entry point for `Mileage - New` on the
+    // Profitshare Output, which multiplies it by the rate shown here.
     const miles = ws.getRow(row);
-    miles.getCell(2).value = 'Miles:';
+    miles.getCell(2).value = `Miles: (@ $${mileageRate.toFixed(3)}/mi)`;
     miles.getCell(2).font = { name: PP_FONT, size: 12 };
+    miles.getCell(3).numFmt = HOURS_FMT;
+    miles.getCell(3).font = { name: PP_FONT, size: 12 };
     row += 2; // spacer between lead blocks
   }
   if (leads.length === 0) {

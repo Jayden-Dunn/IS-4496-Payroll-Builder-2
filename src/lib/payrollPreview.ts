@@ -8,6 +8,7 @@ import { extractApKey } from './apkey';
 import { fmtDate, round2 } from './format';
 import {
   carryDisplayMap,
+  isOfficeCustomer,
   jobDisplayPair,
   salesDisplayMap,
   timesheetDisplayMap,
@@ -89,6 +90,12 @@ export interface PayrollPreviewInput {
   nvSales?: readonly SalesRow[] | null;
   utSales?: readonly SalesRow[] | null;
   lastWeekPbj?: LastWeekPbjRow[] | null;
+  /**
+   * Round 10 — AP# → customer `Name 1`, read off the payroll input's own
+   * `Sales by Rep` sheets. This outranks every other name source, so a job
+   * whose timesheet rows say "ALLPRO OFFICE" still shows its real customer.
+   */
+  customerNameByAp?: ReadonlyMap<string, string> | null;
 }
 
 const byText = (a: string, b: string): number => a.localeCompare(b, 'en', { sensitivity: 'base' });
@@ -1318,11 +1325,15 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       display.poLabel.trim() ||
       pivotJobText.trim() ||
       (apKey && apKey !== 'OFFICE' ? `AP${apKey}` : '');
+    // Round 10 — Sales by Rep `Name 1` first; then the Pivot by Job customer
+    // (never the office label); then the resolved chain; then the P&L header.
+    const salesName = apKey ? (input.customerNameByAp?.get(apKey)?.trim() ?? '') : '';
+    const pivotName = pivotCustomer.trim();
     const cust =
-      pivotCustomer.trim() && pivotCustomer.trim() !== '(blank)'
-        ? pivotCustomer.trim()
-        : display.customerName.trim() ||
-          (apKey ? (plByJob.has(apKey) ? (pl?.byJob.get(apKey)?.customerName ?? '') : '') : '');
+      salesName ||
+      (pivotName && pivotName !== '(blank)' && !isOfficeCustomer(pivotName) ? pivotName : '') ||
+      display.customerName.trim() ||
+      (apKey ? (plByJob.has(apKey) ? (pl?.byJob.get(apKey)?.customerName ?? '') : '') : '');
     return { poLabel: po, customerName: cust };
   };
 
@@ -1497,7 +1508,14 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     const tsheets = leadEmp && !meta.sub ? buildHourlyBlock(leadEmp, false, true) : null;
     const be = edits[`psb:${blockKey}`] ?? {};
     const total = jobs.reduce((a, j) => a + j.totalAfterSplit, 0);
-    const mileageNew = be.mileageNew !== undefined ? be.mileageNew : 0;
+    /**
+     * Round 10 — `Miles:` on the Input #'s tab drives `Mileage - New`: the
+     * dollar figure is miles × the Settings mileage rate ($0.625/mi by
+     * default). A directly typed dollar amount still wins.
+     */
+    const mileageMiles = be.miles !== undefined ? be.miles : 0;
+    const mileageNew =
+      be.mileageNew !== undefined ? be.mileageNew : round2(mileageMiles * settings.mileageRate);
     const hourlyPay =
       be.hourlyPay !== undefined ? be.hourlyPay : tsheets ? tsheets.totalPay : 0;
     const reimbursements = be.reimbursements !== undefined ? be.reimbursements : 0;
@@ -1518,6 +1536,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       jobs,
       total,
       mileageNew,
+      mileageMiles,
       hourlyPay,
       reimbursements,
       reimbMemo: be.reimbMemo ?? '',

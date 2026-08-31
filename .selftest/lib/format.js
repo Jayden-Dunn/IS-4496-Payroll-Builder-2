@@ -1,7 +1,9 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.NEGATIVE_TEXT_CLASS = void 0;
 exports.fmtDate = fmtDate;
 exports.fmtDateShort = fmtDateShort;
+exports.negativeClass = negativeClass;
 exports.fmtAccounting = fmtAccounting;
 exports.fmtJobTotal = fmtJobTotal;
 exports.fmtMoney = fmtMoney;
@@ -43,6 +45,16 @@ function fmtDateShort(d) {
     const dd = String(d.getDate()).padStart(2, '0');
     const yy = String(d.getFullYear()).slice(-2);
     return `${mm}-${dd}-${yy}`;
+}
+/**
+ * Round 10 — negative amounts read red AND parenthesised everywhere in the
+ * app. `fmtAccounting` already supplies the parentheses; this is the matching
+ * text color, as a Tailwind class, so every renderer agrees.
+ */
+exports.NEGATIVE_TEXT_CLASS = 'text-[#FF0000]';
+/** Round 10 — the class a money cell needs for its value ('' when positive). */
+function negativeClass(v) {
+    return typeof v === 'number' && v < 0 ? exports.NEGATIVE_TEXT_CLASS : '';
 }
 /** Accounting-style number without $ (reference Job Total / Apptivo columns). */
 function fmtAccounting(v) {
@@ -214,11 +226,19 @@ function parsePercentInput(text) {
 }
 /** Parse user input for a money cell: "$2,095.00", "2095". Null when invalid/blank. */
 function parseMoneyInput(text) {
-    const t = text.trim().replace(/[$,\s]/g, '');
+    const raw = text.trim();
+    if (!raw)
+        return null;
+    // Round 10 — accounting negatives round-trip: "(39.90)" reads as -39.90,
+    // which is how every money cell now renders a negative.
+    const parenthesised = /^\((.*)\)$/.exec(raw);
+    const t = (parenthesised ? parenthesised[1] : raw).replace(/[$,\s]/g, '');
     if (!t)
         return null;
     const n = Number(t);
-    return Number.isFinite(n) ? n : null;
+    if (!Number.isFinite(n))
+        return null;
+    return parenthesised ? -Math.abs(n) : n;
 }
 /** Plain 1,234.56 — used in NOTES work-order strings. */
 function moneyPlain(n) {

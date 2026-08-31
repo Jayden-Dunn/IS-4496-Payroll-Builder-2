@@ -675,6 +675,19 @@ export default function App(): JSX.Element {
     return m;
   }, [parsed.completedPercents]);
 
+  /**
+   * Round 10 — AP# → estimator fill hex on the payroll side, from Slot A's own
+   * Estimator column and the Settings palette. Colors the Input #'s PO cells.
+   */
+  const payrollEstimatorColorByAp = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const [ap, est] of payrollEstimatorByApKey) {
+      const hex = colorByEstimator.get(est);
+      if (hex) m.set(ap, hex);
+    }
+    return m;
+  }, [payrollEstimatorByApKey, colorByEstimator]);
+
   const payrollApKeys = useMemo(() => {
     const set = new Set<string>();
     for (const j of parsed.completedPercents?.jobs ?? []) if (j.apKey) set.add(j.apKey);
@@ -908,6 +921,8 @@ export default function App(): JSX.Element {
       nvSales: null,
       utSales: null,
       lastWeekPbj: parsed.completedPercents?.lastWeekPbj ?? null,
+      // Round 10 — customer names come from the payroll input's Sales by Rep.
+      customerNameByAp: parsed.completedPercents?.customerNameByAp ?? null,
     });
   }, [
     createdPayroll,
@@ -951,6 +966,8 @@ export default function App(): JSX.Element {
       nvSales: null,
       utSales: null,
       lastWeekPbj: parsed.completedPercents?.lastWeekPbj ?? null,
+      // Round 10 — customer names come from the payroll input's Sales by Rep.
+      customerNameByAp: parsed.completedPercents?.customerNameByAp ?? null,
     });
   }, [
     createdPayroll,
@@ -1590,7 +1607,12 @@ export default function App(): JSX.Element {
                 onEdit={onPayrollEdit}
               />
             ) : tab === 'inputNums' ? (
-              <InputNumsTab model={payrollPreviewAll} onEdit={onPayrollEdit} />
+              <InputNumsTab
+                model={payrollPreviewAll}
+                onEdit={onPayrollEdit}
+                mileageRate={settings.mileageRate}
+                estimatorColorByAp={payrollEstimatorColorByAp}
+              />
             ) : tab === 'notes' ? (
               <NotesTab model={payrollPreviewAll} mileageRate={settings.mileageRate} onEdit={onPayrollEdit} />
             ) : tab === 'final' ? (
@@ -1722,6 +1744,10 @@ function completedFromSession(
   }
   return {
     timesheet,
+    // Round 10 — the session's own resolved customer names, keyed by AP#.
+    customerNameByAp: new Map(
+      jobs.filter((j) => j.apKey && j.customer).map((j) => [j.apKey, j.customer] as const),
+    ),
     jobs,
     dates: pbj.dates,
     dateIsos: pbj.dateIsos,

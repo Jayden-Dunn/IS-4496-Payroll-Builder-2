@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.baseApKey = baseApKey;
+exports.isOfficeCustomer = isOfficeCustomer;
 exports.timesheetDisplayMap = timesheetDisplayMap;
 exports.carryDisplayMap = carryDisplayMap;
 exports.salesDisplayMap = salesDisplayMap;
@@ -17,13 +18,22 @@ function baseApKey(apKey) {
     const m = /^(\d{4,6})-(.+)$/i.exec(apKey.trim());
     return m ? m[1] : null;
 }
+/**
+ * Round 10 — the office jobcode is not a customer. Someone clocking office
+ * time against a real AP# used to make that job's Name read "ALLPRO OFFICE".
+ */
+function isOfficeCustomer(name) {
+    return /^all\s*pro\s+office$/i.test(name.trim());
+}
 /** Build the timesheet apKey → {customer=jobcode_1, job=jobcode_2} map. */
 function timesheetDisplayMap(rows) {
     const m = new Map();
     for (const r of rows) {
         if (!r.apKey || r.apKey === 'OFFICE' || m.has(r.apKey))
             continue;
-        m.set(r.apKey, { customer: r.jobcode1, job: r.jobcode2 });
+        // Round 10 — keep the job text, drop an office "customer": the real name
+        // comes from Sales by Rep's `Name 1` further down the chain.
+        m.set(r.apKey, { customer: isOfficeCustomer(r.jobcode1) ? '' : r.jobcode1, job: r.jobcode2 });
     }
     return m;
 }
@@ -151,14 +161,22 @@ function jobDisplayPair(apKey, sources) {
         usedBaseKey,
         unresolved: false,
     });
+    /**
+     * Round 10 — `Name 1` from Sales by Rep is the authoritative customer name.
+     * The PO label still prefers the timesheet / carry job text, so only the
+     * customer half jumps the queue.
+     */
+    const salesName1 = sources.salesByAp.get(apKey)?.name1?.trim() ?? '';
+    const withCustomer = (po, cust, usedBaseKey = false) => hit(po, salesName1 || cust, usedBaseKey);
     // 1. Timesheet
     const ts = sources.timesheetByAp.get(apKey);
     if (ts && (ts.job || ts.customer))
-        return hit(ts.job || `AP${apKey}`, ts.customer);
+        return withCustomer(ts.job || `AP${apKey}`, ts.customer);
     // 2. Slot-7 carry-forward
     const carry = sources.carryByAp.get(apKey);
-    if (carry && (carry.job || carry.customer))
-        return hit(carry.job || `AP${apKey}`, carry.customer);
+    if (carry && (carry.job || carry.customer)) {
+        return withCustomer(carry.job || `AP${apKey}`, carry.customer);
+    }
     // 3. QBO sales exact
     const sales = sources.salesByAp.get(apKey);
     if (sales && (sales.name2 || sales.name1))

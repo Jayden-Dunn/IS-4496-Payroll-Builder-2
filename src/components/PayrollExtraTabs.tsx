@@ -929,9 +929,15 @@ export function ManagementReportTab({
 export function InputNumsTab({
   model,
   onEdit,
+  mileageRate = 0.625,
+  estimatorColorByAp,
 }: {
   model: PayrollPreviewModel | null;
   onEdit: OnEdit;
+  /** Round 10 — $/mile applied to the Miles cell. */
+  mileageRate?: number;
+  /** Round 10 — AP# → estimator fill hex for the PO#'s cells. */
+  estimatorColorByAp?: ReadonlyMap<string, string>;
 }): JSX.Element {
   if (!model) return <EmptyPayroll label="Input #'s needs Payroll Preview" />;
   return (
@@ -962,15 +968,26 @@ export function InputNumsTab({
                   <td className="xcell" style={HEADER_GRAY}>
                     PO #&apos;s:
                   </td>
-                  {jobs.map((j, i) => (
-                    <td
-                      key={j.jobRowId}
-                      className="xcell text-right text-[11px] font-bold"
-                      style={i === 0 ? HOURLY_PAY_YELLOW : HEADER_GRAY}
-                    >
-                      {j.jobShort}
-                    </td>
-                  ))}
+                  {/* Round 10 — the PO cell wears the job estimator's color. */}
+                  {jobs.map((j, i) => {
+                    const hex = j.apKey ? estimatorColorByAp?.get(j.apKey) : undefined;
+                    return (
+                      <td
+                        key={j.jobRowId}
+                        className="xcell text-right text-[11px] font-bold"
+                        style={
+                          hex
+                            ? { backgroundColor: `#${hex}`, color: isDarkColor(hex) ? '#fff' : '#000' }
+                            : i === 0
+                              ? HOURLY_PAY_YELLOW
+                              : HEADER_GRAY
+                        }
+                        title={j.apKey ? `AP${j.apKey}` : undefined}
+                      >
+                        {j.jobShort}
+                      </td>
+                    );
+                  })}
                 </tr>
                 <tr>
                   <td className="xcell">WO Amount/Contract Override:</td>
@@ -1039,12 +1056,20 @@ export function InputNumsTab({
                     <MemoCell value={block.deductMemo} onCommit={(t) => onEdit(`psb:${block.key}`, { deductMemo: t })} />
                   </td>
                 </tr>
+                {/* Round 10 — miles here × the rate = `Mileage - New` on the
+                    Profitshare Output tab. */}
                 <tr>
-                  <td className="xcell">Miles:</td>
+                  <td className="xcell">Miles: (@ ${mileageRate.toFixed(3)}/mi)</td>
                   <td className="xcell text-right">
-                    <NumCell value={block.mileageNew} onCommit={(n) => onEdit(`psb:${block.key}`, { mileageNew: n ?? 0 })} />
+                    <NumCell
+                      value={block.mileageMiles}
+                      onCommit={(n) => onEdit(`psb:${block.key}`, { miles: n ?? 0, mileageNew: undefined })}
+                    />
                   </td>
-                  {jobs.slice(1).map((j) => (
+                  <td className="xcell text-right text-neutral-500">
+                    = {money(block.mileageNew)}
+                  </td>
+                  {jobs.slice(2).map((j) => (
                     <td key={j.jobRowId} className="xcell" />
                   ))}
                 </tr>

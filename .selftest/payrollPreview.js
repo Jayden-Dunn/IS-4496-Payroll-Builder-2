@@ -1083,10 +1083,14 @@ function buildPayrollPreview(input) {
         const po = display.poLabel.trim() ||
             pivotJobText.trim() ||
             (apKey && apKey !== 'OFFICE' ? `AP${apKey}` : '');
-        const cust = pivotCustomer.trim() && pivotCustomer.trim() !== '(blank)'
-            ? pivotCustomer.trim()
-            : display.customerName.trim() ||
-                (apKey ? (plByJob.has(apKey) ? (pl?.byJob.get(apKey)?.customerName ?? '') : '') : '');
+        // Round 10 — Sales by Rep `Name 1` first; then the Pivot by Job customer
+        // (never the office label); then the resolved chain; then the P&L header.
+        const salesName = apKey ? (input.customerNameByAp?.get(apKey)?.trim() ?? '') : '';
+        const pivotName = pivotCustomer.trim();
+        const cust = salesName ||
+            (pivotName && pivotName !== '(blank)' && !(0, jobNames_1.isOfficeCustomer)(pivotName) ? pivotName : '') ||
+            display.customerName.trim() ||
+            (apKey ? (plByJob.has(apKey) ? (pl?.byJob.get(apKey)?.customerName ?? '') : '') : '');
         return { poLabel: po, customerName: cust };
     };
     const leads = [];
@@ -1180,7 +1184,13 @@ function buildPayrollPreview(input) {
         const tsheets = leadEmp && !meta.sub ? buildHourlyBlock(leadEmp, false, true) : null;
         const be = edits[`psb:${blockKey}`] ?? {};
         const total = jobs.reduce((a, j) => a + j.totalAfterSplit, 0);
-        const mileageNew = be.mileageNew !== undefined ? be.mileageNew : 0;
+        /**
+         * Round 10 — `Miles:` on the Input #'s tab drives `Mileage - New`: the
+         * dollar figure is miles × the Settings mileage rate ($0.625/mi by
+         * default). A directly typed dollar amount still wins.
+         */
+        const mileageMiles = be.miles !== undefined ? be.miles : 0;
+        const mileageNew = be.mileageNew !== undefined ? be.mileageNew : (0, format_1.round2)(mileageMiles * settings.mileageRate);
         const hourlyPay = be.hourlyPay !== undefined ? be.hourlyPay : tsheets ? tsheets.totalPay : 0;
         const reimbursements = be.reimbursements !== undefined ? be.reimbursements : 0;
         // Round 8 §8.3 — the P&L sundries left materials; they are the DEFAULT
@@ -1199,6 +1209,7 @@ function buildPayrollPreview(input) {
             jobs,
             total,
             mileageNew,
+            mileageMiles,
             hourlyPay,
             reimbursements,
             reimbMemo: be.reimbMemo ?? '',

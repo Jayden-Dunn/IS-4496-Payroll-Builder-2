@@ -244,7 +244,7 @@ function directoryFromTimesheet(rows) {
 }
 /**
  * If the employee's week exceeds 40 hours, move the overage to an
- * [OT >40 hrs/wk] line on the LAST job worked (latest date; last by file order
+ * [OT] line on the LAST job worked (latest date; last by file order
  * within the day), reducing that job's regular hours so regular + OT = actual.
  *
  * Round 8 §9.2 — `dailyOtHours` are hours already paid at 1.5× by the NV
@@ -467,13 +467,15 @@ function matchJobRateRule(employeeName, jobApKey, rules) {
     return best;
 }
 /**
- * Round 8 §9.1 — the three-rate lookup, resolved PER LINE by job type:
+ * The rate lookup, resolved PER LINE by job type:
  *
- * - job is HOURLY → the person's `hourlyRate` (their own rate, then the global
- *   fallback, when they have none)
- * - crew lead's own hours on a profit-share job → their `crewLeadRate`, else
- *   the global `defaultCrewLeadRate`
- * - everyone else → their profit-share `rate`
+ * - job is HOURLY → the person's `hourlyRate` (the global fallback when they
+ *   have none)
+ * - everyone else, crew leads included → their profit-share `rate`
+ *
+ * Round 10 — the separate crew-lead rate is GONE. A crew lead working a job
+ * they lead is on a profit-share job by definition, so the PS rate already is
+ * their crew-lead rate; keeping two numbers only let them drift apart.
  */
 function resolveWageRate(employeeName, opts) {
     const entry = opts.wageRates.find((e) => tokensSubset(e.name, employeeName) || tokensSubset(employeeName, e.name));
@@ -498,11 +500,6 @@ function resolveWageRate(employeeName, opts) {
             kind: entry?.wages2Rate !== undefined ? 'wages2' : 'painter',
         };
     }
-    // Round 9 §13 — "Crew Lead - Hourly Wage" on the timesheet means these hours
-    // are crew-lead hours, whichever painter clocked them. It selects the
-    // crew-lead rate on PROFIT-SHARE jobs only: Round 8 §9.1's rule that an
-    // hourly (T&M) job pays the person's hourly-jobs rate still comes first.
-    const isCrewLead = opts.payRateKind === 'crewLead' ? true : opts.isCrewLead;
     if (opts.hourlyJob) {
         // No hourly-jobs rate on file falls through to the global default, NOT to
         // the person's profit-share rate — a piece-rate number would understate an
@@ -514,17 +511,13 @@ function resolveWageRate(employeeName, opts) {
             kind: hourly !== undefined ? 'hourlyJob' : 'default',
         };
     }
-    if (isCrewLead) {
-        return {
-            rate: entry?.crewLeadRate ?? opts.defaultCrewLeadRate ?? entry?.rate ?? opts.defaultWageRate,
-            defaulted,
-            kind: 'crewLead',
-        };
-    }
+    // Round 10 — crew-lead hours on a profit-share job pay the PS rate, which is
+    // the same row everyone else reads. `isCrewLead` only tags the line now.
+    const isCrewLead = opts.payRateKind === 'crewLead' ? true : opts.isCrewLead === true;
     return {
         rate: entry?.rate ?? opts.defaultWageRate,
         defaulted,
-        kind: entry ? 'painter' : 'default',
+        kind: isCrewLead ? 'crewLead' : entry ? 'painter' : 'default',
     };
 }
 /**
@@ -608,7 +601,6 @@ function resolveLineRate(employeeName, jobText, hourlyJob, settings) {
         const info = resolveWageRate(employeeName, {
             wageRates: settings.wageRates,
             defaultWageRate: settings.defaultWageRate,
-            defaultCrewLeadRate: settings.defaultCrewLeadRate,
             hourlyJob,
             isCrewLead: settings.isCrewLead,
             payRateKind: settings.payRateKind,
