@@ -767,10 +767,16 @@ export interface PsJobColumn {
   sundries: number;
   halfMaterials: number;
   /**
-   * Round 9 §32 — this band is responsible for ALL of the job's materials, so
-   * the row reads "- Materials" and carries the full amount.
+   * Round 9 §32 / Round 10 — this band is responsible for ALL of the job's
+   * materials, so the row reads "- ALL Materials" and carries the full amount.
    */
   fullMaterials: boolean;
+  /**
+   * Round 10 — Utah only: the painter pays their own hotel costs, so the job's
+   * P&L travel is charged back as a "Hotels" line under the materials row.
+   * Null when the band has no hotel charge-back.
+   */
+  hotels: number | null;
   /**
    * Round 9 §1 — labor computed from the timesheet hours on this AP# (rate ×
    * hours for every painter on the job), which is what `laborWages` defaults
@@ -898,6 +904,12 @@ export interface PayrollPreviewModel {
    * store, which is what makes the auto-add stick.
    */
   newLeadsToAdd: NewLeadDefault[];
+  /**
+   * Round 10 — painter-roster names that were flagged inactive but worked this
+   * week. Hours make someone active, so the App layer flips the roster flag
+   * and the "inactive (*)" marker never shows for them again.
+   */
+  activatedPainters: string[];
   /** Round 8 §9.2 — every daily-OT chunk applied this week (exceptions/tags). */
   dailyOtNotes: DailyOtNote[];
 }

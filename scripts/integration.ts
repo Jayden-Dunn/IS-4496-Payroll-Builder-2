@@ -624,9 +624,9 @@ const leoBlock = preview.painters[1];
 check('OT split: 42h → 40 regular + 2 OT on the last job', leoBlock.lines.map((l) => [l.hours, l.ot]), [[40, false], [2, true]]);
 check('OT line at 1.5× the rate', [leoBlock.lines[0].rate, leoBlock.lines[1].rate], [18, 27]);
 check('block totals (reg+OT = actual, pay = Σ h×r)', [leoBlock.totalHours, leoBlock.totalPay], [42, 774]);
-// Round 8 §9.2 — weekly and daily OT carry distinguishable tags, so the
-// weekly line now reads "[OT >40 hrs/wk]".
-check('weekly OT tag on the line label', leoBlock.lines[1].jobLabel.endsWith('[OT >40 hrs/wk]'), true);
+// Round 8 §9.2 / Round 10 — weekly and daily OT still carry distinguishable
+// tags; the weekly one is just "[OT]" now.
+check('weekly OT tag on the line label', leoBlock.lines[1].jobLabel.endsWith('[OT]'), true);
 const juanB = preview.painters[0];
 check('unknown employee → fallback rate + flag', [juanB.lines[0].rate, juanB.lines[0].rateDefaulted], [18, true]);
 check('job display name on the line', juanB.lines[0].jobLabel, 'CCSD 5321 Lambrook Dr Int/Ext [PS]');
@@ -944,13 +944,21 @@ async function testExport(): Promise<void> {
   check(
     'money accounting format, no $',
     [tn.getCell('N2').value, String(tn.getCell('N2').numFmt).replace(/\\/g, '')],
-    [14410.63, '_(* #,##0.00_);_(* (#,##0.00);_(* "-"??_);_(@_)'],
+    // Round 10 — negatives are red and parenthesised in the workbook.
+    [14410.63, '_(* #,##0.00_);[Red]_(* (#,##0.00);_(* "-"??_);_(@_)'],
   );
   check('%compl mirrors % Completion', tn.getCell('Q2').value, 0.9);
   // Row 6 = XC (24388): #N/A / blank / blank, '-' for last paid.
   check('unmatched Job Total exports literal #N/A', tn.getCell('N6').value, '#N/A');
   check('unmatched Apptivo blank', isBlank(tn.getCell('O6').value), true);
-  check('unmatched $ Difference blank', isBlank(tn.getCell('P6').value), true);
+  // Round 10 — $ Difference carries the Job Total − Apptivo formula; with an
+  // #N/A job total the formula's own IF resolves it to blank.
+  check(
+    'unmatched $ Difference is the guarded formula',
+    typeof (tn.getCell('P6').value as { formula?: string })?.formula === 'string' &&
+      (tn.getCell('P6').value as { formula: string }).formula.includes('N6-O6'),
+    true,
+  );
   check('dash for missing last % paid (24388 row)', tn.getCell('K6').value, '-');
 
   // Round 4 §1.2 — H/I/J/K and P centered (header + data).
@@ -962,14 +970,19 @@ async function testExport(): Promise<void> {
   check('TimeNavi centered data cell', tn.getCell('H2').alignment?.horizontal, 'center');
   // Round 4 §1.1 — pink flags: NotClockedIn in M (row 2 = 24222) pink; a zero
   // $ Difference stays unflagged (row 2 P = 0).
-  check(
-    'NotClockedIn cell pink fill + dark-red text',
-    [fillOf(tn.getCell('M2')), tn.getCell('M2').font?.color?.argb],
-    ['FFFFC7CE', 'FF9C0006'],
-  );
+  // Round 10 — the In QBO Time? flag is a live conditional-formatting rule, so
+  // deleting a duplicate clears the highlight instead of baking it in.
+  {
+    const cf = (tn as unknown as { conditionalFormattings?: { ref: string; rules: { formulae?: string[] }[] }[] })
+      .conditionalFormattings ?? [];
+    const rule = cf.flatMap((f) => f.rules.map((r) => ({ ref: f.ref, formula: r.formulae?.[0] ?? '' })))
+      .find((r) => r.ref.startsWith('M2:') && r.formula.includes('COUNTIF'));
+    check('In QBO Time? duplicate rule is conditional formatting', rule !== undefined, true);
+    check('duplicate rule also covers NotClockedIn', rule?.formula.includes('NotClockedIn'), true);
+  }
   // Round 8 §2.2 — with Apptivo blank, P exports blank rather than 0; either
   // way it must keep the row fill and never take the pink flag.
-  check('blank $ Difference NOT pink', [isBlank(tn.getCell('P2').value), fillOf(tn.getCell('P2'))], [true, 'FFFABF8F']);
+  check('blank $ Difference NOT pink', fillOf(tn.getCell('P2')), 'FFFABF8F');
 
   // ---------- Pivot by Crew ----------
   const pv = readBack.getWorksheet('Pivot by Crew') as ExcelJS.Worksheet;
@@ -1071,10 +1084,12 @@ async function testExport(): Promise<void> {
   check('pbj frozen at A3', [pj.views[0].state, (pj.views[0] as { ySplit?: number }).ySplit], ['frozen', 2]);
   check('pbj A1 title', pj.getCell('A1').value, 'NV PAYROLL: 7/10/2026');
   check(
-    'pbj title black/white 17 bold, height 31.5',
+    // Round 10 — every value on the sheet is 8pt, the title included.
+    'pbj title black/white 8pt bold, height 31.5',
     [fillOf(pj.getCell('A1')), pj.getCell('A1').font?.color?.argb, pj.getCell('A1').font?.size, pj.getRow(1).height],
-    ['FF000000', 'FFFFFFFF', 17, 31.5],
+    ['FF000000', 'FFFFFFFF', 8, 31.5],
   );
+  check('pbj values are 8pt', pj.getCell('A4').font?.size, 8);
   // 5 date cols → Total hrs at G1; % of Completion header red, Notes dark red.
   check('pbj Total hrs header position (computed from 5 dates)', pj.getCell('G1').value, 'Total hrs');
   const lastColNum = 1 + 5 + 2 + 8;
@@ -1113,12 +1128,14 @@ async function testExport(): Promise<void> {
   );
   check('pbj summaryBelow false (summary above)', (pj.properties.outlineProperties as { summaryBelow?: boolean } | undefined)?.summaryBelow, false);
   // Round 5 §3.5 — thin top+bottom on A through QB Hrs; not on analysis.
+  // Round 10 — one line above a customer's block and one below each job's
+  // last row, drawn across EVERY column instead of ruling A:I on every row.
   check(
-    'pbj customer/job hours-band borders',
+    'pbj job separators span all columns',
     [
       pj.getCell('A3').border?.top?.style,
-      pj.getCell('H3').border?.bottom?.style,
-      pj.getCell('I3').border?.top?.style ?? null,
+      pj.getCell(3, lastColNum).border?.top?.style,
+      pj.getCell('A3').border?.bottom?.style ?? null,
     ],
     ['thin', 'thin', null],
   );

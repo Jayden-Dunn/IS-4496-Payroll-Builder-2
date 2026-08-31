@@ -993,6 +993,7 @@ export default function App(): JSX.Element {
           inactiveEmployees: [],
           inactiveZeroHours: [],
           newLeadsToAdd: [],
+          activatedPainters: [],
           dailyOtNotes: [],
         },
       previewUt: payrollPreviewUt,
@@ -1044,6 +1045,34 @@ export default function App(): JSX.Element {
         : `New crew leads added at default 38%: ${names}`,
     );
   }, [newLeadsToAdd, settings]);
+
+  /**
+   * Round 10 — a painter with hours is active. The preview reports who that
+   * applies to and the App layer flips the persisted roster flag, so the
+   * "inactive (*)" marker does not come back next week.
+   */
+  const activatedPainters = payrollPreviewAll?.activatedPainters;
+  useEffect(() => {
+    if (!activatedPainters || activatedPainters.length === 0) return;
+    const names = new Set(activatedPainters.map((n) => n.trim().toLowerCase()));
+    if (!settings.painterRoster.some((p) => !p.active && names.has(p.name.trim().toLowerCase()))) {
+      return;
+    }
+    const next: AppSettings = {
+      ...settings,
+      painterRoster: settings.painterRoster.map((p) =>
+        names.has(p.name.trim().toLowerCase()) ? { ...p, active: true } : p,
+      ),
+    };
+    setSettings(next);
+    saveSettings(next);
+    void persistAppSettings(next);
+    setSettingsToast(
+      activatedPainters.length === 1
+        ? `${activatedPainters[0]} has hours — marked active`
+        : `${activatedPainters.length} painters have hours — marked active`,
+    );
+  }, [activatedPainters, settings]);
 
   const estimatorOptions = useMemo(() => {
     const set = new Set<string>(legendOrder);

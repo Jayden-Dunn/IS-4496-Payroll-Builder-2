@@ -32,8 +32,10 @@ const REIMB_BLUE = 'FF0070C0';
 const DEDUCT_RED = 'FFFF0000';
 const FONT = 'Calibri';
 const PP_FONT = 'Garamond';
-const ACCOUNTING_FMT = '_(* #,##0.00_);_(* \\(#,##0.00\\);_(* "-"??_);_(@_)';
-const MONEY_FMT = '_("$"* #,##0.00_);_("$"* \\(#,##0.00\\);_("$"* "-"??_);_(@_)';
+// Round 10 — negatives read red and parenthesised in the workbook too.
+const ACCOUNTING_FMT = '_(* #,##0.00_);[Red]_(* \\(#,##0.00\\);_(* "-"??_);_(@_)';
+// Round 10 — negatives read red and parenthesised in the workbook too.
+const MONEY_FMT = '_("$"* #,##0.00_);[Red]_("$"* \\(#,##0.00\\);_("$"* "-"??_);_(@_)';
 const PCT_FMT = '0%';
 const HOURS_FMT = '0.00';
 const DATE_FMT = 'm/d/yyyy';
@@ -97,14 +99,21 @@ const TIMESHEET_HEADERS = [
 const MIRROR_ARIAL = 'Arial';
 const WIDE_TEXT_HEADERS = /^(customer|name(\s*[12])?|memo(\/description)?|memo)$/i;
 const PRODUCT_SERVICE_HEADER = /^product\s*\/\s*service$/i;
+/**
+ * Round 10 — Sales by Rep (NV and UT) column widths, roughly halved so columns
+ * A–M all fit on screen without scrolling right. The long free-text columns
+ * are capped rather than merely halved: a 105-wide Memo column alone would
+ * push column M off the edge. Nothing is truncated — the text is still in the
+ * cell, it just no longer sets the column width.
+ */
 function salesByRepColWidth(header, colIndex0) {
     if (colIndex0 === 0)
-        return 10; // AP#
+        return 8; // AP#
     if (WIDE_TEXT_HEADERS.test(header.trim()))
-        return 105.6;
+        return 24;
     if (PRODUCT_SERVICE_HEADER.test(header.trim()))
-        return 41.9;
-    return 14;
+        return 16;
+    return 7;
 }
 function buildSalesByRepMirrorSheet(wb, name, data) {
     const isUt = /^ut\s*salesbyrep$/i.test(name);

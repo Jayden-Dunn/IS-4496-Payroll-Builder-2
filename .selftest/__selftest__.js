@@ -1339,7 +1339,9 @@ function runSelfTests() {
         pctColumn: 'I',
         apCellRef: 'F5',
     }), `IFERROR(INDEX('TimeNavi Export'!I:I, MATCH(F5, 'TimeNavi Export'!H:H, 0)), "")`);
-    check('§13 percents filename spells Percentages, no % character', (0, exportXlsx_1.percentsExportFilename)(new Date(2026, 7, 14)), '08-14-2026 Percentages of Completion.xlsx');
+    check(
+    // Round 10 — the % symbol leads and "Percentages" is gone.
+    '§13 percents filename leads with the % symbol', (0, exportXlsx_1.percentsExportFilename)(new Date(2026, 7, 14)), '% of Completion 08-14-2026.xlsx');
     check('§13 payroll filename has no %', (0, exportXlsx_1.payrollExportFilename)(new Date(2026, 7, 14), new Date(2026, 7, 8), new Date(2026, 7, 14)).includes('%'), false);
     check("§10 Input #'s Hourly Pay / Deductions cells (first lead)", (0, exportRound6Sheets_1.inputNumbersCellRefs)(2), [
         { hourlyCell: 'C10', deductCell: 'C11' },

@@ -278,7 +278,7 @@ export interface OtJobHours {
 
 /**
  * If the employee's week exceeds 40 hours, move the overage to an
- * [OT >40 hrs/wk] line on the LAST job worked (latest date; last by file order
+ * [OT] line on the LAST job worked (latest date; last by file order
  * within the day), reducing that job's regular hours so regular + OT = actual.
  *
  * Round 8 §9.2 — `dailyOtHours` are hours already paid at 1.5× by the NV

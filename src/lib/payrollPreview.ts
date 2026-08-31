@@ -316,6 +316,18 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     displayName: string; // §3.2-2 single-letter tokens stripped
     inactive: boolean;
   }
+  /**
+   * Round 10 — anyone with hours this week is active, full stop. A painter who
+   * was on the inactive roster and shows up on the timesheet has come back, so
+   * no "inactive (*)" marker is drawn and the roster flag is flipped (the App
+   * layer persists `activatedPainters`).
+   */
+  const usernamesWithHours = new Set<string>();
+  for (const r of entityRows) {
+    if (r.hours > 0) usernamesWithHours.add(r.username || `${r.fname} ${r.lname}`);
+  }
+  const activatedPainters = new Set<string>();
+
   const emps = new Map<string, Emp>();
   for (const r of entityRows) {
     const key = r.username || `${r.fname} ${r.lname}`;
@@ -333,8 +345,15 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       group: r.group,
       fullName,
       displayName: stripSingleLetterTokens(fullName),
-      inactive: (dirMatch ? !dirMatch.active : false) || rosterInactive,
+      inactive:
+        !usernamesWithHours.has(key) && ((dirMatch ? !dirMatch.active : false) || rosterInactive),
     });
+    if (usernamesWithHours.has(key) && rosterInactive) {
+      const rosterRow = settings.painterRoster.find(
+        (pr) => !pr.active && (tokensSubset(pr.name, fullName) || tokensSubset(fullName, pr.name)),
+      );
+      if (rosterRow) activatedPainters.add(rosterRow.name);
+    }
   }
 
   // ----- per (employee, job) QB-adjusted hours ------------------------------
@@ -924,7 +943,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       const otTag = seg
         ? payItemTag(seg.payItem)
         : kind === 'weeklyOt'
-          ? ' [OT >40 hrs/wk]'
+          ? ' [OT]'
           : kind === 'dailyOt'
             ? ' [Daily OT]'
             : '';
@@ -1166,6 +1185,12 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     const fullMaterials = (settings.fullMaterialsLeads ?? []).some(
       (n) => tokensSubset(n, leadUpper) || tokensSubset(leadUpper, n),
     );
+    /**
+     * Round 10 — Utah hotel charge-back. On the UT tab a full-materials lead
+     * also carries their own lodging, so the job's P&L travel becomes a
+     * "Hotels" line that comes OUT of the chain.
+     */
+    const hotels = isUt && fullMaterials ? travel : null;
     const halfMaterials =
       e.halfMaterials !== undefined ? e.halfMaterials : fullMaterials ? materials : materials / 2;
     // Round 6 §6.2 — WO% from the Pivot by Job `WO%` cell (Round 9 §15: that
@@ -1192,7 +1217,8 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       profitShare,
       workOrderOverride,
       laborWages,
-      halfMaterials,
+      // Round 10 — the hotel charge-back rides with the materials deduction.
+      halfMaterials: halfMaterials + (hotels ?? 0),
       percent: effectivePercent,
       mileage,
     });
@@ -1255,6 +1281,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       sundries,
       halfMaterials,
       fullMaterials,
+      hotels,
       timesheetLabor,
       totalProfitShare,
       splitWith,
@@ -1662,6 +1689,9 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     inactiveEmployees,
     inactiveZeroHours,
     newLeadsToAdd: [...newLeadsToAdd.values()].sort((a, b) => byText(a.lead, b.lead)),
+    // Round 10 — roster names that worked this week and should stop being
+    // listed as inactive.
+    activatedPainters: [...activatedPainters].sort(byText),
     dailyOtNotes,
   };
 }
@@ -1724,6 +1754,7 @@ export function mergePayrollPreviews(
       ...nv.newLeadsToAdd,
       ...ut.newLeadsToAdd.filter((n) => !seenLead.has(n.lead.trim().toLowerCase())),
     ],
+    activatedPainters: [...new Set([...nv.activatedPainters, ...ut.activatedPainters])].sort(byText),
     dailyOtNotes: [...nv.dailyOtNotes, ...ut.dailyOtNotes],
   };
 }

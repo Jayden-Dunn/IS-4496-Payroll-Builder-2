@@ -31,7 +31,8 @@ const PINK_TEXT = 'FF9C0006';
 // Round 8 §2.4 — a % Completion cell with no valid state.
 const RED_FILL = 'FFFF0000';
 // Reference formats: accounting style WITHOUT a $ symbol.
-const ACCOUNTING_FMT = '_(* #,##0.00_);_(* \\(#,##0.00\\);_(* "-"??_);_(@_)';
+// Round 10 — negatives read red and parenthesised in the workbook too.
+const ACCOUNTING_FMT = '_(* #,##0.00_);[Red]_(* \\(#,##0.00\\);_(* "-"??_);_(@_)';
 const START_END_DATE_FMT = 'mm-dd-yy';
 const INVOICE_DATE_FMT = 'mm/dd/yyyy';
 const PCT_FMT = '0%';
@@ -40,7 +41,7 @@ const HOURS_FMT = '0.00';
  * Round 9 §38 — accounting format WITH the "$" symbol. Used by the payroll
  * bands and by the TimeNavi `Apptivo $` column, whose values are dollars.
  */
-const CURRENCY_FMT = '_("$"* #,##0.00_);_("$"* \\(#,##0.00\\);_("$"* "-"??_);_(@_)';
+const CURRENCY_FMT = '_("$"* #,##0.00_);[Red]_("$"* \\(#,##0.00\\);_("$"* "-"??_);_(@_)';
 /**
  * Round 9 §2/§36 — the AP# column is autofit, then widened by this factor so
  * every AP number (suffixes included) fits without truncation.
@@ -163,14 +164,15 @@ const PAYROLL_TAB_COLORS = new Map([
     // Inactive Employees / Payroll Exceptions / PR Final Check — none
 ]);
 /**
- * Round 8 §13 — `MM-DD-YYYY Percentages of Completion.xlsx`. No `%` character
- * anywhere: some sync/upload targets mangle it in filenames.
+ * Round 10 — `% of Completion MM-DD-YYYY.xlsx`: the `%` symbol leads, and the
+ * spelled-out "Percentages" is gone. (Supersedes Round 8 §13, which spelled it
+ * out to dodge filename mangling.)
  */
 function percentsExportFilename(payDate) {
     const d = payDate ?? new Date();
     const mm = String(d.getMonth() + 1).padStart(2, '0');
     const dd = String(d.getDate()).padStart(2, '0');
-    return `${mm}-${dd}-${d.getFullYear()} Percentages of Completion.xlsx`;
+    return `% of Completion ${mm}-${dd}-${d.getFullYear()}.xlsx`;
 }
 /** Alias — same as percentsExportFilename. */
 function exportFilename(payDate) {
@@ -386,11 +388,22 @@ function buildTimeNaviSheet(wb, input, palette) {
             r.inQboTime,
             r.jobTotal, // number, or the literal text '#N/A'
             r.apptivo ?? '', // §2.2 — blank unless the user typed a value
-            r.dollarDiff ?? '', // blank when N is #N/A
+            r.dollarDiff ?? '', // replaced by the §6 formula below when both sides exist
             percentCell, // Q mirrors I — the office PDF reads this column
             r.invoiceDate ? excelDate(r.invoiceDate) : '',
             r.dateDiff ?? '',
         ]);
+        // Round 10 — `$ Difference` carries the formula into the workbook:
+        // Job Total $ − Apptivo $, live for whatever the office types afterwards.
+        {
+            const jobTotalRef = `${excelColumnLetter(tnCol('Job Total $'))}${row.number}`;
+            const apptivoRef = `${excelColumnLetter(tnCol('Apptivo $'))}${row.number}`;
+            const diffCell = row.getCell(tnCol('$ Difference'));
+            diffCell.value = {
+                formula: `IF(OR(NOT(ISNUMBER(${jobTotalRef})),${apptivoRef}=""),"",${jobTotalRef}-${apptivoRef})`,
+                result: r.dollarDiff ?? undefined,
+            };
+        }
         row.getCell(2).numFmt = START_END_DATE_FMT;
         row.getCell(3).numFmt = START_END_DATE_FMT;
         row.getCell(18).numFmt = INVOICE_DATE_FMT;
@@ -447,10 +460,38 @@ function buildTimeNaviSheet(wb, input, palette) {
         else if ((0, timenavi_1.percentIsFlagged)(r.percent)) {
             pink(pctCol);
         }
-        if (r.inQboTime === 'NotClockedIn' || dupInQbo.has(r.inQboTime.trim()))
-            pink(inQboCol);
+        // Round 10 — the `In QBO Time?` flag is CONDITIONAL formatting now (below),
+        // so deleting a duplicate clears the highlight and the cell falls back to
+        // its estimator fill instead of staying pink forever.
         if ((0, timenavi_1.dollarDiffIsFlagged)(r.dollarDiff))
             pink(diffCol);
+    }
+    void dupInQbo;
+    /**
+     * Round 10 — live duplicate / not-clocked-in highlighting on `In QBO Time?`.
+     * The rule re-evaluates in Excel, so removing one of two identical values
+     * un-highlights the one that remains.
+     */
+    const lastRow = ws.rowCount;
+    if (lastRow >= 2) {
+        const col = excelColumnLetter(inQboCol);
+        const range = `${col}2:${col}${lastRow}`;
+        ws.addConditionalFormatting({
+            ref: range,
+            rules: [
+                {
+                    type: 'expression',
+                    priority: 1,
+                    formulae: [
+                        `AND($${col}2<>"",OR($${col}2="NotClockedIn",COUNTIF($${col}$2:$${col}$${lastRow},$${col}2)>1))`,
+                    ],
+                    style: {
+                        fill: solidFill(PINK_FILL),
+                        font: { name: FONT, size: 10, color: { argb: PINK_TEXT } },
+                    },
+                },
+            ],
+        });
     }
 }
 // ---------------------------------------------------------------------------
@@ -474,6 +515,7 @@ function buildPivotSheet(wb, pivot, palette) {
         { width: 8 },
         { width: 10 },
     ];
+    // Round 7 §7 — Pivot by Crew stays at Calibri 12.
     const baseFont = { name: FONT, size: 12 };
     const paint = (cell, opts) => {
         if (opts.fill)
@@ -658,7 +700,8 @@ function buildPivotByJobSheet(wb, model) {
         { width: 15.78 }, // Round 5 §3.4 — % of Completion fits its header
         { width: 18.5 },
     ];
-    const baseFont = { name: FONT, size: 12 };
+    // Round 10 — every value on this sheet is 8pt (was 12pt, with a 17pt title).
+    const baseFont = { name: FONT, size: 8 };
     const paint = (cell, opts) => {
         if (opts.fill)
             cell.fill = solidFill(opts.fill);
@@ -708,11 +751,15 @@ function buildPivotByJobSheet(wb, model) {
             row.getCell(c).alignment = { horizontal: 'center' };
         }
     };
-    /** Round 5 §3.5 — thin top+bottom on A through the blank/hours band only. */
-    const hoursBandBorder = (row) => {
-        for (let c = 1; c <= qbCol; c++) {
+    /**
+     * Round 10 — job separators. The old per-row top+bottom rules over A:I made
+     * the sheet look ruled; a job block now gets ONE line above it and ONE below
+     * it, drawn across every column, so the color-coded blocks read as blocks.
+     */
+    const edgeBorder = (row, edge) => {
+        for (let c = 1; c <= lastCol; c++) {
             const prev = row.getCell(c).border ?? {};
-            row.getCell(c).border = { ...prev, top: { style: 'thin' }, bottom: { style: 'thin' } };
+            row.getCell(c).border = { ...prev, [edge]: { style: 'thin' } };
         }
     };
     /**
@@ -731,7 +778,7 @@ function buildPivotByJobSheet(wb, model) {
             const color = c === lastCol ? DARK_RED : c === pctComplCol ? RED : WHITE;
             paint(r1.getCell(c), { fill: BLACK, color, bold: true });
             if (c === 1)
-                paint(r1.getCell(1), { fill: BLACK, color: WHITE, bold: true, size: withDays ? 17 : 16 });
+                paint(r1.getCell(1), { fill: BLACK, color: WHITE, bold: true });
             if (c > 1 && c <= 1 + dateCount && r1.getCell(c).value instanceof Date) {
                 // Round 6 — short date in B1–H1 (no year), e.g. 6/27.
                 r1.getCell(c).numFmt = 'm/d';
@@ -756,7 +803,10 @@ function buildPivotByJobSheet(wb, model) {
     const fillRow = (row, hex, bold = false, upTo = lastCol) => {
         for (let c = 1; c <= upTo; c++) {
             const cell = row.getCell(c);
-            paint(cell, { ...(hex ? { fill: 'FF' + hex, color: textOn(hex) } : {}), bold });
+            // Round 10 — the analysis block (AP# → Notes, columns K–R on a 7-date
+            // week) is bold on every row.
+            const boldCell = bold || c >= analysisStart;
+            paint(cell, { ...(hex ? { fill: 'FF' + hex, color: textOn(hex) } : {}), bold: boldCell });
             if (typeof cell.value === 'number' && c <= qbCol && c > 1)
                 cell.numFmt = HOURS_FMT;
         }
@@ -776,7 +826,8 @@ function buildPivotByJobSheet(wb, model) {
         const cRow = ws.addRow([cust.customer, ...hourVals(cust.byDate), cust.total]);
         cRow.outlineLevel = 0;
         fillRow(cRow, cust.colorHex, true);
-        hoursBandBorder(cRow);
+        // Round 10 — one line above the customer's first job block.
+        edgeBorder(cRow, 'top');
         for (const job of cust.jobs) {
             const a = job.analysis;
             const jRow = ws.addRow([
@@ -812,7 +863,7 @@ function buildPivotByJobSheet(wb, model) {
             writePercentCell(jRow, { apKey: a.apKey, percent: a.percent, override: a.percentOverride });
             textApCell(jRow);
             centerAnalysis(jRow);
-            hoursBandBorder(jRow);
+            let lastRowOfJob = jRow;
             for (const emp of job.employees) {
                 const eRow = ws.addRow([emp.username, ...hourVals(emp.byDate), emp.total, emp.qbHours ?? '']);
                 eRow.outlineLevel = 2;
@@ -822,7 +873,10 @@ function buildPivotByJobSheet(wb, model) {
                     qb.numFmt = HOURS_FMT;
                     qb.font = { ...baseFont, color: { argb: DARK_RED } };
                 }
+                lastRowOfJob = eRow;
             }
+            // Round 10 — one line closing the job block, across every column.
+            edgeBorder(lastRowOfJob, 'bottom');
         }
     }
     // Grand Total row — gray, white text, double top border.

@@ -147,7 +147,7 @@ function buildPayrollExceptions(input) {
             const otLine = b.lines.find((l) => l.ot);
             if (otLine) {
                 items.push({
-                    message: `${b.employeeName} — ${(0, format_1.fmtHours)(b.totalHours)} h total: ${(0, format_1.fmtHours)(otLine.hours)} h OT at 1.5× on "${otLine.jobLabel.replace(' [OT >40 hrs/wk]', '')}"`,
+                    message: `${b.employeeName} — ${(0, format_1.fmtHours)(b.totalHours)} h total: ${(0, format_1.fmtHours)(otLine.hours)} h OT at 1.5× on "${otLine.jobLabel.replace(' [OT]', '')}"`,
                 });
             }
         }

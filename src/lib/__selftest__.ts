@@ -1955,9 +1955,10 @@ export function runSelfTests(): boolean {
     `IFERROR(INDEX('TimeNavi Export'!I:I, MATCH(F5, 'TimeNavi Export'!H:H, 0)), "")`,
   );
   check(
-    '§13 percents filename spells Percentages, no % character',
+    // Round 10 — the % symbol leads and "Percentages" is gone.
+    '§13 percents filename leads with the % symbol',
     percentsExportFilename(new Date(2026, 7, 14)),
-    '08-14-2026 Percentages of Completion.xlsx',
+    '% of Completion 08-14-2026.xlsx',
   );
   check(
     '§13 payroll filename has no %',

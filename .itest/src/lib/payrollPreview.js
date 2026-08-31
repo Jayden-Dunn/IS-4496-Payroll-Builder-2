@@ -201,6 +201,18 @@ function buildPayrollPreview(input) {
     const title = `${isUt ? 'UT ' : ''}PAYROLL BREAKDOWN ${payDate ? (0, format_1.fmtDate)(payDate) : ''} ${range}`
         .replace(/\s+/g, ' ')
         .trim();
+    /**
+     * Round 10 — anyone with hours this week is active, full stop. A painter who
+     * was on the inactive roster and shows up on the timesheet has come back, so
+     * no "inactive (*)" marker is drawn and the roster flag is flipped (the App
+     * layer persists `activatedPainters`).
+     */
+    const usernamesWithHours = new Set();
+    for (const r of entityRows) {
+        if (r.hours > 0)
+            usernamesWithHours.add(r.username || `${r.fname} ${r.lname}`);
+    }
+    const activatedPainters = new Set();
     const emps = new Map();
     for (const r of entityRows) {
         const key = r.username || `${r.fname} ${r.lname}`;
@@ -217,8 +229,13 @@ function buildPayrollPreview(input) {
             group: r.group,
             fullName,
             displayName: (0, payroll_1.stripSingleLetterTokens)(fullName),
-            inactive: (dirMatch ? !dirMatch.active : false) || rosterInactive,
+            inactive: !usernamesWithHours.has(key) && ((dirMatch ? !dirMatch.active : false) || rosterInactive),
         });
+        if (usernamesWithHours.has(key) && rosterInactive) {
+            const rosterRow = settings.painterRoster.find((pr) => !pr.active && ((0, payroll_1.tokensSubset)(pr.name, fullName) || (0, payroll_1.tokensSubset)(fullName, pr.name)));
+            if (rosterRow)
+                activatedPainters.add(rosterRow.name);
+        }
     }
     const empJobs = new Map(); // username → jobs in first-encounter order
     const empDayRows = new Map(); // username → (job, day) buckets
@@ -722,7 +739,7 @@ function buildPayrollPreview(input) {
             const otTag = seg
                 ? (0, payTypes_1.payItemTag)(seg.payItem)
                 : kind === 'weeklyOt'
-                    ? ' [OT >40 hrs/wk]'
+                    ? ' [OT]'
                     : kind === 'dailyOt'
                         ? ' [Daily OT]'
                         : '';
@@ -946,6 +963,12 @@ function buildPayrollPreview(input) {
         // Round 9 §32 — a lead responsible for ALL of a job's materials is charged
         // the full amount instead of half.
         const fullMaterials = (settings.fullMaterialsLeads ?? []).some((n) => (0, payroll_1.tokensSubset)(n, leadUpper) || (0, payroll_1.tokensSubset)(leadUpper, n));
+        /**
+         * Round 10 — Utah hotel charge-back. On the UT tab a full-materials lead
+         * also carries their own lodging, so the job's P&L travel becomes a
+         * "Hotels" line that comes OUT of the chain.
+         */
+        const hotels = isUt && fullMaterials ? travel : null;
         const halfMaterials = e.halfMaterials !== undefined ? e.halfMaterials : fullMaterials ? materials : materials / 2;
         // Round 6 §6.2 — WO% from the Pivot by Job `WO%` cell (Round 9 §15: that
         // column is the source of truth), else the Settings crew map (Round 8 §9.4:
@@ -967,7 +990,8 @@ function buildPayrollPreview(input) {
             profitShare,
             workOrderOverride,
             laborWages,
-            halfMaterials,
+            // Round 10 — the hotel charge-back rides with the materials deduction.
+            halfMaterials: halfMaterials + (hotels ?? 0),
             percent: effectivePercent,
             mileage,
         });
@@ -1029,6 +1053,7 @@ function buildPayrollPreview(input) {
             sundries,
             halfMaterials,
             fullMaterials,
+            hotels,
             timesheetLabor,
             totalProfitShare,
             splitWith,
@@ -1335,6 +1360,9 @@ function buildPayrollPreview(input) {
         inactiveEmployees,
         inactiveZeroHours,
         newLeadsToAdd: [...newLeadsToAdd.values()].sort((a, b) => byText(a.lead, b.lead)),
+        // Round 10 — roster names that worked this week and should stop being
+        // listed as inactive.
+        activatedPainters: [...activatedPainters].sort(byText),
         dailyOtNotes,
     };
 }
@@ -1390,6 +1418,7 @@ function mergePayrollPreviews(nv, ut) {
             ...nv.newLeadsToAdd,
             ...ut.newLeadsToAdd.filter((n) => !seenLead.has(n.lead.trim().toLowerCase())),
         ],
+        activatedPainters: [...new Set([...nv.activatedPainters, ...ut.activatedPainters])].sort(byText),
         dailyOtNotes: [...nv.dailyOtNotes, ...ut.dailyOtNotes],
     };
 }

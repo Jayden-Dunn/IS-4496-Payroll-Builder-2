@@ -3,7 +3,14 @@
  * (same shared model as Payroll Preview). Core = data content + recognizable sketch.
  */
 import type { CSSProperties, ReactNode } from 'react';
-import { fmtAccounting, formatCrewLeadWoNote, isDarkColor, parseMoneyInput, parsePercentInput } from '../lib/format';
+import {
+  fmtAccounting,
+  formatCrewLeadWoNote,
+  isDarkColor,
+  negativeClass,
+  parseMoneyInput,
+  parsePercentInput,
+} from '../lib/format';
 import { CellInput } from './CellInput';
 import { buildJournalEntryRows } from '../lib/journalEntry';
 import { hourSplitRows } from '../lib/payroll';
@@ -92,8 +99,12 @@ function jobCellStyle(hex: string | null): CSSProperties | undefined {
   return { backgroundColor: `#${hex}`, color: isDarkColor(hex) ? '#fff' : '#000' };
 }
 
-function money(n: number): string {
-  return fmtAccounting(n);
+/**
+ * Round 10 — a money value: parentheses come from `fmtAccounting`, red comes
+ * from `negativeClass`, so every negative on every payroll tab reads the same.
+ */
+function money(n: number): JSX.Element {
+  return <span className={negativeClass(n)}>{fmtAccounting(n)}</span>;
 }
 
 function pctLabel(p: number | null): string {
