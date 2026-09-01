@@ -562,7 +562,7 @@ export function SettingsModal({
             <button type="button" className="btn text-xs" onClick={() => setLineItems(DEFAULT_PAYROLL_LINE_ITEMS.map((e) => ({ ...e })))}>Reset</button>
           </div>
 
-          <SectionTitle sub="These crew leads / subcontractors are charged for ALL of a job's materials instead of half — the band row reads &quot;- Materials&quot;.">
+          <SectionTitle sub="These crew leads / subcontractors are charged for ALL of a job's materials instead of half — the band row reads &quot;- ALL Materials&quot;. Seeded with Color Enterprises LLC and Pepe&#39;s Painting LLC.">
             Full-materials leads
           </SectionTitle>
           <div className="flex flex-col gap-1">
