@@ -113,6 +113,9 @@ function salesByRepColWidth(header, colIndex0) {
         return 16;
     if (PRODUCT_SERVICE_HEADER.test(header.trim()))
         return 11;
+    // A date needs its full 10 characters — a clipped date cell shows as ####.
+    if (/^date$/i.test(header.trim()))
+        return 10;
     return 6;
 }
 function buildSalesByRepMirrorSheet(wb, name, data) {
@@ -506,7 +509,9 @@ function writePsChainValues(ws, block, startCol, opts) {
     let halfMatRow = 0;
     let mileageRow = 0;
     for (const rr of rows) {
-        if (rr.label === materialsLabel)
+        // Round 10 — the rule sits under the LAST deduction row, which is Hotels
+        // when the band has one.
+        if (rr.label === materialsLabel || rr.label === '- Hotels')
             halfMatRow = r;
         if (rr.label === '-Mileage')
             mileageRow = r;

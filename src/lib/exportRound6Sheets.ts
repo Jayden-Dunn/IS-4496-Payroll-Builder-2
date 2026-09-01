@@ -120,6 +120,8 @@ function salesByRepColWidth(header: string, colIndex0: number): number {
   if (colIndex0 === 0) return 7; // AP#
   if (WIDE_TEXT_HEADERS.test(header.trim())) return 16;
   if (PRODUCT_SERVICE_HEADER.test(header.trim())) return 11;
+  // A date needs its full 10 characters — a clipped date cell shows as ####.
+  if (/^date$/i.test(header.trim())) return 10;
   return 6;
 }
 

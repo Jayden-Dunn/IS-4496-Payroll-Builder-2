@@ -82,7 +82,10 @@ export function TimeNaviTable({ rows, colorByEstimator, estimatorOptions, onEdit
    */
   const stubCell = (text: string): JSX.Element => (
     <td className="xcell p-0" title={text}>
-      <div className="w-[7px] overflow-hidden text-transparent">{text}</div>
+      {/* Round 10 — `whitespace-nowrap` matters: without it a long value (an
+          attendee email, a QBO job name) wrapped inside the 7px stub and made
+          the whole ROW as tall as the wrapped text. */}
+      <div className="w-[7px] overflow-hidden whitespace-nowrap text-transparent">{text}</div>
     </td>
   );
 

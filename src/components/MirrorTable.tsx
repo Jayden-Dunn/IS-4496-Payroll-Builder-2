@@ -34,6 +34,8 @@ export function MirrorTable({ headers, rows, boldFirstCol, compact }: MirrorTabl
     const h = header.trim();
     if (/^(customer|name(\s*[12])?|memo(\/description)?)$/i.test(h)) return '8rem';
     if (/^product\s*\/\s*service$/i.test(h)) return '5.5rem';
+    // A date needs room for M/D/YYYY; everything else can stay tight.
+    if (/^date$/i.test(h)) return '5rem';
     return '3.5rem';
   };
   return (
