@@ -526,7 +526,14 @@ export function parseLastWeek(wbd: WorkbookData): Map<string, PrevPercent> {
         }
       }
     }
-    if (val !== null && !map.has(key)) map.set(key, val);
+    /**
+     * Round 10 — the LAST non-blank `% Completion` row for an AP# wins. The
+     * sheet is in row order, so a later row (a touch-up event, a corrected
+     * percentage) is the more recent statement of what that job was paid to,
+     * and that is what "Last % Paid" means. Reading the first row instead made
+     * the value wrong whenever a job appeared more than once last week.
+     */
+    if (val !== null) map.set(key, val);
   }
   if (map.size === 0) {
     throw new Error('No AP# / % Completion pairs found on the "TimeNavi Export" sheet.');
@@ -762,8 +769,17 @@ export function parsePl(wbd: WorkbookData, opts: ParsePlOptions = {}): PlParseRe
   const mapping = opts.mapping ?? DEFAULT_PL_ACCOUNT_MAPPING[entity];
   // Round 3 §2 kept sundries inside `materials`; the Round 8 payroll chain
   // un-folds them (see plMetricsByJob), so the legacy summary stays as-is.
-  const materialsLabels = [...labelSet([...mapping.materials, ...mapping.sundries])];
   const laborLabels = [...labelSet(mapping.laborWagesSubs)];
+  /**
+   * Round 10 — subcontractor labor belongs to `- Labor + Wages`, never to
+   * materials. A label mapped to labor is removed from the materials set, so a
+   * stale saved mapping (or a duplicated label) can never double-count
+   * `Subcontractor Labor` into a crew lead's ½ Materials line.
+   */
+  const laborLabelSet = new Set(laborLabels);
+  const materialsLabels = [...labelSet([...mapping.materials, ...mapping.sundries])].filter(
+    (l) => !laborLabelSet.has(l),
+  );
   const incomeLabels = [...labelSet(mapping.income)];
   const mileageLabels = [...labelSet(mapping.mileage)];
   const sundriesLabels = [...labelSet(mapping.sundries)];

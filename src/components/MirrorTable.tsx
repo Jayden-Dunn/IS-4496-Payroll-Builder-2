@@ -17,17 +17,39 @@ interface MirrorTableProps {
   rows: CellValue[][];
   /** Optional sticky first-column emphasis. */
   boldFirstCol?: boolean;
+  /**
+   * Round 10 — Sales by Rep: clamp every column so A–M fit on screen without
+   * scrolling right. Long text is clipped to the column and kept in the
+   * cell's tooltip, matching the widths the workbook exports.
+   */
+  compact?: boolean;
 }
 
 /** Round 6 — generic read-only mirror grid for %'s helper tabs. */
-export function MirrorTable({ headers, rows, boldFirstCol }: MirrorTableProps): JSX.Element {
+export function MirrorTable({ headers, rows, boldFirstCol, compact }: MirrorTableProps): JSX.Element {
+  /** Round 10 — the same width buckets the export uses, in rem. */
+  const widthFor = (header: string, i: number): string | undefined => {
+    if (!compact) return undefined;
+    if (i === 0) return '3.5rem';
+    const h = header.trim();
+    if (/^(customer|name(\s*[12])?|memo(\/description)?)$/i.test(h)) return '8rem';
+    if (/^product\s*\/\s*service$/i.test(h)) return '5.5rem';
+    // A date needs room for M/D/YYYY; everything else can stay tight.
+    if (/^date$/i.test(h)) return '5rem';
+    return '3.5rem';
+  };
   return (
     <div className="p-2">
-      <table className="w-max min-w-[320px] border-collapse bg-white text-xs">
+      <table className={`min-w-[320px] border-collapse bg-white text-xs ${compact ? 'table-fixed w-auto' : 'w-max'}`}>
         <thead>
           <tr>
             {headers.map((h, i) => (
-              <th key={i} className="xcell2 text-left font-bold whitespace-nowrap">
+              <th
+                key={i}
+                className="xcell2 truncate text-left font-bold whitespace-nowrap"
+                style={compact ? { width: widthFor(h, i), maxWidth: widthFor(h, i) } : undefined}
+                title={h}
+              >
                 {h}
               </th>
             ))}
@@ -43,14 +65,19 @@ export function MirrorTable({ headers, rows, boldFirstCol }: MirrorTableProps): 
           ) : (
             rows.map((row, ri) => (
               <tr key={ri}>
-                {headers.map((_, ci) => (
-                  <td
-                    key={ci}
-                    className={`xcell whitespace-nowrap ${boldFirstCol && ci === 0 ? 'font-bold' : ''}`}
-                  >
-                    {fmtCell(row[ci] ?? null)}
-                  </td>
-                ))}
+                {headers.map((h, ci) => {
+                  const text = fmtCell(row[ci] ?? null);
+                  return (
+                    <td
+                      key={ci}
+                      className={`xcell whitespace-nowrap ${compact ? 'truncate' : ''} ${boldFirstCol && ci === 0 ? 'font-bold' : ''}`}
+                      style={compact ? { width: widthFor(h, ci), maxWidth: widthFor(h, ci) } : undefined}
+                      title={compact ? text : undefined}
+                    >
+                      {text}
+                    </td>
+                  );
+                })}
               </tr>
             ))
           )}
@@ -75,7 +102,8 @@ export function SalesByRepTable({
     while (body.length < 12) body.push(null);
     return [r.apKey, ...body, r.dateCopy, r.qboJobName];
   });
-  return <MirrorTable headers={allHeaders} rows={grid} boldFirstCol />;
+  // Round 10 — compact widths so columns A–M are visible without scrolling.
+  return <MirrorTable headers={allHeaders} rows={grid} boldFirstCol compact />;
 }
 
 /** §3.3 / §3.4 Sales by Cust mirrors. */

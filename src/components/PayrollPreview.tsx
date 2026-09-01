@@ -1,5 +1,12 @@
 import type { CSSProperties } from 'react';
-import { fmtAccounting, isDarkColor, parseMoneyInput, parsePercentInput } from '../lib/format';
+import {
+  fmtAccounting,
+  isDarkColor,
+  NEGATIVE_TEXT_CLASS,
+  negativeClass,
+  parseMoneyInput,
+  parsePercentInput,
+} from '../lib/format';
 import type {
   HourlyBlock,
   PayrollEdit,
@@ -31,20 +38,31 @@ function NumCell({
   value,
   onCommit,
   pct,
+  money,
   className,
   placeholder,
 }: {
   value: number | null;
   onCommit: (n: number | null) => void;
   pct?: boolean;
+  /** Round 10 — render with a leading `$`, like the Profit Share row. */
+  money?: boolean;
   className?: string;
   placeholder?: string;
 }): JSX.Element {
-  const display = value === null ? '' : pct ? `${Math.round(value * 100)}%` : value.toFixed(2);
+  const display =
+    value === null
+      ? ''
+      : pct
+        ? `${Math.round(value * 100)}%`
+        : money
+          ? `$${fmtAccounting(value)}`
+          : fmtAccounting(value);
   return (
     <CellInput
       value={display}
-      className={`text-right ${className ?? ''}`}
+      // Round 10 — negatives read red (the parentheses come from fmtAccounting).
+      className={`text-right ${negativeClass(value)} ${className ?? ''}`}
       placeholder={placeholder}
       onCommit={(text) => {
         if (pct) {
@@ -202,7 +220,9 @@ function HourlyBlockView({
               >
                 <NumCell value={l.rate} onCommit={(n) => onEdit(`hl:${l.id}`, { rate: n ?? 0 })} className="text-center" />
               </td>
-              <td className={`xcell text-center ${dotted} ${bodyCls}`}>{fmtAccounting(l.hours * l.rate)}</td>
+              <td className={`xcell text-center ${dotted} ${bodyCls} ${negativeClass(l.hours * l.rate)}`}>
+                {fmtAccounting(l.hours * l.rate)}
+              </td>
               <td className="xcell text-center font-bold">{isLast ? '(-) taxes' : ''}</td>
               <td className="xcell text-center font-bold">{isLast ? 'NEST [IRA]' : ''}</td>
               <td className="xcell text-center font-bold">{isLast ? 'net' : ''}</td>
@@ -261,7 +281,16 @@ function HourlyBlockView({
   );
 }
 
-function PsBlockView({ block, onEdit }: { block: PsBlock; onEdit: PayrollPreviewProps['onEdit'] }): JSX.Element {
+function PsBlockView({
+  block,
+  onEdit,
+  showTravel,
+}: {
+  block: PsBlock;
+  onEdit: PayrollPreviewProps['onEdit'];
+  /** Round 10 — the Travel row is UT-only. */
+  showTravel?: boolean;
+}): JSX.Element {
   const label = (t: string): JSX.Element => <td className="xcell w-44 font-medium">{t}</td>;
   const psKey = (jobRowId: string): string => `ps:${block.key}:${jobRowId}`;
   const anySplit = block.jobs.some((j) => j.splitWith > 1);
@@ -324,11 +353,16 @@ function PsBlockView({ block, onEdit }: { block: PsBlock; onEdit: PayrollPreview
             </td>
           ))}
         </tr>
+        {/* Round 10 — the override is a dollar figure, like Profit Share. */}
         <tr>
           {label('Work Order Override')}
           {block.jobs.map((j) => (
             <td key={j.jobRowId} className="xcell text-right">
-              <NumCell value={j.workOrderOverride} onCommit={(n) => onEdit(psKey(j.jobRowId), { workOrderOverride: n ?? 0 })} />
+              <NumCell
+                value={j.workOrderOverride}
+                money
+                onCommit={(n) => onEdit(psKey(j.jobRowId), { workOrderOverride: n ?? 0 })}
+              />
             </td>
           ))}
         </tr>
@@ -372,16 +406,28 @@ function PsBlockView({ block, onEdit }: { block: PsBlock; onEdit: PayrollPreview
           ))}
         </tr>
         {/* §5.6 — thin line between -½ Materials and Total Profit Share. */}
-        {/* Round 9 §32 — a lead responsible for ALL of a job's materials is
-            charged the full amount, and the row says so. */}
-        <tr className="border-b border-b-neutral-500">
-          {label(block.jobs.some((j) => j.fullMaterials) ? '- Materials' : '-½ Materials')}
+        {/* Round 9 §32 / Round 10 — a lead responsible for ALL of a job's
+            materials is charged the full amount, and the row says so. */}
+        <tr className={block.jobs.some((j) => j.hotels !== null) ? '' : 'border-b border-b-neutral-500'}>
+          {label(block.jobs.some((j) => j.fullMaterials) ? '- ALL Materials' : '-½ Materials')}
           {block.jobs.map((j) => (
             <td key={j.jobRowId} className="xcell text-right">
               <NumCell value={j.halfMaterials} onCommit={(n) => onEdit(psKey(j.jobRowId), { halfMaterials: n ?? 0 })} />
             </td>
           ))}
         </tr>
+        {/* Round 10 §UT — the painter pays their own lodging, so the job's
+            travel is charged back here and comes out of the total. */}
+        {block.jobs.some((j) => j.hotels !== null) && (
+          <tr className="border-b border-b-neutral-500">
+            {label('- Hotels')}
+            {block.jobs.map((j) => (
+              <td key={j.jobRowId} className="xcell text-right">
+                {j.hotels === null ? '' : fmtAccounting(j.hotels)}
+              </td>
+            ))}
+          </tr>
+        )}
         <tr className="font-semibold">
           {label('Total Profit Share')}
           {block.jobs.map((j) => (
@@ -396,7 +442,9 @@ function PsBlockView({ block, onEdit }: { block: PsBlock; onEdit: PayrollPreview
                     : undefined
               }
             >
-              {j.manualPay ? '' : fmtAccounting(j.totalProfitShare)}
+              <span className={negativeClass(j.manualPay ? null : j.totalProfitShare)}>
+                {j.manualPay ? '' : fmtAccounting(j.totalProfitShare)}
+              </span>
             </td>
           ))}
         </tr>
@@ -414,19 +462,30 @@ function PsBlockView({ block, onEdit }: { block: PsBlock; onEdit: PayrollPreview
         <tr>
           <td className="xcell" colSpan={1 + block.jobs.length} />
         </tr>
-        <SummaryRow label="Total" value={fmtAccounting(block.total)} />
+        <SummaryRow label="Total" value={fmtAccounting(block.total)} negative={block.total < 0} />
+        {/* Round 10 — one column per job, like every other chain row. */}
         <tr>
           {label('Mileage - New')}
-          <td className="xcell text-right" colSpan={block.jobs.length}>
-            <NumCell value={block.mileageNew} onCommit={(n) => onEdit(`psb:${block.key}`, { mileageNew: n ?? 0 })} />
-          </td>
+          {block.jobs.map((j, i) => (
+            <td key={j.jobRowId} className="xcell text-right">
+              {i === 0 ? (
+                <NumCell
+                  value={block.mileageNew}
+                  onCommit={(n) => onEdit(`psb:${block.key}`, { mileageNew: n ?? 0 })}
+                />
+              ) : null}
+            </td>
+          ))}
         </tr>
         {/* §5.6 — Hourly Pay value cell highlighted yellow. */}
+        {/* Round 10 — one cell immediately right of the label, never merged
+            across the job columns. */}
         <tr className="font-semibold">
           <td className="xcell w-44">Hourly Pay</td>
-          <td className="xcell text-right" colSpan={block.jobs.length} style={HOURLY_PAY_YELLOW}>
+          <td className="xcell text-right" style={HOURLY_PAY_YELLOW}>
             <NumCell value={block.hourlyPay} onCommit={(n) => onEdit(`psb:${block.key}`, { hourlyPay: n ?? 0 })} />
           </td>
+          {block.jobs.length > 1 && <td className="xcell" colSpan={block.jobs.length - 1} />}
         </tr>
         <tr>
           {label('Reimbursements')}
@@ -462,7 +521,13 @@ function PsBlockView({ block, onEdit }: { block: PsBlock; onEdit: PayrollPreview
         {block.extras.map((x) => (
           <ExtraRow key={x.key} extra={x} span={block.jobs.length} onEdit={onEdit} />
         ))}
-        <SummaryRow label="Total Pay" value={`$${fmtAccounting(block.totalPay)}`} span={block.jobs.length} bold />
+        <SummaryRow
+          label="Total Pay"
+          value={`$${fmtAccounting(block.totalPay)}`}
+          span={block.jobs.length}
+          bold
+          negative={block.totalPay < 0}
+        />
         <tr>
           <td className="xcell" colSpan={1 + block.jobs.length} />
         </tr>
@@ -482,19 +547,24 @@ function PsBlockView({ block, onEdit }: { block: PsBlock; onEdit: PayrollPreview
             </td>
           ))}
         </tr>
-        {/* Round 8 §8.5 — informational, directly beneath Materials. */}
-        <tr>
-          {label('Travel')}
-          {block.jobs.map((j) => (
-            <td key={j.jobRowId} className="xcell text-right">{fmtAccounting(j.travel)}</td>
-          ))}
-        </tr>
+        {/* Round 10 — QB Labor-Wages-Subs is editable; Travel sits below it and
+            only on the UT tab (the NV tab drops the row entirely). */}
         <tr>
           {label('QB Labor-Wages-Subs')}
           {block.jobs.map((j) => (
-            <td key={j.jobRowId} className="xcell text-right">{fmtAccounting(j.laborWages)}</td>
+            <td key={j.jobRowId} className="xcell text-right">
+              <NumCell value={j.laborWages} onCommit={(n) => onEdit(psKey(j.jobRowId), { laborWages: n ?? 0 })} />
+            </td>
           ))}
         </tr>
+        {showTravel && (
+          <tr>
+            {label('Travel')}
+            {block.jobs.map((j) => (
+              <td key={j.jobRowId} className="xcell text-right">{fmtAccounting(j.travel)}</td>
+            ))}
+          </tr>
+        )}
         <tr>
           {label('Mileage in Books')}
           {block.jobs.map((j) => (
@@ -514,11 +584,24 @@ function PsBlockView({ block, onEdit }: { block: PsBlock; onEdit: PayrollPreview
   );
 }
 
-function SummaryRow({ label, value, span = 1, bold }: { label: string; value: string; span?: number; bold?: boolean }): JSX.Element {
+function SummaryRow({
+  label,
+  value,
+  span = 1,
+  bold,
+  negative,
+}: {
+  label: string;
+  value: string;
+  span?: number;
+  bold?: boolean;
+  /** Round 10 — a negative total reads red (already parenthesised). */
+  negative?: boolean;
+}): JSX.Element {
   return (
     <tr className={bold ? 'font-bold' : 'font-semibold'}>
       <td className="xcell w-44">{label}</td>
-      <td className="xcell text-right" colSpan={span}>
+      <td className={`xcell text-right ${negative ? NEGATIVE_TEXT_CLASS : ''}`} colSpan={span}>
         {value}
       </td>
     </tr>
@@ -583,7 +666,7 @@ function SalaryBlockView({
               />
             </td>
           </tr>
-        ) : (
+        ) : block.noMileageRow ? null : (
           <tr>
             <td className="xcell">mileage reimb ({mileageRate.toFixed(3)}/mi)</td>
             <td className="xcell text-right">
@@ -671,9 +754,19 @@ export function PayrollPreview({ model, mileageRate, onEdit }: PayrollPreviewPro
       {model.painterSequence.map((entry) =>
         entry.kind === 'hourly' ? (
           <HourlyBlockView key={entry.block.key} block={entry.block} onEdit={onEdit} />
+        ) : entry.kind === 'salary' ? (
+          /* Round 10 — subcontractor salary block, rendered with the subs. */
+          <SalaryBlockView
+            key={entry.block.key}
+            block={entry.block}
+            mileageRate={mileageRate}
+            weekRange={model.weekRange}
+            onEdit={onEdit}
+            headerStyle={TAN}
+          />
         ) : (
           <div key={entry.block.key}>
-            <PsBlockView block={entry.block} onEdit={onEdit} />
+            <PsBlockView block={entry.block} onEdit={onEdit} showTravel={model.entity === 'UT'} />
             {entry.block.tsheets && (
               <div className="mb-4 ml-4 max-w-4xl">
                 <HourlyBlockView block={entry.block.tsheets} onEdit={onEdit} tsheets />

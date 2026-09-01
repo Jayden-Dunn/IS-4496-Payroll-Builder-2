@@ -61,7 +61,8 @@ const PINK_TEXT = 'FF9C0006';
 const RED_FILL = 'FFFF0000';
 
 // Reference formats: accounting style WITHOUT a $ symbol.
-const ACCOUNTING_FMT = '_(* #,##0.00_);_(* \\(#,##0.00\\);_(* "-"??_);_(@_)';
+// Round 10 — negatives read red and parenthesised in the workbook too.
+const ACCOUNTING_FMT = '_(* #,##0.00_);[Red]_(* \\(#,##0.00\\);_(* "-"??_);_(@_)';
 const START_END_DATE_FMT = 'mm-dd-yy';
 const INVOICE_DATE_FMT = 'mm/dd/yyyy';
 const PCT_FMT = '0%';
@@ -71,7 +72,7 @@ const HOURS_FMT = '0.00';
  * Round 9 §38 — accounting format WITH the "$" symbol. Used by the payroll
  * bands and by the TimeNavi `Apptivo $` column, whose values are dollars.
  */
-const CURRENCY_FMT = '_("$"* #,##0.00_);_("$"* \\(#,##0.00\\);_("$"* "-"??_);_(@_)';
+const CURRENCY_FMT = '_("$"* #,##0.00_);[Red]_("$"* \\(#,##0.00\\);_("$"* "-"??_);_(@_)';
 
 /**
  * Round 9 §2/§36 — the AP# column is autofit, then widened by this factor so
@@ -98,6 +99,23 @@ const EXCLUSION_GRAY_HEX = 'A6A6A6';
 
 /** Text format, so AP# columns compare as text on both sides of a MATCH. */
 const TEXT_FMT = '@';
+
+/**
+ * Round 10 — AP# → estimator fill hex, from the resolved estimator map and the
+ * Settings palette. Used to color the Input #'s `PO #'s:` cells.
+ */
+function estimatorFillByApKey(
+  estimatorByApKey: ReadonlyMap<string, string> | undefined,
+  legend: readonly LegendEntry[] | undefined,
+): Map<string, string> {
+  const palette = new Map((legend ?? []).map((l) => [l.estimator, l.color.toUpperCase()]));
+  const out = new Map<string, string>();
+  for (const [ap, est] of estimatorByApKey ?? []) {
+    const hex = palette.get(est);
+    if (hex) out.set(ap, hex);
+  }
+  return out;
+}
 
 /** 1-based column number → Excel letters ("H", "AA"). */
 export function excelColumnLetter(col: number): string {
@@ -274,14 +292,15 @@ export type ExportInput = PercentsExportInput & {
 };
 
 /**
- * Round 8 §13 — `MM-DD-YYYY Percentages of Completion.xlsx`. No `%` character
- * anywhere: some sync/upload targets mangle it in filenames.
+ * Round 10 — `% of Completion MM-DD-YYYY.xlsx`: the `%` symbol leads, and the
+ * spelled-out "Percentages" is gone. (Supersedes Round 8 §13, which spelled it
+ * out to dodge filename mangling.)
  */
 export function percentsExportFilename(payDate: Date | null): string {
   const d = payDate ?? new Date();
   const mm = String(d.getMonth() + 1).padStart(2, '0');
   const dd = String(d.getDate()).padStart(2, '0');
-  return `${mm}-${dd}-${d.getFullYear()} Percentages of Completion.xlsx`;
+  return `% of Completion ${mm}-${dd}-${d.getFullYear()}.xlsx`;
 }
 
 /** Alias — same as percentsExportFilename. */
@@ -373,7 +392,13 @@ export function assemblePayrollWorkbook(input: PayrollExportInput): ExcelJS.Work
     input.defaultProfitSharePct ?? 0.38,
     input.mileageRate ?? 0.625,
   );
-  buildInputNumbersSheet(wb, shared);
+  buildInputNumbersSheet(
+    wb,
+    shared,
+    input.mileageRate ?? 0.625,
+    // Round 10 — PO#'s cells wear the estimator's color for that AP#.
+    estimatorFillByApKey(input.estimatorByApKey, input.legend),
+  );
   buildNotesSheet(wb, sharedInput);
   buildFinalPayrollSheet(wb, sharedInput);
   buildJournalEntrySheet(wb);
@@ -535,11 +560,23 @@ function buildTimeNaviSheet(wb: ExcelJS.Workbook, input: ExportInput, palette: R
       r.inQboTime,
       r.jobTotal, // number, or the literal text '#N/A'
       r.apptivo ?? '', // §2.2 — blank unless the user typed a value
-      r.dollarDiff ?? '', // blank when N is #N/A
+      r.dollarDiff ?? '', // replaced by the §6 formula below when both sides exist
       percentCell, // Q mirrors I — the office PDF reads this column
       r.invoiceDate ? excelDate(r.invoiceDate) : '',
       r.dateDiff ?? '',
     ]);
+
+    // Round 10 — `$ Difference` carries the formula into the workbook:
+    // Job Total $ − Apptivo $, live for whatever the office types afterwards.
+    {
+      const jobTotalRef = `${excelColumnLetter(tnCol('Job Total $'))}${row.number}`;
+      const apptivoRef = `${excelColumnLetter(tnCol('Apptivo $'))}${row.number}`;
+      const diffCell = row.getCell(tnCol('$ Difference'));
+      diffCell.value = {
+        formula: `IF(OR(NOT(ISNUMBER(${jobTotalRef})),${apptivoRef}=""),"",${jobTotalRef}-${apptivoRef})`,
+        result: r.dollarDiff ?? undefined,
+      };
+    }
 
     row.getCell(2).numFmt = START_END_DATE_FMT;
     row.getCell(3).numFmt = START_END_DATE_FMT;
@@ -596,8 +633,38 @@ function buildTimeNaviSheet(wb: ExcelJS.Workbook, input: ExportInput, palette: R
     } else if (percentIsFlagged(r.percent)) {
       pink(pctCol);
     }
-    if (r.inQboTime === 'NotClockedIn' || dupInQbo.has(r.inQboTime.trim())) pink(inQboCol);
+    // Round 10 — the `In QBO Time?` flag is CONDITIONAL formatting now (below),
+    // so deleting a duplicate clears the highlight and the cell falls back to
+    // its estimator fill instead of staying pink forever.
     if (dollarDiffIsFlagged(r.dollarDiff)) pink(diffCol);
+  }
+  void dupInQbo;
+
+  /**
+   * Round 10 — live duplicate / not-clocked-in highlighting on `In QBO Time?`.
+   * The rule re-evaluates in Excel, so removing one of two identical values
+   * un-highlights the one that remains.
+   */
+  const lastRow = ws.rowCount;
+  if (lastRow >= 2) {
+    const col = excelColumnLetter(inQboCol);
+    const range = `${col}2:${col}${lastRow}`;
+    ws.addConditionalFormatting({
+      ref: range,
+      rules: [
+        {
+          type: 'expression',
+          priority: 1,
+          formulae: [
+            `AND($${col}2<>"",OR($${col}2="NotClockedIn",COUNTIF($${col}$2:$${col}$${lastRow},$${col}2)>1))`,
+          ],
+          style: {
+            fill: solidFill(PINK_FILL),
+            font: { name: FONT, size: 10, color: { argb: PINK_TEXT } },
+          },
+        },
+      ],
+    });
   }
 }
 
@@ -625,6 +692,7 @@ function buildPivotSheet(wb: ExcelJS.Workbook, pivot: PivotModel, palette: Reado
     { width: 10 },
   ];
 
+  // Round 7 §7 — Pivot by Crew stays at Calibri 12.
   const baseFont = { name: FONT, size: 12 };
   const paint = (
     cell: ExcelJS.Cell,
@@ -823,7 +891,8 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
     { width: 18.5 },
   ];
 
-  const baseFont = { name: FONT, size: 12 };
+  // Round 10 — every value on this sheet is 8pt (was 12pt, with a 17pt title).
+  const baseFont = { name: FONT, size: 8 };
   const paint = (
     cell: ExcelJS.Cell,
     opts: { fill?: string; color?: string; bold?: boolean; size?: number },
@@ -882,11 +951,15 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
     }
   };
 
-  /** Round 5 §3.5 — thin top+bottom on A through the blank/hours band only. */
-  const hoursBandBorder = (row: ExcelJS.Row): void => {
-    for (let c = 1; c <= qbCol; c++) {
+  /**
+   * Round 10 — job separators. The old per-row top+bottom rules over A:I made
+   * the sheet look ruled; a job block now gets ONE line above it and ONE below
+   * it, drawn across every column, so the color-coded blocks read as blocks.
+   */
+  const edgeBorder = (row: ExcelJS.Row, edge: 'top' | 'bottom'): void => {
+    for (let c = 1; c <= lastCol; c++) {
       const prev = row.getCell(c).border ?? {};
-      row.getCell(c).border = { ...prev, top: { style: 'thin' }, bottom: { style: 'thin' } };
+      row.getCell(c).border = { ...prev, [edge]: { style: 'thin' } };
     }
   };
 
@@ -905,7 +978,7 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
     for (let c = 1; c <= lastCol; c++) {
       const color = c === lastCol ? DARK_RED : c === pctComplCol ? RED : WHITE;
       paint(r1.getCell(c), { fill: BLACK, color, bold: true });
-      if (c === 1) paint(r1.getCell(1), { fill: BLACK, color: WHITE, bold: true, size: withDays ? 17 : 16 });
+      if (c === 1) paint(r1.getCell(1), { fill: BLACK, color: WHITE, bold: true });
       if (c > 1 && c <= 1 + dateCount && r1.getCell(c).value instanceof Date) {
         // Round 6 — short date in B1–H1 (no year), e.g. 6/27.
         r1.getCell(c).numFmt = 'm/d';
@@ -932,7 +1005,10 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
   const fillRow = (row: ExcelJS.Row, hex: string | null, bold = false, upTo = lastCol): void => {
     for (let c = 1; c <= upTo; c++) {
       const cell = row.getCell(c);
-      paint(cell, { ...(hex ? { fill: 'FF' + hex, color: textOn(hex) } : {}), bold });
+      // Round 10 — the analysis block (AP# → Notes, columns K–R on a 7-date
+      // week) is bold on every row.
+      const boldCell = bold || c >= analysisStart;
+      paint(cell, { ...(hex ? { fill: 'FF' + hex, color: textOn(hex) } : {}), bold: boldCell });
       if (typeof cell.value === 'number' && c <= qbCol && c > 1) cell.numFmt = HOURS_FMT;
     }
   };
@@ -951,7 +1027,8 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
     const cRow = ws.addRow([cust.customer, ...hourVals(cust.byDate), cust.total]);
     cRow.outlineLevel = 0;
     fillRow(cRow, cust.colorHex, true);
-    hoursBandBorder(cRow);
+    // Round 10 — one line above the customer's first job block.
+    edgeBorder(cRow, 'top');
     for (const job of cust.jobs) {
       const a = job.analysis;
       const jRow = ws.addRow([
@@ -988,8 +1065,8 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
       writePercentCell(jRow, { apKey: a.apKey, percent: a.percent, override: a.percentOverride });
       textApCell(jRow);
       centerAnalysis(jRow);
-      hoursBandBorder(jRow);
 
+      let lastRowOfJob: ExcelJS.Row = jRow;
       for (const emp of job.employees) {
         const eRow = ws.addRow([emp.username, ...hourVals(emp.byDate), emp.total, emp.qbHours ?? '']);
         eRow.outlineLevel = 2;
@@ -999,7 +1076,10 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
           qb.numFmt = HOURS_FMT;
           qb.font = { ...baseFont, color: { argb: DARK_RED } };
         }
+        lastRowOfJob = eRow;
       }
+      // Round 10 — one line closing the job block, across every column.
+      edgeBorder(lastRowOfJob, 'bottom');
     }
   }
 
@@ -1096,6 +1176,8 @@ function buildPayrollPreviewSheet(
   inputRefsByLeadKey?: ReadonlyMap<string, { hourlyCell: string; deductCell: string }>,
 ): void {
   const ws = wb.addWorksheet(sheetName);
+  /** Round 10 — Travel is a UT-only row. */
+  const isUtSheet = model.entity === 'UT';
   ws.columns = [{ width: 22 }, { width: 41.4 }, { width: 32.4 }, { width: 16.2 }, { width: 9.4 }, { width: 12 }, { width: 12 }, { width: 12 }];
   const baseFont = { name: PP_FONT, size: 12 };
 
@@ -1316,8 +1398,17 @@ function buildPayrollPreviewSheet(
     const laborRow = ws.addRow(['- Labor + Wages', ...block.jobs.map((j) => j.laborWages)]).number;
     const milesRow = ws.addRow(['-Mileage', ...block.jobs.map((j) => j.mileage)]).number;
     // Round 9 §32 — a full-materials lead is charged all of it, and the row says so.
-    const materialsLabel = block.jobs.some((j) => j.fullMaterials) ? '- Materials' : '-½ Materials';
+    // Round 10 — a full-materials band reads "- ALL Materials".
+    const materialsLabel = block.jobs.some((j) => j.fullMaterials) ? '- ALL Materials' : '-½ Materials';
     const halfRow = ws.addRow([materialsLabel, ...block.jobs.map((j) => j.halfMaterials)]).number;
+    /**
+     * Round 10 §UT — the painter pays their own lodging, so the job's travel is
+     * charged back here. `halfMaterials` already carries the hotel amount into
+     * the chain, so this row is the visible half of that deduction.
+     */
+    const hotelsRow = block.jobs.some((j) => j.hotels !== null)
+      ? ws.addRow(['- Hotels', ...block.jobs.map((j) => j.hotels ?? '')]).number
+      : 0;
     const tpsRow = ws.addRow(['Total Profit Share']).number;
     let splitRow = 0;
     if (block.jobs.some((j) => j.splitWith > 1)) {
@@ -1325,7 +1416,12 @@ function buildPayrollPreviewSheet(
     }
     ws.addRow([]);
     const totalRow = ws.addRow(['Total']).number;
-    const mileNewRow = ws.addRow(['Mileage - New', block.mileageNew]).number;
+    // Round 10 — one column per job, like every other chain row.
+    const mileNewRow = ws.addRow([
+      'Mileage - New',
+      block.mileageNew,
+      ...block.jobs.slice(1).map(() => ''),
+    ]).number;
     const hourlyPayRow = ws.addRow(['Hourly Pay']).number;
     const reimbRow = ws.addRow(['Reimbursements', block.reimbursements, block.reimbMemo]).number;
     const deductRow = ws.addRow(['Deductions/Sundries']).number;
@@ -1349,9 +1445,18 @@ function buildPayrollPreviewSheet(
     const incomeRow = ws.addRow(['Total Income', ...block.jobs.map((j) => j.income)]).number;
     const matRow = ws.addRow(['Materials', ...block.jobs.map((j) => j.materials)]).number;
     // Round 8 §8.5 — informational, directly beneath Materials.
-    ws.addRow(['Travel', ...block.jobs.map((j) => j.travel)]);
+    // Round 10 — Travel is UT-only and sits BELOW QB Labor-Wages-Subs.
     ws.addRow(['QB Labor-Wages-Subs', ...block.jobs.map((j) => j.laborWages)]);
-    ws.addRow(['Mileage in Books', ...block.jobs.map((j) => j.mileage)]);
+    if (isUtSheet) ws.addRow(['Travel', ...block.jobs.map((j) => j.travel)]);
+    // Round 10 — `-Mileage` above IS this books figure (the P&L Mileage
+    // Expense for the AP#), so it points here instead of repeating the number.
+    const booksMileageRow = ws.addRow(['Mileage in Books', ...block.jobs.map((j) => j.mileage)]).number;
+    for (let i = 0; i < jobCount; i++) {
+      const L = colLetter(1 + i);
+      const cell = ws.getCell(`${L}${milesRow}`);
+      cell.value = { formula: `${L}${booksMileageRow}` };
+      cell.numFmt = MONEY_FMT;
+    }
     const pctMatRow = ws.addRow(['% Materials']).number;
 
     for (let i = 0; i < jobCount; i++) {
@@ -1370,7 +1475,7 @@ function buildPayrollPreviewSheet(
         tps.value = {
           // N() so the blank-override cell compares as 0 — in Excel raw text
           // sorts above every number, so a bare `>0` would take the WO branch.
-          formula: `IF(N(${L}${woRow})>0,${L}${woRow}*${L}${pctRow},${L}${psRow}*${L}${pctRow})-${L}${halfRow}-${L}${laborRow}`,
+          formula: `IF(N(${L}${woRow})>0,${L}${woRow}*${L}${pctRow},${L}${psRow}*${L}${pctRow})-${L}${halfRow}-${L}${laborRow}${hotelsRow > 0 ? `-N(${L}${hotelsRow})` : ''}`,
         };
       }
       tps.font = { ...baseFont, bold: true };
@@ -1384,15 +1489,18 @@ function buildPayrollPreviewSheet(
       for (const rn of [psRow, laborRow, milesRow, halfRow, incomeRow, matRow]) {
         ws.getCell(`${L}${rn}`).numFmt = MONEY_FMT;
       }
+      if (hotelsRow > 0) ws.getCell(`${L}${hotelsRow}`).numFmt = MONEY_FMT;
       for (const rn of [woRow, tpsRow]) {
         ws.getCell(`${L}${rn}`).numFmt = ACCOUNTING_FMT;
       }
-      // §5.6 / Round 7 — thin under -½ Materials (row above Total Profit Share).
-      ws.getCell(`${L}${halfRow}`).border = { bottom: { style: 'thin' } };
+      // §5.6 / Round 7 — thin under the last deduction row (Hotels when the
+      // band has one), i.e. the row directly above Total Profit Share.
+      ws.getCell(`${L}${hotelsRow > 0 ? hotelsRow : halfRow}`).border = { bottom: { style: 'thin' } };
     }
-    // Thin bottom border A:E on −½ Materials; double A:E on Deductions/Sundries.
+    // Thin bottom border A:E on the last deduction row; double A:E on
+    // Deductions/Sundries.
     for (let c = 1; c <= 5; c++) {
-      ws.getCell(halfRow, c).border = { bottom: { style: 'thin' } };
+      ws.getCell(hotelsRow > 0 ? hotelsRow : halfRow, c).border = { bottom: { style: 'thin' } };
     }
 
     // Total: SUM across the Total Profit Share row (÷ split when present).
@@ -1483,10 +1591,13 @@ function buildPayrollPreviewSheet(
     r1.getCell(3).numFmt = ACCOUNTING_FMT;
     // Round 9 §28 — a flat labeled reimbursements row replaces mileage reimb
     // for the people configured that way (Jodi Dunn).
+    // Round 10 — some people carry no mileage row at all.
     const r2 = block.reimbursementsLabel
       ? ws.addRow([block.reimbursementsLabel, '', block.reimbursements])
-      : ws.addRow([`mileage reimb: ${block.name} - ${block.miles} miles`, '', block.mileageReimb]);
-    r2.getCell(3).numFmt = ACCOUNTING_FMT;
+      : block.noMileageRow
+        ? null
+        : ws.addRow([`mileage reimb: ${block.name} - ${block.miles} miles`, '', block.mileageReimb]);
+    if (r2) r2.getCell(3).numFmt = ACCOUNTING_FMT;
     // Round 9 §19/§23/§24/§29 — configured extra rows.
     const extraRows = block.extras.map((x) => ({
       extra: x,
@@ -1508,7 +1619,9 @@ function buildPayrollPreviewSheet(
       .map((r) => `${r.extra.kind === 'deduction' ? '-' : '+'}N(C${r.row})`)
       .join('');
     const r3 = ws.addRow(['Total', '', '']);
-    r3.getCell(3).value = { formula: `C${r1.number}+C${r2.number}${extraTerms}` };
+    r3.getCell(3).value = {
+      formula: `C${r1.number}${r2 ? `+C${r2.number}` : ''}${extraTerms}`,
+    };
     r3.getCell(3).numFmt = ACCOUNTING_FMT;
     r3.font = { ...baseFont, bold: true };
     // Round 9 §34 — pre-filled taxes / net when the roster carries them.
@@ -1526,6 +1639,8 @@ function buildPayrollPreviewSheet(
   // interleaved; subcontractor blocks last), then the black section headers.
   for (const entry of model.painterSequence) {
     if (entry.kind === 'hourly') hourlyBlock(entry.block);
+    // Round 10 — subcontractor salary blocks render with the subs.
+    else if (entry.kind === 'salary') salaryBlock(entry.block, TAN);
     else psBlock(entry.block);
   }
 

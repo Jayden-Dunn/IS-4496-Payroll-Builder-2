@@ -160,20 +160,39 @@ export function buildReportRows(
         ? edit.estimator
         : booksEstimator || estimatorFromTitle(ev.event, deps.knownEstimators) || '';
 
-    // K: only from last week's workbook — never from Description.
+    /**
+     * K: the `% Completion` recorded for this AP# in last week's finished
+     * workbook (Slot 8) — never from the Description. Round 10 — a typed
+     * value on the grid wins, so a wrong carry-forward can be corrected in
+     * place before the workbook is downloaded.
+     */
     const lastPaid =
-      apKey && deps.lastWeekMap ? (deps.lastWeekMap.get(apKey) ?? null) : null;
+      edit.lastPaid !== undefined
+        ? edit.lastPaid
+        : apKey && deps.lastWeekMap
+          ? (deps.lastWeekMap.get(apKey) ?? null)
+          : null;
 
-    const qboJobName = nvMatch?.name2 ?? utMatch?.name2 ?? '';
-    const invoiceDate = nvMatch ? nvMatch.date : utMatch ? utMatch.date : null;
+    const qboJobName =
+      edit.qboJobName !== undefined ? edit.qboJobName : (nvMatch?.name2 ?? utMatch?.name2 ?? '');
+    const invoiceDate =
+      edit.invoiceDate !== undefined ? edit.invoiceDate : nvMatch ? nvMatch.date : utMatch ? utMatch.date : null;
 
-    const inQboTime = (apKey && deps.timesheetJobcodeByApKey.get(apKey)) || 'NotClockedIn';
+    const inQboTime =
+      edit.inQboTime !== undefined
+        ? edit.inQboTime
+        : (apKey && deps.timesheetJobcodeByApKey.get(apKey)) || 'NotClockedIn';
 
     const nvTotal = apKey ? deps.nvTotals.get(apKey) : undefined;
     const utTotal = apKey ? deps.utTotals.get(apKey) : undefined;
-    const jobTotalFound = nvTotal !== undefined || utTotal !== undefined;
-    const matchedTotal = nvTotal ?? utTotal ?? 0;
-    const jobTotal: JobTotalValue = jobTotalFound ? matchedTotal : '#N/A';
+    const lookedUpFound = nvTotal !== undefined || utTotal !== undefined;
+    const jobTotalFound = edit.jobTotal !== undefined ? edit.jobTotal !== '#N/A' : lookedUpFound;
+    const matchedTotal =
+      edit.jobTotal !== undefined && edit.jobTotal !== '#N/A'
+        ? edit.jobTotal
+        : (nvTotal ?? utTotal ?? 0);
+    const jobTotal: JobTotalValue =
+      edit.jobTotal !== undefined ? edit.jobTotal : lookedUpFound ? matchedTotal : '#N/A';
 
     // Round 8 §2.2 — Apptivo $ is blank until someone types it; no auto-fill
     // from the job-total lookup, so $ Difference stays blank too (and the
@@ -184,19 +203,21 @@ export function buildReportRows(
     const dollarDiff =
       jobTotalFound && apptivo !== null ? matchedTotal - apptivo : null;
 
-    const dateDiff = invoiceDate && ev.startDate ? dateDiffDays(invoiceDate, ev.startDate) : null;
+    const effectiveStart = edit.startDate !== undefined ? edit.startDate : ev.startDate;
+    const dateDiff = invoiceDate && effectiveStart ? dateDiffDays(invoiceDate, effectiveStart) : null;
 
     return {
       id,
       eventIndex: ev.index,
       included,
-      event: ev.event,
-      startDate: ev.startDate,
-      endDate: ev.endDate,
-      calendar: ev.calendar,
-      attendees: ev.attendees,
-      location: ev.location,
-      description: ev.description,
+      // Round 10 — every displayed column is overridable on the grid.
+      event: edit.event !== undefined ? edit.event : ev.event,
+      startDate: edit.startDate !== undefined ? edit.startDate : ev.startDate,
+      endDate: edit.endDate !== undefined ? edit.endDate : ev.endDate,
+      calendar: edit.calendar !== undefined ? edit.calendar : ev.calendar,
+      attendees: edit.attendees !== undefined ? edit.attendees : ev.attendees,
+      location: edit.location !== undefined ? edit.location : ev.location,
+      description: edit.description !== undefined ? edit.description : ev.description,
       apKey,
       percent,
       suggestedSourceLine: suggestion.line,

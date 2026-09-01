@@ -8,6 +8,7 @@ import { extractApKey } from './apkey';
 import { fmtDate, round2 } from './format';
 import {
   carryDisplayMap,
+  isOfficeCustomer,
   jobDisplayPair,
   salesDisplayMap,
   timesheetDisplayMap,
@@ -89,9 +90,20 @@ export interface PayrollPreviewInput {
   nvSales?: readonly SalesRow[] | null;
   utSales?: readonly SalesRow[] | null;
   lastWeekPbj?: LastWeekPbjRow[] | null;
+  /**
+   * Round 10 — AP# → customer `Name 1`, read off the payroll input's own
+   * `Sales by Rep` sheets. This outranks every other name source, so a job
+   * whose timesheet rows say "ALLPRO OFFICE" still shows its real customer.
+   */
+  customerNameByAp?: ReadonlyMap<string, string> | null;
 }
 
 const byText = (a: string, b: string): number => a.localeCompare(b, 'en', { sensitivity: 'base' });
+
+/** Display name of a painter-sequence entry, whatever kind it is. */
+function sequenceName(e: PainterSectionEntry): string {
+  return e.kind === 'hourly' ? e.block.employeeName : e.kind === 'ps' ? e.block.displayName : e.block.name;
+}
 
 /** First name for alphabetical block ordering. */
 function firstNameOf(name: string): string {
@@ -167,10 +179,13 @@ export function plMetricsByJob(
     }
     return [...set];
   };
+  const laborLabels = labelsFor((m) => m.laborWagesSubs);
+  const laborLabelSet = new Set(laborLabels);
   const metricLabels = {
     income: labelsFor((m) => m.income),
-    materials: labelsFor((m) => m.materials),
-    laborWagesSubs: labelsFor((m) => m.laborWagesSubs),
+    // Round 10 — subcontractor labor is a LABOR line, never a materials line.
+    materials: labelsFor((m) => m.materials).filter((l) => !laborLabelSet.has(l)),
+    laborWagesSubs: laborLabels,
     sundries: labelsFor((m) => m.sundries),
     travel: labelsFor((m) => m.travel),
     mileage: labelsFor((m) => m.mileage),
@@ -273,6 +288,27 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       if (j.analysis.apKey && !pbjJobByAp.has(j.analysis.apKey)) pbjJobByAp.set(j.analysis.apKey, j);
     }
   }
+  /**
+   * Round 10 §17 — AP# → `WO%` from the payroll input's Pivot by Job, across
+   * every section. That column is the source of truth for a job's crew
+   * profit-share percentage, so a band job whose own row left it blank still
+   * finds the percentage the sheet states for that AP#, and only then falls
+   * back to the Settings crew map.
+   */
+  const woPctByAp = new Map<string, number>();
+  for (const c of pbj.customers) {
+    for (const j of c.jobs) {
+      if (j.analysis.apKey && j.analysis.woPct !== null && !woPctByAp.has(j.analysis.apKey)) {
+        woPctByAp.set(j.analysis.apKey, j.analysis.woPct);
+      }
+    }
+  }
+  for (const row of [...pbj.balances, ...pbj.utPayroll]) {
+    if (row.apKey && row.woPct !== null && !woPctByAp.has(row.apKey)) {
+      woPctByAp.set(row.apKey, row.woPct);
+    }
+  }
+
   const carriedIsHourly = (row: ManualSectionRow): boolean =>
     isHourlyJob(row.percent, row.crewLead, `${row.customer} ${row.job}`);
 
@@ -308,6 +344,18 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     displayName: string; // §3.2-2 single-letter tokens stripped
     inactive: boolean;
   }
+  /**
+   * Round 10 — anyone with hours this week is active, full stop. A painter who
+   * was on the inactive roster and shows up on the timesheet has come back, so
+   * no "inactive (*)" marker is drawn and the roster flag is flipped (the App
+   * layer persists `activatedPainters`).
+   */
+  const usernamesWithHours = new Set<string>();
+  for (const r of entityRows) {
+    if (r.hours > 0) usernamesWithHours.add(r.username || `${r.fname} ${r.lname}`);
+  }
+  const activatedPainters = new Set<string>();
+
   const emps = new Map<string, Emp>();
   for (const r of entityRows) {
     const key = r.username || `${r.fname} ${r.lname}`;
@@ -325,8 +373,15 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       group: r.group,
       fullName,
       displayName: stripSingleLetterTokens(fullName),
-      inactive: (dirMatch ? !dirMatch.active : false) || rosterInactive,
+      inactive:
+        !usernamesWithHours.has(key) && ((dirMatch ? !dirMatch.active : false) || rosterInactive),
     });
+    if (usernamesWithHours.has(key) && rosterInactive) {
+      const rosterRow = settings.painterRoster.find(
+        (pr) => !pr.active && (tokensSubset(pr.name, fullName) || tokensSubset(fullName, pr.name)),
+      );
+      if (rosterRow) activatedPainters.add(rosterRow.name);
+    }
   }
 
   // ----- per (employee, job) QB-adjusted hours ------------------------------
@@ -916,7 +971,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       const otTag = seg
         ? payItemTag(seg.payItem)
         : kind === 'weeklyOt'
-          ? ' [OT >40 hrs/wk]'
+          ? ' [OT]'
           : kind === 'dailyOt'
             ? ' [Daily OT]'
             : '';
@@ -1158,6 +1213,12 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     const fullMaterials = (settings.fullMaterialsLeads ?? []).some(
       (n) => tokensSubset(n, leadUpper) || tokensSubset(leadUpper, n),
     );
+    /**
+     * Round 10 — Utah hotel charge-back. On the UT tab a full-materials lead
+     * also carries their own lodging, so the job's P&L travel becomes a
+     * "Hotels" line that comes OUT of the chain.
+     */
+    const hotels = isUt && fullMaterials ? travel : null;
     const halfMaterials =
       e.halfMaterials !== undefined ? e.halfMaterials : fullMaterials ? materials : materials / 2;
     // Round 6 §6.2 — WO% from the Pivot by Job `WO%` cell (Round 9 §15: that
@@ -1165,7 +1226,9 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     // the crew map now always answers, auto-adding if needed). Round 9 §14 —
     // a typed % on the preview band header wins over both.
     const effectiveWoPct =
-      e.woPct !== undefined ? e.woPct : (pivotWoPct ?? leadDefaultWoPct);
+      e.woPct !== undefined
+        ? e.woPct
+        : (pivotWoPct ?? (apKey ? woPctByAp.get(apKey) : undefined) ?? leadDefaultWoPct);
     const pct = effectiveWoPct ?? 0;
     const workOrderOverride =
       e.workOrderOverride !== undefined ? e.workOrderOverride : pivotWoOverride;
@@ -1184,7 +1247,8 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       profitShare,
       workOrderOverride,
       laborWages,
-      halfMaterials,
+      // Round 10 — the hotel charge-back rides with the materials deduction.
+      halfMaterials: halfMaterials + (hotels ?? 0),
       percent: effectivePercent,
       mileage,
     });
@@ -1247,6 +1311,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       sundries,
       halfMaterials,
       fullMaterials,
+      hotels,
       timesheetLabor,
       totalProfitShare,
       splitWith,
@@ -1283,11 +1348,15 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       display.poLabel.trim() ||
       pivotJobText.trim() ||
       (apKey && apKey !== 'OFFICE' ? `AP${apKey}` : '');
+    // Round 10 — Sales by Rep `Name 1` first; then the Pivot by Job customer
+    // (never the office label); then the resolved chain; then the P&L header.
+    const salesName = apKey ? (input.customerNameByAp?.get(apKey)?.trim() ?? '') : '';
+    const pivotName = pivotCustomer.trim();
     const cust =
-      pivotCustomer.trim() && pivotCustomer.trim() !== '(blank)'
-        ? pivotCustomer.trim()
-        : display.customerName.trim() ||
-          (apKey ? (plByJob.has(apKey) ? (pl?.byJob.get(apKey)?.customerName ?? '') : '') : '');
+      salesName ||
+      (pivotName && pivotName !== '(blank)' && !isOfficeCustomer(pivotName) ? pivotName : '') ||
+      display.customerName.trim() ||
+      (apKey ? (plByJob.has(apKey) ? (pl?.byJob.get(apKey)?.customerName ?? '') : '') : '');
     return { poLabel: po, customerName: cust };
   };
 
@@ -1462,7 +1531,14 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     const tsheets = leadEmp && !meta.sub ? buildHourlyBlock(leadEmp, false, true) : null;
     const be = edits[`psb:${blockKey}`] ?? {};
     const total = jobs.reduce((a, j) => a + j.totalAfterSplit, 0);
-    const mileageNew = be.mileageNew !== undefined ? be.mileageNew : 0;
+    /**
+     * Round 10 — `Miles:` on the Input #'s tab drives `Mileage - New`: the
+     * dollar figure is miles × the Settings mileage rate ($0.625/mi by
+     * default). A directly typed dollar amount still wins.
+     */
+    const mileageMiles = be.miles !== undefined ? be.miles : 0;
+    const mileageNew =
+      be.mileageNew !== undefined ? be.mileageNew : round2(mileageMiles * settings.mileageRate);
     const hourlyPay =
       be.hourlyPay !== undefined ? be.hourlyPay : tsheets ? tsheets.totalPay : 0;
     const reimbursements = be.reimbursements !== undefined ? be.reimbursements : 0;
@@ -1483,6 +1559,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       jobs,
       total,
       mileageNew,
+      mileageMiles,
       hourlyPay,
       reimbursements,
       reimbMemo: be.reimbMemo ?? '',
@@ -1508,12 +1585,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
   const painterSequence: PainterSectionEntry[] = [
     ...painters.map((b): PainterSectionEntry => ({ kind: 'hourly', block: b })),
     ...leads.filter((b) => !b.sub).map((b): PainterSectionEntry => ({ kind: 'ps', block: b })),
-  ].sort((a, b) =>
-    byText(
-      firstNameOf(a.kind === 'hourly' ? a.block.employeeName : a.block.displayName),
-      firstNameOf(b.kind === 'hourly' ? b.block.employeeName : b.block.displayName),
-    ),
-  );
+  ].sort((a, b) => byText(firstNameOf(sequenceName(a)), firstNameOf(sequenceName(b))));
   for (const b of leads.filter((x) => x.sub)) painterSequence.push({ kind: 'ps', block: b });
 
   // ----- salary sections ---------------------------------------------------
@@ -1544,6 +1616,8 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       miles,
       mileageReimb,
       sub: entry.sub === true,
+      // Round 10 — these people carry no mileage-reimbursement row at all.
+      noMileageRow: entry.noMileageRow === true,
       ...(entry.reimbursementsLabel ? { reimbursementsLabel: entry.reimbursementsLabel } : {}),
       reimbursements: flatReimb,
       extras,
@@ -1551,7 +1625,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       net: e.net !== undefined ? e.net : (entry.net ?? null),
       total: round2(
         entry.amount +
-          (entry.reimbursementsLabel ? flatReimb : mileageReimb) +
+          (entry.reimbursementsLabel ? flatReimb : entry.noMileageRow ? 0 : mileageReimb) +
           extrasNet(extras),
       ),
     };
@@ -1570,6 +1644,14 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
   const admin = roster.filter((r) => r.section === 'ADMIN').map(salaryBlock).sort(sortSalary);
   const estimators = roster.filter((r) => r.section === 'ESTIMATORS').map(salaryBlock).sort(sortSalary);
   const managers = roster.filter((r) => r.section === 'MANAGER SALARY').map(salaryBlock).sort(sortSalary);
+  // Round 10 — subcontractor salary rows render with the subcontractor crew-lead
+  // bands at the end of the painter sequence, not in their own black section.
+  const subcontractorSalaries = roster
+    .filter((r) => r.section === 'SUBCONTRACTORS')
+    .map(salaryBlock)
+    .sort(sortSalary);
+  // Round 10 — Kristina Benson & co. render right under Pepe's Painting LLC.
+  for (const b of subcontractorSalaries) painterSequence.push({ kind: 'salary', block: b });
 
   // ----- Round 6 §4.10 Inactive Employees tab --------------------------------
   const norm = (s: string): string => s.trim().toLowerCase();
@@ -1583,6 +1665,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
   for (const b of leads) namesWithHours.add(norm(b.leadName));
   for (const entry of painterSequence) {
     if (entry.kind === 'ps') namesWithHours.add(norm(entry.block.leadName));
+    else if (entry.kind === 'salary') namesWithHours.add(norm(entry.block.name));
     else if (entry.block.totalHours > 0) namesWithHours.add(norm(entry.block.employeeName));
   }
 
@@ -1648,6 +1731,9 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     inactiveEmployees,
     inactiveZeroHours,
     newLeadsToAdd: [...newLeadsToAdd.values()].sort((a, b) => byText(a.lead, b.lead)),
+    // Round 10 — roster names that worked this week and should stop being
+    // listed as inactive.
+    activatedPainters: [...activatedPainters].sort(byText),
     dailyOtNotes,
   };
 }
@@ -1685,13 +1771,12 @@ export function mergePayrollPreviews(
   const painterSequence: PainterSectionEntry[] = [
     ...painters.map((b): PainterSectionEntry => ({ kind: 'hourly', block: b })),
     ...leads.filter((b) => !b.sub).map((b): PainterSectionEntry => ({ kind: 'ps', block: b })),
-  ].sort((a, b) =>
-    byText(
-      firstNameOf(a.kind === 'hourly' ? a.block.employeeName : a.block.displayName),
-      firstNameOf(b.kind === 'hourly' ? b.block.employeeName : b.block.displayName),
-    ),
-  );
+  ].sort((a, b) => byText(firstNameOf(sequenceName(a)), firstNameOf(sequenceName(b))));
   for (const b of leads.filter((x) => x.sub)) painterSequence.push({ kind: 'ps', block: b });
+  // Round 10 — subcontractor salary blocks stay with the subcontractor bands.
+  for (const m of [nv, ut]) {
+    for (const e of m.painterSequence) if (e.kind === 'salary') painterSequence.push(e);
+  }
   const byFirstName = (a: SalaryBlock, b: SalaryBlock): number =>
     // Round 9 §26 — subcontractor rows stay at the bottom of the merged section.
     Number(a.sub) - Number(b.sub) || byText(firstNameOf(a.name), firstNameOf(b.name));
@@ -1711,6 +1796,7 @@ export function mergePayrollPreviews(
       ...nv.newLeadsToAdd,
       ...ut.newLeadsToAdd.filter((n) => !seenLead.has(n.lead.trim().toLowerCase())),
     ],
+    activatedPainters: [...new Set([...nv.activatedPainters, ...ut.activatedPainters])].sort(byText),
     dailyOtNotes: [...nv.dailyOtNotes, ...ut.dailyOtNotes],
   };
 }

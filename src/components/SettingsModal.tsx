@@ -1,7 +1,6 @@
 import { useRef, useState } from 'react';
 import {
   DEFAULT_CONDITIONAL_RATE_RULES,
-  DEFAULT_CREW_LEAD_RATE,
   DEFAULT_DAILY_OT_HOURS_THRESHOLD,
   DEFAULT_LEGEND,
   DEFAULT_NV_DAILY_OT_RATE_THRESHOLD,
@@ -37,6 +36,12 @@ import type {
   SavedDirectory,
   WageRateEntry,
 } from '../lib/types';
+
+/**
+ * Round 10 — one grid template for the wage-rate header and its input rows:
+ * name | PS | hrly | comm | wg2 | delete.
+ */
+const WAGE_GRID = 'grid grid-cols-[minmax(0,1fr)_4rem_4rem_4rem_4rem_1.25rem] items-center gap-1.5';
 
 interface SettingsModalProps {
   settings: AppSettings;
@@ -131,7 +136,6 @@ export function SettingsModal({
   /** Round 9 §27 — people exempt from NV daily overtime. */
   const [dailyOtExempt, setDailyOtExempt] = useState<string[]>([...(settings.dailyOtExemptNames ?? [])]);
   const [defaultWage, setDefaultWage] = useState(String(settings.defaultWageRate));
-  const [defaultCrewLead, setDefaultCrewLead] = useState(String(settings.defaultCrewLeadRate));
   const [nvOtRate, setNvOtRate] = useState(String(settings.nvDailyOtRateThreshold));
   const [otHours, setOtHours] = useState(String(settings.dailyOtHoursThreshold));
   const [condRules, setCondRules] = useState<ConditionalRateRule[]>(
@@ -183,7 +187,6 @@ export function SettingsModal({
 
   const defaultPsNum = Number(defaultPs);
   const defaultWageNum = Number(defaultWage);
-  const defaultCrewLeadNum = Number(defaultCrewLead);
   const nvOtRateNum = Number(nvOtRate);
   const otHoursNum = Number(otHours);
   const mileageNum = Number(mileageRate);
@@ -192,7 +195,6 @@ export function SettingsModal({
   const numbersValid =
     Number.isFinite(defaultPsNum) &&
     Number.isFinite(defaultWageNum) &&
-    Number.isFinite(defaultCrewLeadNum) &&
     Number.isFinite(nvOtRateNum) &&
     Number.isFinite(otHoursNum) &&
     Number.isFinite(mileageNum) &&
@@ -230,7 +232,6 @@ export function SettingsModal({
       defaultProfitSharePct: defaultPsNum > 1 ? defaultPsNum / 100 : defaultPsNum,
       wageRates: wages.filter((e) => e.name.trim() !== ''),
       defaultWageRate: defaultWageNum,
-      defaultCrewLeadRate: defaultCrewLeadNum,
       nvDailyOtRateThreshold: nvOtRateNum,
       dailyOtHoursThreshold: otHoursNum,
       conditionalRateRules: condRules
@@ -374,39 +375,83 @@ export function SettingsModal({
             <span className="text-xs text-neutral-400">%</span>
           </div>
 
-          <SectionTitle sub="Five rates per person: PS = profit-share/work-order $/hr, hrly = hourly (T&M) jobs, lead = a crew lead's own hours on profit-share jobs, comm = the &quot;Commercial Hourly&quot; pay type, wg2 = the &quot;Wages 2&quot; pay type. The timesheet's pay item picks the column; blank falls back to PS, then to the defaults below. OT lines are always 1.5× the line rate.">
+          <SectionTitle sub="Four rates per person: PS = profit-share / work-order $/hr (a crew lead&rsquo;s own hours on a job they lead are profit-share hours, so this is their crew-lead rate too), hrly = hourly (T&amp;M) jobs, comm = the &quot;Commercial Hourly&quot; pay type, wg2 = the &quot;Wages 2&quot; pay type. The timesheet&rsquo;s pay item picks the column; blank falls back to PS, then to the fallback below. OT lines are always 1.5&times; the line rate.">
             Wage rates
           </SectionTitle>
-          <div className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
-            <span className="flex-1">Employee</span>
-            <span className="w-16 text-right">PS</span>
-            <span className="w-16 text-right">hrly</span>
-            <span className="w-16 text-right">lead</span>
-            <span className="w-16 text-right">comm</span>
-            <span className="w-16 text-right">wg2</span>
-            <span className="w-4" />
+          {/* Round 10 — header labels and inputs share one grid template, so
+              every label sits directly above its own column. */}
+          <div className={`${WAGE_GRID} mb-1 text-[10px] font-semibold uppercase tracking-wide text-neutral-500`}>
+            <span>Employee</span>
+            <span className="text-right">PS</span>
+            <span className="text-right">hrly</span>
+            <span className="text-right">comm</span>
+            <span className="text-right">wg2</span>
+            <span />
           </div>
           <div className="flex max-h-64 flex-col gap-1 overflow-y-auto rounded border border-neutral-100 p-1">
-            {wages.map((e, i) => (
-              <div key={i} className="flex items-center gap-1.5">
-                <input className="flex-1 rounded border border-neutral-300 px-1.5 py-1 text-xs" value={e.name} placeholder="Employee" onChange={(ev) => setWages((prev) => prev.map((x, j) => (j === i ? { ...x, name: ev.target.value } : x)))} />
-                <input className="w-16 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs" value={e.rate} onChange={(ev) => { const n = Number(ev.target.value); if (Number.isFinite(n)) setWages((prev) => prev.map((x, j) => (j === i ? { ...x, rate: n } : x))); }} />
-                <input className="w-16 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs" value={e.hourlyRate ?? ''} placeholder="hrly" onChange={(ev) => { const t = ev.target.value.trim(); const n = Number(t); setWages((prev) => prev.map((x, j) => (j === i ? { ...x, ...(t === '' || !Number.isFinite(n) ? { hourlyRate: undefined } : { hourlyRate: n }) } : x))); }} />
-                <input className="w-16 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs" value={e.crewLeadRate ?? ''} placeholder="lead" title="Crew-lead rate on their own timesheet hours on profit-share jobs" onChange={(ev) => { const t = ev.target.value.trim(); const n = Number(t); setWages((prev) => prev.map((x, j) => (j === i ? { ...x, ...(t === '' || !Number.isFinite(n) ? { crewLeadRate: undefined } : { crewLeadRate: n }) } : x))); }} />
-                <input className="w-16 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs" value={e.commercialHourlyRate ?? ''} placeholder="comm" title="Rate on timesheet lines whose pay type is Commercial Hourly" onChange={(ev) => { const t = ev.target.value.trim(); const n = Number(t); setWages((prev) => prev.map((x, j) => (j === i ? { ...x, ...(t === '' || !Number.isFinite(n) ? { commercialHourlyRate: undefined } : { commercialHourlyRate: n }) } : x))); }} />
-                <input className="w-16 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs" value={e.wages2Rate ?? ''} placeholder="wg2" title="Rate on timesheet lines whose pay type is Wages 2" onChange={(ev) => { const t = ev.target.value.trim(); const n = Number(t); setWages((prev) => prev.map((x, j) => (j === i ? { ...x, ...(t === '' || !Number.isFinite(n) ? { wages2Rate: undefined } : { wages2Rate: n }) } : x))); }} />
-                <button type="button" className="text-neutral-400 hover:text-red-600" onClick={() => setWages((prev) => prev.filter((_, j) => j !== i))} aria-label="Remove">🗑</button>
-              </div>
-            ))}
+            {wages.map((e, i) => {
+              const numCell = (
+                key: 'hourlyRate' | 'commercialHourlyRate' | 'wages2Rate',
+                placeholder: string,
+                title: string,
+              ): JSX.Element => (
+                <input
+                  className="w-full rounded border border-neutral-300 px-1.5 py-1 text-right text-xs"
+                  value={e[key] ?? ''}
+                  placeholder={placeholder}
+                  title={title}
+                  onChange={(ev) => {
+                    const t = ev.target.value.trim();
+                    const n = Number(t);
+                    setWages((prev) =>
+                      prev.map((x, j) =>
+                        j === i
+                          ? { ...x, [key]: t === '' || !Number.isFinite(n) ? undefined : n }
+                          : x,
+                      ),
+                    );
+                  }}
+                />
+              );
+              return (
+                <div key={i} className={WAGE_GRID}>
+                  <input
+                    className="w-full rounded border border-neutral-300 px-1.5 py-1 text-xs"
+                    value={e.name}
+                    placeholder="Employee"
+                    onChange={(ev) =>
+                      setWages((prev) => prev.map((x, j) => (j === i ? { ...x, name: ev.target.value } : x)))
+                    }
+                  />
+                  <input
+                    className="w-full rounded border border-neutral-300 px-1.5 py-1 text-right text-xs"
+                    value={e.rate}
+                    title="Profit-share / work-order rate — also the rate a crew lead earns on their own jobs"
+                    onChange={(ev) => {
+                      const n = Number(ev.target.value);
+                      if (Number.isFinite(n)) setWages((prev) => prev.map((x, j) => (j === i ? { ...x, rate: n } : x)));
+                    }}
+                  />
+                  {numCell('hourlyRate', 'hrly', 'Rate on hourly (T&M) jobs')}
+                  {numCell('commercialHourlyRate', 'comm', 'Rate on timesheet lines whose pay type is Commercial Hourly')}
+                  {numCell('wages2Rate', 'wg2', 'Rate on timesheet lines whose pay type is Wages 2')}
+                  <button
+                    type="button"
+                    className="text-neutral-400 hover:text-red-600"
+                    onClick={() => setWages((prev) => prev.filter((_, j) => j !== i))}
+                    aria-label="Remove"
+                  >
+                    🗑
+                  </button>
+                </div>
+              );
+            })}
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <button type="button" className="btn text-xs" onClick={() => setWages((prev) => [...prev, { name: '', rate: 18 }])}>+ Add employee</button>
             <button type="button" className="btn text-xs" onClick={() => setWages(DEFAULT_WAGE_RATES.map((e) => ({ ...e })))}>Reset</button>
             <span className="ml-auto text-xs">Fallback rate $:</span>
             <input className="w-14 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs" value={defaultWage} onChange={(e) => setDefaultWage(e.target.value)} />
-            <span className="text-xs">Fallback crew-lead $:</span>
-            <input className="w-14 rounded border border-neutral-300 px-1.5 py-1 text-right text-xs" value={defaultCrewLead} title="Used when a lead has no 'lead' rate of their own" onChange={(e) => setDefaultCrewLead(e.target.value)} />
-            <button type="button" className="btn text-xs" onClick={() => setDefaultCrewLead(String(DEFAULT_CREW_LEAD_RATE))}>Reset</button>
           </div>
 
           <SectionTitle sub="Daily overtime for NV: hours past the daily threshold pay 1.5× — but only for people at or below the base-rate threshold. Weekly 40-hour OT is unaffected.">
@@ -517,7 +562,7 @@ export function SettingsModal({
             <button type="button" className="btn text-xs" onClick={() => setLineItems(DEFAULT_PAYROLL_LINE_ITEMS.map((e) => ({ ...e })))}>Reset</button>
           </div>
 
-          <SectionTitle sub="These crew leads / subcontractors are charged for ALL of a job's materials instead of half — the band row reads &quot;- Materials&quot;.">
+          <SectionTitle sub="These crew leads / subcontractors are charged for ALL of a job's materials instead of half — the band row reads &quot;- ALL Materials&quot;. Seeded with Color Enterprises LLC and Pepe&#39;s Painting LLC.">
             Full-materials leads
           </SectionTitle>
           <div className="flex flex-col gap-1">
@@ -685,6 +730,9 @@ export function SettingsModal({
                   <option>ADMIN</option>
                   <option>ESTIMATORS</option>
                   <option>MANAGER SALARY</option>
+                  {/* Round 10 — subcontractor rows render with the sub crew-lead
+                      bands (under Pepe's Painting LLC), not in a black section. */}
+                  <option>SUBCONTRACTORS</option>
                 </select>
                 <select className="rounded border border-neutral-300 px-1 py-1 text-xs" value={e.entity} title="Entity" onChange={(ev) => setRoster((prev) => prev.map((x, j) => (j === i ? { ...x, entity: ev.target.value as EntityCode } : x)))}>
                   <option>NV</option>

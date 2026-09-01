@@ -675,6 +675,19 @@ export default function App(): JSX.Element {
     return m;
   }, [parsed.completedPercents]);
 
+  /**
+   * Round 10 — AP# → estimator fill hex on the payroll side, from Slot A's own
+   * Estimator column and the Settings palette. Colors the Input #'s PO cells.
+   */
+  const payrollEstimatorColorByAp = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const [ap, est] of payrollEstimatorByApKey) {
+      const hex = colorByEstimator.get(est);
+      if (hex) m.set(ap, hex);
+    }
+    return m;
+  }, [payrollEstimatorByApKey, colorByEstimator]);
+
   const payrollApKeys = useMemo(() => {
     const set = new Set<string>();
     for (const j of parsed.completedPercents?.jobs ?? []) if (j.apKey) set.add(j.apKey);
@@ -908,6 +921,8 @@ export default function App(): JSX.Element {
       nvSales: null,
       utSales: null,
       lastWeekPbj: parsed.completedPercents?.lastWeekPbj ?? null,
+      // Round 10 — customer names come from the payroll input's Sales by Rep.
+      customerNameByAp: parsed.completedPercents?.customerNameByAp ?? null,
     });
   }, [
     createdPayroll,
@@ -951,6 +966,8 @@ export default function App(): JSX.Element {
       nvSales: null,
       utSales: null,
       lastWeekPbj: parsed.completedPercents?.lastWeekPbj ?? null,
+      // Round 10 — customer names come from the payroll input's Sales by Rep.
+      customerNameByAp: parsed.completedPercents?.customerNameByAp ?? null,
     });
   }, [
     createdPayroll,
@@ -993,6 +1010,7 @@ export default function App(): JSX.Element {
           inactiveEmployees: [],
           inactiveZeroHours: [],
           newLeadsToAdd: [],
+          activatedPainters: [],
           dailyOtNotes: [],
         },
       previewUt: payrollPreviewUt,
@@ -1044,6 +1062,34 @@ export default function App(): JSX.Element {
         : `New crew leads added at default 38%: ${names}`,
     );
   }, [newLeadsToAdd, settings]);
+
+  /**
+   * Round 10 — a painter with hours is active. The preview reports who that
+   * applies to and the App layer flips the persisted roster flag, so the
+   * "inactive (*)" marker does not come back next week.
+   */
+  const activatedPainters = payrollPreviewAll?.activatedPainters;
+  useEffect(() => {
+    if (!activatedPainters || activatedPainters.length === 0) return;
+    const names = new Set(activatedPainters.map((n) => n.trim().toLowerCase()));
+    if (!settings.painterRoster.some((p) => !p.active && names.has(p.name.trim().toLowerCase()))) {
+      return;
+    }
+    const next: AppSettings = {
+      ...settings,
+      painterRoster: settings.painterRoster.map((p) =>
+        names.has(p.name.trim().toLowerCase()) ? { ...p, active: true } : p,
+      ),
+    };
+    setSettings(next);
+    saveSettings(next);
+    void persistAppSettings(next);
+    setSettingsToast(
+      activatedPainters.length === 1
+        ? `${activatedPainters[0]} has hours — marked active`
+        : `${activatedPainters.length} painters have hours — marked active`,
+    );
+  }, [activatedPainters, settings]);
 
   const estimatorOptions = useMemo(() => {
     const set = new Set<string>(legendOrder);
@@ -1561,7 +1607,12 @@ export default function App(): JSX.Element {
                 onEdit={onPayrollEdit}
               />
             ) : tab === 'inputNums' ? (
-              <InputNumsTab model={payrollPreviewAll} onEdit={onPayrollEdit} />
+              <InputNumsTab
+                model={payrollPreviewAll}
+                onEdit={onPayrollEdit}
+                mileageRate={settings.mileageRate}
+                estimatorColorByAp={payrollEstimatorColorByAp}
+              />
             ) : tab === 'notes' ? (
               <NotesTab model={payrollPreviewAll} mileageRate={settings.mileageRate} onEdit={onPayrollEdit} />
             ) : tab === 'final' ? (
@@ -1693,6 +1744,10 @@ function completedFromSession(
   }
   return {
     timesheet,
+    // Round 10 — the session's own resolved customer names, keyed by AP#.
+    customerNameByAp: new Map(
+      jobs.filter((j) => j.apKey && j.customer).map((j) => [j.apKey, j.customer] as const),
+    ),
     jobs,
     dates: pbj.dates,
     dateIsos: pbj.dateIsos,

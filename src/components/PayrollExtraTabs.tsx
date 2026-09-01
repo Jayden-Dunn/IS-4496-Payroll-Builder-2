@@ -3,7 +3,14 @@
  * (same shared model as Payroll Preview). Core = data content + recognizable sketch.
  */
 import type { CSSProperties, ReactNode } from 'react';
-import { fmtAccounting, formatCrewLeadWoNote, isDarkColor, parseMoneyInput, parsePercentInput } from '../lib/format';
+import {
+  fmtAccounting,
+  formatCrewLeadWoNote,
+  isDarkColor,
+  negativeClass,
+  parseMoneyInput,
+  parsePercentInput,
+} from '../lib/format';
 import { CellInput } from './CellInput';
 import { buildJournalEntryRows } from '../lib/journalEntry';
 import { hourSplitRows } from '../lib/payroll';
@@ -92,8 +99,12 @@ function jobCellStyle(hex: string | null): CSSProperties | undefined {
   return { backgroundColor: `#${hex}`, color: isDarkColor(hex) ? '#fff' : '#000' };
 }
 
-function money(n: number): string {
-  return fmtAccounting(n);
+/**
+ * Round 10 — a money value: parentheses come from `fmtAccounting`, red comes
+ * from `negativeClass`, so every negative on every payroll tab reads the same.
+ */
+function money(n: number): JSX.Element {
+  return <span className={negativeClass(n)}>{fmtAccounting(n)}</span>;
 }
 
 function pctLabel(p: number | null): string {
@@ -108,6 +119,7 @@ function PsChainBody({
   onEdit,
   showGrossWages,
   hideBooksRows,
+  showTravel,
   nameStyle,
   highlightFirstJob,
 }: {
@@ -122,6 +134,8 @@ function PsChainBody({
    * % Materials). They stay on the main Payroll Preview.
    */
   hideBooksRows?: boolean;
+  /** Round 10 — the Travel row is UT-only. */
+  showTravel?: boolean;
   nameStyle?: CSSProperties;
   highlightFirstJob?: boolean;
 }): JSX.Element {
@@ -186,7 +200,7 @@ function PsChainBody({
             ['-Mileage', (j: PsBlock['jobs'][number]) => money(j.mileage)],
             [
               // Round 9 §32 — full-materials leads are charged all of it.
-              block.jobs.some((j) => j.fullMaterials) ? '- Materials' : '-½ Materials',
+              block.jobs.some((j) => j.fullMaterials) ? '- ALL Materials' : '-½ Materials',
               (j: PsBlock['jobs'][number]) => money(j.halfMaterials),
             ],
           ] as [string, (j: PsBlock['jobs'][number]) => string][]
@@ -214,6 +228,17 @@ function PsChainBody({
             ))}
           </tr>
         ))}
+        {/* Round 10 §UT — hotel charge-back, when the band carries one. */}
+        {jobs.some((j) => j.hotels !== null) && (
+          <tr>
+            {label('- Hotels')}
+            {jobs.map((j) => (
+              <td key={j.jobRowId} className="xcell text-right">
+                {j.hotels === null ? '' : money(j.hotels)}
+              </td>
+            ))}
+          </tr>
+        )}
         <tr className="font-semibold border-t border-neutral-400">
           {label('Total Profit Share')}
           {jobs.map((j) => {
@@ -256,19 +281,23 @@ function PsChainBody({
             {money(block.total)}
           </td>
         </tr>
+        {/* Round 10 — one column per job, like every other chain row. */}
         <tr>
           {label('Mileage - New')}
-          <td className="xcell text-right" colSpan={Math.max(jobs.length, 1)}>
-            {editable && onEdit ? (
-              <NumCell value={block.mileageNew} onCommit={(n) => onEdit(`psb:${block.key}`, { mileageNew: n ?? 0 })} />
-            ) : (
-              money(block.mileageNew)
-            )}
-          </td>
+          {jobs.map((j, i) => (
+            <td key={j.jobRowId} className="xcell text-right">
+              {i > 0 ? null : editable && onEdit ? (
+                <NumCell value={block.mileageNew} onCommit={(n) => onEdit(`psb:${block.key}`, { mileageNew: n ?? 0 })} />
+              ) : (
+                money(block.mileageNew)
+              )}
+            </td>
+          ))}
         </tr>
+        {/* Round 10 — one cell immediately right of the label. */}
         <tr className="font-semibold">
           <td className="xcell w-40">Hourly Pay</td>
-          <td className="xcell text-right" colSpan={Math.max(jobs.length, 1)} style={HOURLY_PAY_YELLOW}>
+          <td className="xcell text-right" style={HOURLY_PAY_YELLOW}>
             {editable && onEdit ? (
               <NumCell
                 value={block.hourlyPay}
@@ -278,6 +307,7 @@ function PsChainBody({
               money(block.hourlyPay)
             )}
           </td>
+          {jobs.length > 1 && <td className="xcell" colSpan={jobs.length - 1} />}
         </tr>
         <tr>
           {label('Reimbursements')}
@@ -383,15 +413,7 @@ function PsChainBody({
             </td>
           ))}
         </tr>
-        {/* Round 8 §8.5 — informational, directly beneath Materials. */}
-        <tr>
-          {label('Travel')}
-          {jobs.map((j) => (
-            <td key={j.jobRowId} className="xcell text-right">
-              {money(j.travel)}
-            </td>
-          ))}
-        </tr>
+        {/* Round 10 — Travel is UT-only and sits below QB Labor-Wages-Subs. */}
         <tr>
           {label('QB Labor-Wages-Subs')}
           {jobs.map((j) => (
@@ -400,6 +422,16 @@ function PsChainBody({
             </td>
           ))}
         </tr>
+        {showTravel && (
+          <tr>
+            {label('Travel')}
+            {jobs.map((j) => (
+              <td key={j.jobRowId} className="xcell text-right">
+                {money(j.travel)}
+              </td>
+            ))}
+          </tr>
+        )}
         <tr>
           {label('Mileage in Books')}
           {jobs.map((j) => (
@@ -628,7 +660,7 @@ function SalaryReadOnly({
             <td className="xcell" />
             <td className="xcell text-right">{money(block.reimbursements)}</td>
           </tr>
-        ) : (
+        ) : block.noMileageRow ? null : (
           <tr>
             <td className="xcell">mileage reimb</td>
             <td className="xcell text-right">{block.miles} mi</td>
@@ -775,6 +807,14 @@ function PainterSequence({
             blankTaxes={blankTaxes}
             notesLayout={notesMode}
           />
+        ) : entry.kind === 'salary' ? (
+          /* Round 10 — a subcontractor's salary block, in with the subs. */
+          <SalaryReadOnly
+            key={entry.block.key}
+            block={entry.block}
+            weekRange={model.weekRange}
+            headerStyle={TAN}
+          />
         ) : notesMode ? (
           <div key={entry.block.key} className="mb-4">
             <LeadMaterialsTable block={entry.block} />
@@ -798,6 +838,7 @@ function PainterSequence({
               onEdit={onEdit}
               showGrossWages={showGrossWages}
               hideBooksRows={hideBooksRows}
+              showTravel={model.entity === 'UT'}
             />
             {entry.block.tsheets && (
               <div className="mb-4 ml-4 max-w-3xl">
@@ -910,9 +951,15 @@ export function ManagementReportTab({
 export function InputNumsTab({
   model,
   onEdit,
+  mileageRate = 0.625,
+  estimatorColorByAp,
 }: {
   model: PayrollPreviewModel | null;
   onEdit: OnEdit;
+  /** Round 10 — $/mile applied to the Miles cell. */
+  mileageRate?: number;
+  /** Round 10 — AP# → estimator fill hex for the PO#'s cells. */
+  estimatorColorByAp?: ReadonlyMap<string, string>;
 }): JSX.Element {
   if (!model) return <EmptyPayroll label="Input #'s needs Payroll Preview" />;
   return (
@@ -943,15 +990,26 @@ export function InputNumsTab({
                   <td className="xcell" style={HEADER_GRAY}>
                     PO #&apos;s:
                   </td>
-                  {jobs.map((j, i) => (
-                    <td
-                      key={j.jobRowId}
-                      className="xcell text-right text-[11px] font-bold"
-                      style={i === 0 ? HOURLY_PAY_YELLOW : HEADER_GRAY}
-                    >
-                      {j.jobShort}
-                    </td>
-                  ))}
+                  {/* Round 10 — the PO cell wears the job estimator's color. */}
+                  {jobs.map((j, i) => {
+                    const hex = j.apKey ? estimatorColorByAp?.get(j.apKey) : undefined;
+                    return (
+                      <td
+                        key={j.jobRowId}
+                        className="xcell text-right text-[11px] font-bold"
+                        style={
+                          hex
+                            ? { backgroundColor: `#${hex}`, color: isDarkColor(hex) ? '#fff' : '#000' }
+                            : i === 0
+                              ? HOURLY_PAY_YELLOW
+                              : HEADER_GRAY
+                        }
+                        title={j.apKey ? `AP${j.apKey}` : undefined}
+                      >
+                        {j.jobShort}
+                      </td>
+                    );
+                  })}
                 </tr>
                 <tr>
                   <td className="xcell">WO Amount/Contract Override:</td>
@@ -1020,12 +1078,20 @@ export function InputNumsTab({
                     <MemoCell value={block.deductMemo} onCommit={(t) => onEdit(`psb:${block.key}`, { deductMemo: t })} />
                   </td>
                 </tr>
+                {/* Round 10 — miles here × the rate = `Mileage - New` on the
+                    Profitshare Output tab. */}
                 <tr>
-                  <td className="xcell">Miles:</td>
+                  <td className="xcell">Miles: (@ ${mileageRate.toFixed(3)}/mi)</td>
                   <td className="xcell text-right">
-                    <NumCell value={block.mileageNew} onCommit={(n) => onEdit(`psb:${block.key}`, { mileageNew: n ?? 0 })} />
+                    <NumCell
+                      value={block.mileageMiles}
+                      onCommit={(n) => onEdit(`psb:${block.key}`, { miles: n ?? 0, mileageNew: undefined })}
+                    />
                   </td>
-                  {jobs.slice(1).map((j) => (
+                  <td className="xcell text-right text-neutral-500">
+                    = {money(block.mileageNew)}
+                  </td>
+                  {jobs.slice(2).map((j) => (
                     <td key={j.jobRowId} className="xcell" />
                   ))}
                 </tr>
@@ -1047,7 +1113,7 @@ export function NotesTab({
 }): JSX.Element {
   if (!model) return <EmptyPayroll label="Notes needs Payroll Preview" />;
   const gross = model.painterSequence.reduce(
-    (s, e) => s + (e.kind === 'hourly' ? e.block.totalPay : e.block.totalPay),
+    (s, e) => s + (e.kind === 'salary' ? e.block.total : e.block.totalPay),
     0,
   ) +
     model.office.reduce((s, b) => s + b.totalPay, 0) +
@@ -1218,7 +1284,8 @@ export function JobsListTab({
     }
   }
   for (const entry of model.painterSequence) {
-    const block = entry.kind === 'hourly' ? entry.block : entry.block.tsheets;
+    const block =
+      entry.kind === 'hourly' ? entry.block : entry.kind === 'ps' ? entry.block.tsheets : null;
     if (!block) continue;
     for (const l of block.lines) {
       if (!l.apKey || l.apKey === 'OFFICE') continue;

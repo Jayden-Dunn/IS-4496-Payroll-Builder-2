@@ -10,6 +10,9 @@ import {
   isPercentText,
   matchesSetRate,
   matchesSubbedOut,
+  NEGATIVE_TEXT_CLASS,
+  negativeClass,
+  parseMoneyInput,
   parsePercentInput,
   percentText,
 } from './format';
@@ -25,6 +28,7 @@ import { isExclusionGray, resolveThemeTintToRgb } from './fills';
 import type { SalesByCustMirrorRow } from './mirrorTabs';
 import {
   parseDate,
+  parseLastWeek,
   parseLastWeekPivotByJob,
   parseNumberLoose,
   type LastWeekPbjRow,
@@ -68,10 +72,17 @@ import { applyPivotView, EMPTY_PIVOT_VIEW } from './pivotView';
 import {
   baseApKey,
   cleanEventTitle,
+  isOfficeCustomer,
   jobDisplayPair,
   type JobDisplaySources,
 } from './jobNames';
-import { defaultSettings, DEFAULT_LEGEND, DEFAULT_PAINTER_ROSTER } from './settings';
+import {
+  applySettingsMigrations,
+  defaultSettings,
+  parseSettings,
+  DEFAULT_LEGEND,
+  DEFAULT_PAINTER_ROSTER,
+} from './settings';
 import {
   dollarDiffIsFlagged,
   duplicateInQboValues,
@@ -714,15 +725,14 @@ export function runSelfTests(): boolean {
     false,
   );
 
-  // --- Round 8 §9.1: three crew-lead rates -------------------------------------------------------
+  // --- Round 8 §9.1 / Round 10: hourly vs profit-share rates ------------------
   const r9 = {
     wageRates: [
-      { name: 'Antonio Zuniga', rate: 16, hourlyRate: 27, crewLeadRate: 21 },
+      { name: 'Antonio Zuniga', rate: 16, hourlyRate: 27 },
       { name: 'Rafael Aguilar', rate: 25 },
       { name: 'Hilda Ruiz', rate: 16 },
     ],
     defaultWageRate: 18,
-    defaultCrewLeadRate: 18,
     prevailingWagePatterns: ['SNRHA'],
     prevailingMinRate: 19.18,
   };
@@ -731,15 +741,17 @@ export function runSelfTests(): boolean {
     resolveLineRate('ANTONIO ZUNIGA', 'AP24000 T&M repair', true, { ...r9, isCrewLead: true }).rate,
     27,
   );
+  // Round 10 — a lead on a job they lead is on a profit-share job, so the PS
+  // rate IS their crew-lead rate; the separate rate column is gone.
   check(
-    "§9.1 lead's T-SHEETS on a profit-share job → crew-lead rate",
+    "Round 10 lead's T-SHEETS on a profit-share job → their PS rate",
     resolveLineRate('ANTONIO ZUNIGA', 'AP24314 Ext', false, { ...r9, isCrewLead: true }),
-    { rate: 21, defaulted: false, prevailing: false, fromCrewLeadRate: true },
+    { rate: 16, defaulted: false, prevailing: false, fromCrewLeadRate: true },
   );
   check(
-    '§9.1 lead without a crewLeadRate falls back to the global 18',
+    'Round 10 lead with only a PS rate on file → that rate, not a global lead rate',
     resolveLineRate('RAFAEL AGUILAR', 'AP24314 Ext', false, { ...r9, isCrewLead: true }).rate,
-    18,
+    25,
   );
   check(
     '§9.1 helper on a profit-share job → their painter rate',
@@ -766,7 +778,6 @@ export function runSelfTests(): boolean {
     resolveLineRate('Carlos Ruiz Cruz', 'AP24000 repair', true, {
       wageRates: defaultSettings().wageRates,
       defaultWageRate: 18,
-      defaultCrewLeadRate: 18,
       prevailingWagePatterns: ['SNRHA'],
       prevailingMinRate: 19.18,
       isCrewLead: true,
@@ -778,7 +789,6 @@ export function runSelfTests(): boolean {
     resolveLineRate('Carlos Ruiz Cruz', 'AP24314 Ext', false, {
       wageRates: defaultSettings().wageRates,
       defaultWageRate: 18,
-      defaultCrewLeadRate: 18,
       prevailingWagePatterns: ['SNRHA'],
       prevailingMinRate: 19.18,
       isCrewLead: true,
@@ -1179,6 +1189,66 @@ export function runSelfTests(): boolean {
     0,
   );
 
+
+  // --- Round 10 --------------------------------------------------------------
+  check(
+    'R10 accounting negatives parse back from parentheses',
+    [parseMoneyInput('(39.90)'), parseMoneyInput('$1,234.50'), parseMoneyInput('(1,000)')],
+    [-39.9, 1234.5, -1000],
+  );
+  check(
+    'R10 negatives carry the red class, positives do not',
+    [negativeClass(-1), negativeClass(0), negativeClass(12), negativeClass(null)],
+    [NEGATIVE_TEXT_CLASS, '', '', ''],
+  );
+  check(
+    'R10 percents filename leads with the % symbol',
+    percentsExportFilename(new Date(2026, 7, 14)),
+    '% of Completion 08-14-2026.xlsx',
+  );
+  check(
+    'R10 the office jobcode is not a customer name',
+    [isOfficeCustomer('ALLPRO OFFICE'), isOfficeCustomer('Allpro  Office'), isOfficeCustomer('Allpro Painters')],
+    [true, true, false],
+  );
+  check(
+    'R10 Sales by Rep Name 1 outranks the timesheet customer',
+    jobDisplayPair('24473', {
+      timesheetByAp: new Map([['24473', { customer: 'ALLPRO OFFICE', job: 'AP24473 Int' }]]),
+      carryByAp: new Map(),
+      salesByAp: new Map([['24473', { name1: 'Cerris Systems', name2: 'AP24473 Int' }]]),
+      pl: null,
+    }),
+    { poLabel: 'AP24473 Int', customerName: 'Cerris Systems', usedBaseKey: false, unresolved: false },
+  );
+  check(
+    'R10 "Regular Pay Overtime" is overtime at the regular rate slot',
+    classifyPayItem('Regular Pay Overtime'),
+    { kind: 'overtime', rate: 'regular', reason: 'weekly' },
+  );
+  check(
+    'R10 last % paid takes the LAST non-blank % for an AP#',
+    [
+      ...parseLastWeek({
+        sheets: [
+          {
+            name: 'TimeNavi Export',
+            rows: [
+              ['AP#', '% Completion'],
+              ['24473', 0.5],
+              ['24500', 0.9],
+              ['24473', 0.75],
+            ],
+          },
+        ],
+      }).entries(),
+    ],
+    [
+      ['24473', 0.75],
+      ['24500', 0.9],
+    ],
+  );
+
   // --- Round 9 §16/§18 — pay items drive the rate slot and the overtime ------
   check('payItem: Regular Pay is straight time on the PS rate', classifyPayItem('Regular Pay'), {
     kind: 'regular',
@@ -1261,22 +1331,20 @@ export function runSelfTests(): boolean {
     21,
   );
   check(
-    '§13 crew-lead pay item selects the crew-lead rate on a PS job',
+    '§13 crew-lead pay item is tagged as crew-lead hours (paid at the PS rate)',
     resolveWageRate('Samuel Brewster', {
       wageRates: r9Rates,
       defaultWageRate: 18,
-      defaultCrewLeadRate: 18,
       hourlyJob: false,
       payRateKind: 'crewLead',
-    }).kind,
-    'crewLead',
+    }),
+    { rate: 18, defaulted: false, kind: 'crewLead' },
   );
   check(
     '§9.1 still wins: an HOURLY job pays the hourly rate even on a crew-lead item',
     resolveWageRate('Xavier Green', {
       wageRates: r9Rates,
       defaultWageRate: 18,
-      defaultCrewLeadRate: 30,
       hourlyJob: true,
       payRateKind: 'crewLead',
     }).rate,
@@ -1346,6 +1414,7 @@ export function runSelfTests(): boolean {
   const slotAPivot = buildPayrollPivotByJob({
     completed: {
       timesheet: { rows: [], lunchRemoved: 0 },
+      customerNameByAp: new Map(),
       jobs: slotAJobs,
       dates: [],
       dateIsos: ['2026-08-03'],
@@ -1495,6 +1564,76 @@ export function runSelfTests(): boolean {
     knownEstimators: new Set(['MH']),
     leadCtx: { directory: [], crewGroups: [], subcontractors: [] },
   });
+  /**
+   * Round 10 §UT — a full-materials subcontractor on the Utah tab pays their
+   * own lodging: the job's P&L travel becomes a "- Hotels" charge-back that
+   * comes out of the chain, on top of ALL (not half) of the materials.
+   */
+  const utHotelsPreview = buildPayrollPreview({
+    pbj: {
+      ...ownerPbj,
+      customers: [],
+      grandTotal: 0,
+      grandByDate: {},
+      balances: [],
+      utPayroll: [
+        carriedRow({ apKey: '27000', crewLead: 'COLOR ENTERPRISES LLC', percent: 1, woPct: 0.53 }),
+      ],
+    },
+    enriched: [],
+    reportRows: [],
+    pl: null,
+    plUt: {
+      byJob: new Map([
+        [
+          '27000',
+          {
+            income: 10000,
+            materials: 1000,
+            laborWagesSubs: 200,
+            mileage: 0,
+            sundries: 0,
+            travel: 300,
+            plJobHeader: 'AP27000 Ext',
+            customerName: 'Utah Cust',
+            plEntity: 'UT',
+          },
+        ],
+      ]),
+      duplicateColumns: [],
+      columnHeaders: [],
+      accountRows: [],
+      entity: 'UT',
+      unmappedCogsRows: [],
+    },
+    entity: 'UT',
+    directory: [],
+    settings: {
+      ...ownerSettings,
+      painterRoster: [],
+      subcontractors: ['Color Enterprises LLC'],
+      fullMaterialsLeads: ['Color Enterprises LLC'],
+      profitShare: [{ lead: 'Color Enterprises LLC', pct: 0.53 }],
+    },
+    payDate: new Date(2026, 6, 10),
+    edits: {},
+    qbHours: {},
+    knownEstimators: new Set(['MH']),
+    leadCtx: { directory: [], crewGroups: [], subcontractors: ['Color Enterprises LLC'] },
+  });
+  const utJob = utHotelsPreview.leads[0]?.jobs[0];
+  check(
+    'R10 UT full-materials band: ALL materials + a hotels charge-back',
+    [utJob?.fullMaterials, utJob?.halfMaterials, utJob?.hotels],
+    [true, 1000, 300],
+  );
+  check(
+    'R10 UT chain subtracts BOTH all-materials and hotels',
+    round2ish(utJob?.totalProfitShare ?? 0),
+    // 10000 × 53% × 100% − 200 labor − 1000 materials − 300 hotels
+    round2ish(10000 * 0.53 - 200 - 1000 - 300),
+  );
+
   check(
     '§6 lead with only carried jobs still gets a block',
     carriedOnlyPreview.leads.map((l) => l.leadName),
@@ -1958,9 +2097,10 @@ export function runSelfTests(): boolean {
     `IFERROR(INDEX('TimeNavi Export'!I:I, MATCH(F5, 'TimeNavi Export'!H:H, 0)), "")`,
   );
   check(
-    '§13 percents filename spells Percentages, no % character',
+    // Round 10 — the % symbol leads and "Percentages" is gone.
+    '§13 percents filename leads with the % symbol',
     percentsExportFilename(new Date(2026, 7, 14)),
-    '08-14-2026 Percentages of Completion.xlsx',
+    '% of Completion 08-14-2026.xlsx',
   );
   check(
     '§13 payroll filename has no %',
@@ -1968,11 +2108,27 @@ export function runSelfTests(): boolean {
     false,
   );
   check(
-    "§10 Input #'s Hourly Pay / Deductions cells (first lead)",
+    // Round 10 — the ref map also carries Reimbursements, both note cells and
+    // the Miles cell, so the Profitshare Output can reference them live.
+    "§10 Input #'s cell refs (first two leads)",
     inputNumbersCellRefs(2),
     [
-      { hourlyCell: 'C10', deductCell: 'C11' },
-      { hourlyCell: 'C21', deductCell: 'C22' },
+      {
+        hourlyCell: 'C10',
+        deductCell: 'C11',
+        reimbCell: 'C9',
+        reimbNoteCell: 'D9',
+        deductNoteCell: 'D11',
+        milesCell: 'C12',
+      },
+      {
+        hourlyCell: 'C21',
+        deductCell: 'C22',
+        reimbCell: 'C20',
+        reimbNoteCell: 'D20',
+        deductNoteCell: 'D22',
+        milesCell: 'C23',
+      },
     ],
   );
   check(
@@ -1983,14 +2139,46 @@ export function runSelfTests(): boolean {
   check('§5 RF seed color is C4A484', DEFAULT_LEGEND.find((l) => l.estimator === 'RF')?.color, 'C4A484');
   const carlosWages = defaultSettings().wageRates.find((w) => w.name === 'Carlos Ruiz Cruz');
   check(
-    'Carlos Ruiz Cruz seeds: PS $18 / hourly $25 / crew-lead $18',
-    [carlosWages?.rate, carlosWages?.hourlyRate, carlosWages?.crewLeadRate],
-    [18, 25, 18],
+    'Carlos Ruiz Cruz seeds: PS $18 / hourly $25 (Round 10 — no crew-lead column)',
+    [carlosWages?.rate, carlosWages?.hourlyRate, (carlosWages as { crewLeadRate?: number })?.crewLeadRate],
+    [18, 25, undefined],
   );
   check(
     '§11 inactive roster seeds 52 unique painters',
     new Set(DEFAULT_PAINTER_ROSTER.map((p) => p.name)).size,
     52,
+  );
+
+  /**
+   * Round 10 — Kristina Benson's block belongs under Pepe's Painting LLC, which
+   * only works if her `SUBCONTRACTORS` roster row survives a save/load cycle.
+   * The first cut of the loader accepted three sections and silently dropped
+   * hers, so the block disappeared as soon as settings round-tripped.
+   */
+  const roundTripped = parseSettings(JSON.parse(JSON.stringify(defaultSettings())));
+  const kbRow = roundTripped?.salariedRoster.find((r) => r.name === 'Kristina Benson');
+  check(
+    'Round 10: a SUBCONTRACTORS roster row survives parseSettings',
+    [kbRow?.section, kbRow?.amount, kbRow?.sub],
+    ['SUBCONTRACTORS', 150, true],
+  );
+  check(
+    'Round 10: parseSettings keeps the no-mileage flag',
+    parseSettings(JSON.parse(JSON.stringify(defaultSettings())))?.salariedRoster.find(
+      (r) => r.name === 'Paul Good',
+    )?.noMileageRow,
+    true,
+  );
+  // A roster saved by that older loader is missing her; the migration heals it.
+  const stripped = {
+    ...defaultSettings(),
+    salariedRoster: defaultSettings().salariedRoster.filter((r) => r.section !== 'SUBCONTRACTORS'),
+    appliedMigrations: ['r8-rf-color', 'r10-roster'],
+  };
+  check(
+    'Round 10: the roster-heal migration puts a dropped sub row back',
+    applySettingsMigrations(stripped).salariedRoster.some((r) => r.name === 'Kristina Benson'),
+    true,
   );
 
   const failed = results.filter((r) => !r.pass);

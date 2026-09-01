@@ -134,13 +134,32 @@ export interface EnrichedTimesheetRow extends TimesheetRow {
 // User edits & report rows
 // ---------------------------------------------------------------------------
 
-/** Sparse per-row user overrides, keyed by ReportRow.id (apKey + row index). */
+/**
+ * Sparse per-row user overrides, keyed by ReportRow.id (apKey + row index).
+ *
+ * Round 10 — every displayed column is overridable, so the whole TimeNavi
+ * Export grid can be corrected on screen before the workbook is downloaded.
+ * The derived columns ($ Difference, Date Difference) recompute from these.
+ */
 export interface RowEdit {
   apKey?: string | null;
   percent?: PercentValue;
   estimator?: string;
   apptivo?: number;
   included?: boolean;
+  event?: string;
+  startDate?: Date | null;
+  endDate?: Date | null;
+  calendar?: string;
+  attendees?: string;
+  location?: string;
+  description?: string;
+  /** Round 10 — the `Last % Paid` cell (from last week's `% Completion`). */
+  lastPaid?: PrevPercent | null;
+  qboJobName?: string;
+  inQboTime?: string;
+  jobTotal?: JobTotalValue;
+  invoiceDate?: Date | null;
 }
 
 export type EditsMap = Record<string, RowEdit>;
@@ -252,11 +271,6 @@ export interface WageRateEntry {
   /** Optional different rate on hourly (T&M) jobs. */
   hourlyRate?: number;
   /**
-   * Round 8 §9.1 — a crew lead's rate on their OWN timesheet hours when the
-   * job is a profit-share job. Falls back to `AppSettings.defaultCrewLeadRate`.
-   */
-  crewLeadRate?: number;
-  /**
    * Round 9 §18 — the person's rate on timesheet lines whose pay type is
    * `Commercial Hourly`. Falls back to their `rate` when unset.
    */
@@ -321,7 +335,11 @@ export interface PerJobRateOverride {
   note?: string;
 }
 
-export type SalarySection = 'ADMIN' | 'ESTIMATORS' | 'MANAGER SALARY';
+/**
+ * Round 10 — `SUBCONTRACTORS` blocks render with the subcontractor crew-lead
+ * bands (below Pepe's Painting LLC), not in their own black-header section.
+ */
+export type SalarySection = 'ADMIN' | 'ESTIMATORS' | 'MANAGER SALARY' | 'SUBCONTRACTORS';
 
 /** Round 6 §2.1 / Round 8 §7.3 — which company a row belongs to. */
 export type EntityCode = 'NV' | 'UT';
@@ -341,6 +359,8 @@ export interface SalariedEntry {
   frequency?: 'weekly' | 'firstPayDateOfMonth';
   /** Round 9 §26 — subcontractor: rendered last inside the section. */
   sub?: boolean;
+  /** Round 10 — this person's block shows no mileage-reimbursement row. */
+  noMileageRow?: boolean;
   /** Round 9 §28 — replaces the "mileage reimb" row with a flat labeled row. */
   reimbursementsLabel?: string;
   /** Round 9 §34 — pre-filled taxes / net rows for this person. */
@@ -380,8 +400,6 @@ export interface AppSettings {
   defaultProfitSharePct: number; // fraction; seed 0.38
   wageRates: WageRateEntry[];
   defaultWageRate: number; // seed 18
-  /** Round 8 §9.1 — fallback crew-lead rate on own PS-job hours; seed 18. */
-  defaultCrewLeadRate: number;
   /** Round 8 §9.1 — "person X earns Y while on lead Z's job" rules. */
   conditionalRateRules: ConditionalRateRule[];
   /** Round 8 §9.1 — person + AP# rate overrides (person-scoped). */
@@ -751,10 +769,16 @@ export interface PsJobColumn {
   sundries: number;
   halfMaterials: number;
   /**
-   * Round 9 §32 — this band is responsible for ALL of the job's materials, so
-   * the row reads "- Materials" and carries the full amount.
+   * Round 9 §32 / Round 10 — this band is responsible for ALL of the job's
+   * materials, so the row reads "- ALL Materials" and carries the full amount.
    */
   fullMaterials: boolean;
+  /**
+   * Round 10 — Utah only: the painter pays their own hotel costs, so the job's
+   * P&L travel is charged back as a "Hotels" line under the materials row.
+   * Null when the band has no hotel charge-back.
+   */
+  hotels: number | null;
   /**
    * Round 9 §1 — labor computed from the timesheet hours on this AP# (rate ×
    * hours for every painter on the job), which is what `laborWages` defaults
@@ -788,7 +812,9 @@ export interface PsBlock {
   sub: boolean;
   jobs: PsJobColumn[];
   total: number; // Σ totalAfterSplit
-  mileageNew: number; // editable, default 0
+  mileageNew: number; // miles × the mileage rate (or a typed override)
+  /** Round 10 — the miles entered on the Input #'s tab. */
+  mileageMiles: number;
   hourlyPay: number; // own T-SHEETS gross
   reimbursements: number; // editable
   reimbMemo: string;
@@ -818,6 +844,8 @@ export interface SalaryBlock {
   mileageReimb: number; // miles × rate
   /** Round 9 §26 — subcontractor row, rendered last inside its section. */
   sub: boolean;
+  /** Round 10 — no mileage-reimbursement row on this block. */
+  noMileageRow: boolean;
   /**
    * Round 9 §28 — when set, the mileage row is replaced by a single flat
    * editable row with this label (Jodi Dunn's "Reimbursements").
@@ -834,10 +862,15 @@ export interface SalaryBlock {
   total: number;
 }
 
-/** Round 4 §5.2 — the single A→Z painter/crew-lead sequence. */
+/**
+ * Round 4 §5.2 — the single A→Z painter/crew-lead sequence.
+ * Round 10 — a `salary` entry carries a subcontractor's salary block, which
+ * renders with the subcontractor bands at the end of the sequence.
+ */
 export type PainterSectionEntry =
   | { kind: 'hourly'; block: HourlyBlock }
-  | { kind: 'ps'; block: PsBlock };
+  | { kind: 'ps'; block: PsBlock }
+  | { kind: 'salary'; block: SalaryBlock };
 
 /** Round 6 §4.10 — empty template block for someone without hours this week. */
 export interface InactiveEmployeeBlock {
@@ -875,6 +908,12 @@ export interface PayrollPreviewModel {
    * store, which is what makes the auto-add stick.
    */
   newLeadsToAdd: NewLeadDefault[];
+  /**
+   * Round 10 — painter-roster names that were flagged inactive but worked this
+   * week. Hours make someone active, so the App layer flips the roster flag
+   * and the "inactive (*)" marker never shows for them again.
+   */
+  activatedPainters: string[];
   /** Round 8 §9.2 — every daily-OT chunk applied this week (exceptions/tags). */
   dailyOtNotes: DailyOtNote[];
 }
