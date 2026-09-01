@@ -520,6 +520,12 @@ export const MIGRATION_R10_WAGES = 'r10-wage-seeds';
 export const MIGRATION_R10_ROSTER = 'r10-roster';
 /** Round 10 — subcontractor labor out of the materials mapping. */
 export const MIGRATION_R10_PL_MAPPING = 'r10-pl-mapping';
+/**
+ * Round 10 — heal a roster saved while the loader still rejected the
+ * `SUBCONTRACTORS` section. Those saves silently dropped Kristina Benson's
+ * row, so re-seed any default person the stored roster is missing.
+ */
+export const MIGRATION_R10_ROSTER_SUBS = 'r10-roster-subs';
 export const ALL_MIGRATIONS: string[] = [
   MIGRATION_RF_COLOR,
   MIGRATION_DB_PATTERN,
@@ -532,6 +538,7 @@ export const ALL_MIGRATIONS: string[] = [
   MIGRATION_R10_WAGES,
   MIGRATION_R10_ROSTER,
   MIGRATION_R10_PL_MAPPING,
+  MIGRATION_R10_ROSTER_SUBS,
 ];
 
 // v4: Round 3 payroll settings added. v3 legend/pivot values are migrated;
@@ -771,7 +778,13 @@ function parsePayroll(raw: unknown): Partial<AppSettings> {
       const x = e as Record<string, unknown>;
       if (
         typeof x.name === 'string' &&
-        (x.section === 'ADMIN' || x.section === 'ESTIMATORS' || x.section === 'MANAGER SALARY') &&
+        // Round 10 — `SUBCONTRACTORS` must be listed here too: a section this
+        // guard does not know is dropped on load, which is how Kristina
+        // Benson's row vanished the first time settings round-tripped.
+        (x.section === 'ADMIN' ||
+          x.section === 'ESTIMATORS' ||
+          x.section === 'MANAGER SALARY' ||
+          x.section === 'SUBCONTRACTORS') &&
         typeof x.amount === 'number' &&
         Number.isFinite(x.amount)
       ) {
@@ -785,6 +798,7 @@ function parsePayroll(raw: unknown): Partial<AppSettings> {
           // Round 9 §25/§26/§28/§34.
           ...(x.frequency === 'firstPayDateOfMonth' ? { frequency: 'firstPayDateOfMonth' as const } : {}),
           ...(x.sub === true ? { sub: true } : {}),
+          ...(x.noMileageRow === true ? { noMileageRow: true } : {}),
           ...(typeof x.reimbursementsLabel === 'string' && x.reimbursementsLabel.trim() !== ''
             ? { reimbursementsLabel: x.reimbursementsLabel }
             : {}),
@@ -1100,6 +1114,15 @@ export function applySettingsMigrations(settings: AppSettings): AppSettings {
     }
     patch({ plAccountMapping: healed });
     done.add(MIGRATION_R10_PL_MAPPING);
+  }
+
+  // Round 10 — put back roster rows an older loader dropped (see the constant).
+  if (!done.has(MIGRATION_R10_ROSTER_SUBS)) {
+    const key = (n: string): string => n.trim().toLowerCase().replace(/\s+/g, ' ');
+    const have = new Set(next.salariedRoster.map((r) => key(r.name)));
+    const missing = DEFAULT_SALARIED.filter((e) => !have.has(key(e.name))).map((e) => ({ ...e }));
+    if (missing.length > 0) patch({ salariedRoster: [...next.salariedRoster, ...missing] });
+    done.add(MIGRATION_R10_ROSTER_SUBS);
   }
 
   if (!done.has(MIGRATION_CARLOS_HOURLY)) {

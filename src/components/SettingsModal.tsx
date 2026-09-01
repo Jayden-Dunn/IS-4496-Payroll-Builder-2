@@ -730,6 +730,9 @@ export function SettingsModal({
                   <option>ADMIN</option>
                   <option>ESTIMATORS</option>
                   <option>MANAGER SALARY</option>
+                  {/* Round 10 — subcontractor rows render with the sub crew-lead
+                      bands (under Pepe's Painting LLC), not in a black section. */}
+                  <option>SUBCONTRACTORS</option>
                 </select>
                 <select className="rounded border border-neutral-300 px-1 py-1 text-xs" value={e.entity} title="Entity" onChange={(ev) => setRoster((prev) => prev.map((x, j) => (j === i ? { ...x, entity: ev.target.value as EntityCode } : x)))}>
                   <option>NV</option>

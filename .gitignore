@@ -3,3 +3,7 @@ dist
 *.local
 .DS_Store
 data/app-settings.json
+
+# Compiled test harnesses (rebuild with the tsc commands in README.md)
+.selftest/
+.itest/

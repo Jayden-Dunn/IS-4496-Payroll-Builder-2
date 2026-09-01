@@ -114,3 +114,24 @@ Pure, unit-testable logic lives in `src/lib/` (no React state):
 - `__selftest__.ts` — dev-mode assertions (apKey extraction, % parser, dates, formula strings); results log to the console when `npm run dev` starts
 
 React components live in `src/components/`; new output tabs can be added without touching the parsers.
+
+### Running the two test suites outside the browser
+
+Both harnesses compile to gitignored folders, so build them fresh before you
+run them — an old build silently passing is the one trap here.
+
+```sh
+# 306 unit assertions
+rm -rf .selftest && npx tsc src/lib/__selftest__.ts --outDir .selftest \
+  --module commonjs --target es2022 --moduleResolution node \
+  --skipLibCheck --esModuleInterop --strict false
+echo '{"type":"commonjs"}' > .selftest/package.json
+node -e "require('./.selftest/__selftest__.js').runSelfTests()"
+
+# end-to-end: build synthetic workbooks, export, read the .xlsx back
+rm -rf .itest && npx tsc scripts/integration.ts --outDir .itest \
+  --module commonjs --target es2022 --moduleResolution node \
+  --skipLibCheck --esModuleInterop --strict false
+echo '{"type":"commonjs"}' > .itest/package.json
+node .itest/scripts/integration.js
+```

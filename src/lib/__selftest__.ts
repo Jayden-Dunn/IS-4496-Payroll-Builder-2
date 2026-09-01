@@ -76,7 +76,13 @@ import {
   jobDisplayPair,
   type JobDisplaySources,
 } from './jobNames';
-import { defaultSettings, DEFAULT_LEGEND, DEFAULT_PAINTER_ROSTER } from './settings';
+import {
+  applySettingsMigrations,
+  defaultSettings,
+  parseSettings,
+  DEFAULT_LEGEND,
+  DEFAULT_PAINTER_ROSTER,
+} from './settings';
 import {
   dollarDiffIsFlagged,
   duplicateInQboValues,
@@ -2141,6 +2147,38 @@ export function runSelfTests(): boolean {
     '§11 inactive roster seeds 52 unique painters',
     new Set(DEFAULT_PAINTER_ROSTER.map((p) => p.name)).size,
     52,
+  );
+
+  /**
+   * Round 10 — Kristina Benson's block belongs under Pepe's Painting LLC, which
+   * only works if her `SUBCONTRACTORS` roster row survives a save/load cycle.
+   * The first cut of the loader accepted three sections and silently dropped
+   * hers, so the block disappeared as soon as settings round-tripped.
+   */
+  const roundTripped = parseSettings(JSON.parse(JSON.stringify(defaultSettings())));
+  const kbRow = roundTripped?.salariedRoster.find((r) => r.name === 'Kristina Benson');
+  check(
+    'Round 10: a SUBCONTRACTORS roster row survives parseSettings',
+    [kbRow?.section, kbRow?.amount, kbRow?.sub],
+    ['SUBCONTRACTORS', 150, true],
+  );
+  check(
+    'Round 10: parseSettings keeps the no-mileage flag',
+    parseSettings(JSON.parse(JSON.stringify(defaultSettings())))?.salariedRoster.find(
+      (r) => r.name === 'Paul Good',
+    )?.noMileageRow,
+    true,
+  );
+  // A roster saved by that older loader is missing her; the migration heals it.
+  const stripped = {
+    ...defaultSettings(),
+    salariedRoster: defaultSettings().salariedRoster.filter((r) => r.section !== 'SUBCONTRACTORS'),
+    appliedMigrations: ['r8-rf-color', 'r10-roster'],
+  };
+  check(
+    'Round 10: the roster-heal migration puts a dropped sub row back',
+    applySettingsMigrations(stripped).salariedRoster.some((r) => r.name === 'Kristina Benson'),
+    true,
   );
 
   const failed = results.filter((r) => !r.pass);
