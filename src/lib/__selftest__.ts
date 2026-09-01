@@ -1558,6 +1558,76 @@ export function runSelfTests(): boolean {
     knownEstimators: new Set(['MH']),
     leadCtx: { directory: [], crewGroups: [], subcontractors: [] },
   });
+  /**
+   * Round 10 §UT — a full-materials subcontractor on the Utah tab pays their
+   * own lodging: the job's P&L travel becomes a "- Hotels" charge-back that
+   * comes out of the chain, on top of ALL (not half) of the materials.
+   */
+  const utHotelsPreview = buildPayrollPreview({
+    pbj: {
+      ...ownerPbj,
+      customers: [],
+      grandTotal: 0,
+      grandByDate: {},
+      balances: [],
+      utPayroll: [
+        carriedRow({ apKey: '27000', crewLead: 'COLOR ENTERPRISES LLC', percent: 1, woPct: 0.53 }),
+      ],
+    },
+    enriched: [],
+    reportRows: [],
+    pl: null,
+    plUt: {
+      byJob: new Map([
+        [
+          '27000',
+          {
+            income: 10000,
+            materials: 1000,
+            laborWagesSubs: 200,
+            mileage: 0,
+            sundries: 0,
+            travel: 300,
+            plJobHeader: 'AP27000 Ext',
+            customerName: 'Utah Cust',
+            plEntity: 'UT',
+          },
+        ],
+      ]),
+      duplicateColumns: [],
+      columnHeaders: [],
+      accountRows: [],
+      entity: 'UT',
+      unmappedCogsRows: [],
+    },
+    entity: 'UT',
+    directory: [],
+    settings: {
+      ...ownerSettings,
+      painterRoster: [],
+      subcontractors: ['Color Enterprises LLC'],
+      fullMaterialsLeads: ['Color Enterprises LLC'],
+      profitShare: [{ lead: 'Color Enterprises LLC', pct: 0.53 }],
+    },
+    payDate: new Date(2026, 6, 10),
+    edits: {},
+    qbHours: {},
+    knownEstimators: new Set(['MH']),
+    leadCtx: { directory: [], crewGroups: [], subcontractors: ['Color Enterprises LLC'] },
+  });
+  const utJob = utHotelsPreview.leads[0]?.jobs[0];
+  check(
+    'R10 UT full-materials band: ALL materials + a hotels charge-back',
+    [utJob?.fullMaterials, utJob?.halfMaterials, utJob?.hotels],
+    [true, 1000, 300],
+  );
+  check(
+    'R10 UT chain subtracts BOTH all-materials and hotels',
+    round2ish(utJob?.totalProfitShare ?? 0),
+    // 10000 × 53% × 100% − 200 labor − 1000 materials − 300 hotels
+    round2ish(10000 * 0.53 - 200 - 1000 - 300),
+  );
+
   check(
     '§6 lead with only carried jobs still gets a block',
     carriedOnlyPreview.leads.map((l) => l.leadName),

@@ -506,7 +506,9 @@ function writePsChainValues(ws, block, startCol, opts) {
     let halfMatRow = 0;
     let mileageRow = 0;
     for (const rr of rows) {
-        if (rr.label === materialsLabel)
+        // Round 10 — the rule sits under the LAST deduction row, which is Hotels
+        // when the band has one.
+        if (rr.label === materialsLabel || rr.label === '- Hotels')
             halfMatRow = r;
         if (rr.label === '-Mileage')
             mileageRow = r;

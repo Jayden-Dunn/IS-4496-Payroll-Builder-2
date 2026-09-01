@@ -1295,12 +1295,14 @@ sheetName = 'PAYROLL PREVIEW', inputRefsByLeadKey) {
             for (const rn of [woRow, tpsRow]) {
                 ws.getCell(`${L}${rn}`).numFmt = ACCOUNTING_FMT;
             }
-            // §5.6 / Round 7 — thin under -½ Materials (row above Total Profit Share).
-            ws.getCell(`${L}${halfRow}`).border = { bottom: { style: 'thin' } };
+            // §5.6 / Round 7 — thin under the last deduction row (Hotels when the
+            // band has one), i.e. the row directly above Total Profit Share.
+            ws.getCell(`${L}${hotelsRow > 0 ? hotelsRow : halfRow}`).border = { bottom: { style: 'thin' } };
         }
-        // Thin bottom border A:E on −½ Materials; double A:E on Deductions/Sundries.
+        // Thin bottom border A:E on the last deduction row; double A:E on
+        // Deductions/Sundries.
         for (let c = 1; c <= 5; c++) {
-            ws.getCell(halfRow, c).border = { bottom: { style: 'thin' } };
+            ws.getCell(hotelsRow > 0 ? hotelsRow : halfRow, c).border = { bottom: { style: 'thin' } };
         }
         // Total: SUM across the Total Profit Share row (÷ split when present).
         const totalCell = ws.getCell(`B${totalRow}`);
