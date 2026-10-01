@@ -13,15 +13,30 @@ interface UploadSlotProps {
   hint: string;
   optional?: boolean;
   chip: SlotChip;
+  /**
+   * A file dropped on this slot AFTER the report was built. It is parsed but
+   * not applied: the report keeps its current numbers until the user presses
+   * "Update existing report". Only the re-uploaded slot carries one, which is
+   * the visible proof that the other slots keep the files they already have.
+   */
+  pendingChip?: SlotChip;
   onFile: (file: File) => void;
 }
 
-export function UploadSlot({ label, hint, optional = false, chip, onFile }: UploadSlotProps): JSX.Element {
+export function UploadSlot({
+  label,
+  hint,
+  optional = false,
+  chip,
+  pendingChip,
+  onFile,
+}: UploadSlotProps): JSX.Element {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
 
-  const border =
-    chip.status === 'ok'
+  const border = pendingChip
+    ? 'border-amber-500 bg-amber-50'
+    : chip.status === 'ok'
       ? 'border-green-500 bg-green-50'
       : chip.status === 'error'
         ? 'border-red-400 bg-red-50'
@@ -75,6 +90,21 @@ export function UploadSlot({ label, hint, optional = false, chip, onFile }: Uplo
         >
           <div className="truncate font-semibold">{chip.fileName}</div>
           <div>{chip.message}</div>
+        </div>
+      )}
+      {pendingChip && (
+        <div
+          className={`mt-1 rounded px-1.5 py-0.5 text-[11px] font-medium ${
+            pendingChip.status === 'ok' ? 'bg-amber-100 text-amber-900' : 'bg-red-100 text-red-800'
+          }`}
+        >
+          <div className="truncate font-semibold">{pendingChip.fileName}</div>
+          <div>{pendingChip.message}</div>
+          {pendingChip.status === 'ok' && (
+            <div className="mt-0.5 font-bold uppercase tracking-wide">
+              pending — press Update existing report
+            </div>
+          )}
         </div>
       )}
     </div>
