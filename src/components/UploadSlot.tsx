@@ -20,6 +20,8 @@ interface UploadSlotProps {
    * the visible proof that the other slots keep the files they already have.
    */
   pendingChip?: SlotChip;
+  /** True while a cached session is being restored, so a drop cannot race it. */
+  disabled?: boolean;
   onFile: (file: File) => void;
 }
 
@@ -29,12 +31,15 @@ export function UploadSlot({
   optional = false,
   chip,
   pendingChip,
+  disabled = false,
   onFile,
 }: UploadSlotProps): JSX.Element {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
 
-  const border = pendingChip
+  const border = disabled
+    ? 'border-neutral-200 bg-neutral-50 opacity-60'
+    : pendingChip
     ? 'border-amber-500 bg-amber-50'
     : chip.status === 'ok'
       ? 'border-green-500 bg-green-50'
@@ -46,14 +51,20 @@ export function UploadSlot({
 
   return (
     <div
-      className={`cursor-pointer rounded-md border border-dashed px-2.5 py-2 transition-colors ${border}`}
-      onClick={() => inputRef.current?.click()}
+      className={`rounded-md border border-dashed px-2.5 py-2 transition-colors ${
+        disabled ? 'cursor-default' : 'cursor-pointer'
+      } ${border}`}
+      onClick={() => {
+        if (!disabled) inputRef.current?.click();
+      }}
       onDragOver={(e) => {
+        if (disabled) return;
         e.preventDefault();
         setDragOver(true);
       }}
       onDragLeave={() => setDragOver(false)}
       onDrop={(e) => {
+        if (disabled) return;
         e.preventDefault();
         setDragOver(false);
         const file = e.dataTransfer.files[0];
