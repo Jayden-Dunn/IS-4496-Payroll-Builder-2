@@ -23,6 +23,20 @@
  * it is a deployment gate — not a substitute for per-user accounts.
  */
 
+/**
+ * Vercel injects the project's environment variables here, at the edge.
+ *
+ * Declared locally rather than taken from `@types/node` on purpose. The only
+ * thing this file wanted from Node's types was the `process` global, and the
+ * project has no `@types/node` dependency — a copy was merely hoisted in
+ * behind `@vercel/node` and `exceljs`, which happens to resolve on a dev
+ * machine and did NOT on Vercel's builder, breaking `npm run build` there.
+ * The Edge runtime is not Node either; `process.env` is about all it exposes.
+ * A module-scoped declaration keeps the file self-contained, so it compiles
+ * the same whether those transitive types are present or not.
+ */
+declare const process: { env: Record<string, string | undefined> };
+
 export const config = {
   /**
    * Every path, including `/api/*` and static assets. Browsers resend the
