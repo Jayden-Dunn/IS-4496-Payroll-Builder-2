@@ -876,7 +876,8 @@ const MONEY_FMT = CURRENCY_FMT;
 
 function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): void {
   const ws = wb.addWorksheet('Pivot by Job', {
-    views: [{ state: 'frozen', ySplit: 2 }], // Round 5 §3.1 — freeze at A3
+    // Round 5 §3.1 — freeze at A3. Round 11 — opens at 94% zoom.
+    views: [{ state: 'frozen', ySplit: 2, zoomScale: 94, zoomScaleNormal: 94 }],
     properties: { outlineProperties: { summaryBelow: false, summaryRight: true } },
   });
   const dateCount = model.dateIsos.length;
@@ -901,8 +902,8 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
     { width: 18.5 },
   ];
 
-  // Round 10 — every value on this sheet is 8pt (was 12pt, with a 17pt title).
-  const baseFont = { name: FONT, size: 8 };
+  // Round 11 — every value on this sheet is 9pt (Round 10 had 8pt).
+  const baseFont = { name: FONT, size: 9 };
   const paint = (
     cell: ExcelJS.Cell,
     opts: { fill?: string; color?: string; bold?: boolean; size?: number },
@@ -1050,10 +1051,14 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
         a.onCalendar,
         a.estimator,
         a.crewLead,
-        a.hourly ? '-' : (a.woOverride ?? ''),
-        a.hourly ? '-' : (a.woPct ?? ''),
+        // Round 11 — a typed WO value survives on an HOURLY job; '-' only
+        // marks an hourly job where nothing was typed.
+        a.woOverride ?? (a.hourly ? '-' : ''),
+        a.woPct ?? (a.hourly ? '-' : ''),
         percentExcelValue(a.percent),
-        '', // Round 7 — Notes data cleared; keep centered "Notes" header only
+        // Round 11 — Notes were written as '' here, which threw away every
+        // note typed on screen the moment the workbook was downloaded.
+        a.notes,
       ]);
       jRow.outlineLevel = 1;
       fillRow(jRow, job.colorHex);
@@ -1066,9 +1071,13 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
             ? job.colorHex && isDarkColor(job.colorHex)
               ? 'FFFFC7C7'
               : DARK_RED
-            : job.colorHex
-              ? textOn(job.colorHex)
-              : BLACK;
+            : // Round 11 — % of Completion is black on every row; on a dark
+              // estimator band it used to inherit white text.
+              c === pctComplCol
+              ? BLACK
+              : job.colorHex
+                ? textOn(job.colorHex)
+                : BLACK;
         paint(cell, { ...(job.colorHex ? { fill: 'FF' + job.colorHex } : {}), color, bold: true });
       }
       analysisFormats(jRow);
@@ -1122,13 +1131,15 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
       jRow.outlineLevel = 1;
       const cells: (string | number)[] = [
         r.apKey ?? '',
-        '',
+        // Round 11 — same `TimeNavi row N` / `NOT ON CALENDAR` as the pivot.
+        r.onCalendar ?? '',
         r.estimator,
         r.crewLead,
         r.woOverride ?? '',
         r.woPct ?? '',
         percentExcelValue(r.percent),
-        '', // Round 7 — clear BALANCES/UT Notes data; keep header label
+        // Round 11 — typed notes are written, not cleared.
+        r.notes,
       ];
       cells.forEach((v, i) => {
         jRow.getCell(analysisStart + i).value = v;
@@ -1142,8 +1153,17 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
       });
       analysisFormats(jRow);
       writePercentCell(jRow, { apKey: r.apKey, percent: r.percent, override: r.percentOverride });
+      paint(jRow.getCell(pctComplCol), { ...(rowHex ? { fill: 'FF' + rowHex } : {}), color: BLACK, bold: true });
       textApCell(jRow);
       centerAnalysis(jRow);
+      /**
+       * Round 11 — a no-hours job has nothing under its dates, so the date
+       * columns and Total hrs merge into one centered, typeable cell. Written
+       * after the fills: a merged range takes the first cell's style.
+       */
+      jRow.getCell(2).value = r.hoursNote ?? '';
+      jRow.getCell(2).alignment = { horizontal: 'center', vertical: 'middle' };
+      ws.mergeCells(jRow.number, 2, jRow.number, totalCol);
       for (let c = 1; c <= lastCol; c++) {
         cRow.getCell(c).border = {
           top: { style: 'thin' },

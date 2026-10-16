@@ -1459,7 +1459,7 @@ export default function App(): JSX.Element {
   const viewPivot = useMemo(() => applyPivotView(pivot, pivotView), [pivot, pivotView]);
   const filtersActive = isPivotViewActive(pivotView);
 
-  const onDownload = useCallback((): void => {
+  const exportNow = useCallback((): void => {
     if (mode === 'payroll') {
       void exportPayrollWorkbook({
         payDate,
@@ -1524,6 +1524,24 @@ export default function App(): JSX.Element {
     timesheetMirror,
     jobsByCrew,
   ]);
+
+  /**
+   * Round 11 — no manual edit may be lost on download.
+   *
+   * A cell commits on blur. Chrome blurs it when the Download button is
+   * clicked, but Safari does not move focus to a clicked button, so a value
+   * still being typed was never committed and the workbook went out without
+   * it. Blur whatever is being edited, let React apply that commit, and only
+   * then export — from a ref, so the export reads the post-commit models
+   * rather than the ones this click handler closed over.
+   */
+  const exportNowRef = useRef(exportNow);
+  exportNowRef.current = exportNow;
+  const onDownload = useCallback((): void => {
+    const active = document.activeElement;
+    if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) active.blur();
+    window.setTimeout(() => exportNowRef.current(), 0);
+  }, []);
 
   const onSaveSettings = useCallback((next: AppSettings): void => {
     setSettings(next);

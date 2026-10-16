@@ -246,6 +246,22 @@ function leadNamesFromDisplay(display: string): string[] {
     .filter((s) => s !== '');
 }
 
+/** Round 11 — an overtime line of either kind (weekly or NV daily). */
+function isOvertimeLine(l: { ot: boolean; dailyOt?: boolean }): boolean {
+  return l.ot || l.dailyOt === true;
+}
+
+/**
+ * Round 11 — remove the "*PAID XX% LAST WK*" note the Pivot by Job writes by
+ * default, wherever it sits in the note, leaving any other text intact.
+ */
+export function stripPaidLastWeek(note: string): string {
+  return note
+    .replace(/\*\s*paid\s+[\d.]+\s*%\s*last\s*w(?:ee)?k\.?\s*\*/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
 export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewModel {
   const { pbj, enriched, reportRows, settings, payDate, edits, qbHours } = input;
   // Round 8 §7.2/§7.3 — one builder, two tabs. The entity decides which
@@ -981,8 +997,13 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
             ? ' [Daily OT]'
             : '';
       const isOfficeLine = officeStyle || j.office;
-      const notesSuffix = !isOfficeLine && j.notes.trim() ? ` — ${j.notes.trim()}` : '';
-      const typeTag = isOfficeLine ? '' : j.hourly ? ' [Hourly]' : ' [PS]';
+      // Round 11 — the Pivot by Job note now defaults to "*PAID XX% LAST WK*",
+      // which is pivot bookkeeping, not part of a job's name on a pay stub.
+      // Strip it here; anything else typed into the note still shows.
+      const lineNote = stripPaidLastWeek(j.notes);
+      const notesSuffix = !isOfficeLine && lineNote ? ` — ${lineNote}` : '';
+      // Round 11 — no "[PS]" tag; HOURLY is abbreviated to "[HRLY]".
+      const typeTag = isOfficeLine ? '' : j.hourly ? ' [HRLY]' : '';
       const label = isOfficeLine
         ? `Office${otTag}`
         : `${jobDisplayName(j.customer, j.jobcode2)}${typeTag}${otTag}${notesSuffix}`;
@@ -1095,6 +1116,10 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
         if (weeklyOnJob > 0) pushLine(j, null, weeklyOnJob, 'weeklyOt');
       }
     }
+
+    // Round 11 — every overtime line sits at the bottom of the breakdown, for
+    // every painter. The sort is stable, so jobs keep their order above it.
+    lines.sort((a, b) => Number(isOvertimeLine(a)) - Number(isOvertimeLine(b)));
 
     const totalHours = round2(lines.reduce((a, l) => a + l.hours, 0));
     const totalPay = round2(lines.reduce((a, l) => a + l.hours * l.rate, 0));

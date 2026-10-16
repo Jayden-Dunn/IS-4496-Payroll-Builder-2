@@ -56,7 +56,7 @@ import {
 } from './payroll';
 import { classifyPayItem } from './payTypes';
 import { buildPayrollPivotByJob } from './payrollPivot';
-import { buildPayrollPreview } from './payrollPreview';
+import { buildPayrollPreview, stripPaidLastWeek } from './payrollPreview';
 import { buildPrFinalCheckRows } from './prFinalCheck';
 import {
   buildPivotByJob,
@@ -1616,14 +1616,20 @@ export function runSelfTests(): boolean {
   });
   const hourlyTs = hourlyPreview.leads[0]?.tsheets?.lines[0] ?? hourlyPreview.painters[0]?.lines[0];
   check(
-    'hourly job: T-SHEETS uses the hourly-jobs rate, [Hourly] tag, and Pivot notes',
+    // Round 11 — the tag is abbreviated to [HRLY]; other note text still shows.
+    'hourly job: T-SHEETS uses the hourly-jobs rate, [HRLY] tag, and Pivot notes',
     [
       hourlyTs?.hourlyJob,
       hourlyTs?.rate,
-      hourlyTs?.jobLabel.includes('[Hourly]') === true,
+      hourlyTs?.jobLabel.includes('[HRLY]') === true,
       hourlyTs?.jobLabel.includes('punch list') === true,
     ],
     [true, 25, true, true],
+  );
+  check(
+    'R11: *PAID XX% LAST WK* is stripped from a T-SHEETS name, other text kept',
+    [stripPaidLastWeek('*PAID 60% LAST WK*'), stripPaidLastWeek('punch list *Paid 37.5% Last Week*')],
+    ['', 'punch list'],
   );
 
   const carriedRow = (over: Partial<ManualSectionRow> & { apKey: string; crewLead: string }): ManualSectionRow => ({
@@ -2075,9 +2081,10 @@ export function runSelfTests(): boolean {
     }),
   );
   check(
-    '§4.3 three carried APs → three distinct customers',
+    // Round 11 — the section reads alphabetically by customer.
+    '§4.3 three carried APs → three distinct customers (alphabetical)',
     carriedCustomers.balances.map((r) => r.customer),
-    ['Aaron Ward', 'Regina Conrad', 'CCSD'],
+    ['Aaron Ward', 'CCSD', 'Regina Conrad'],
   );
   check(
     '§4.3 distinct customer count',
@@ -2189,10 +2196,12 @@ export function runSelfTests(): boolean {
     [hourlyFromSeed.percent, hourlyFromSeed.hourly],
     [0.9, true],
   );
+  // The title names a crew lead here: Round 11 makes a lead-less title
+  // HOURLY outright, which is a separate rule (tested just below).
   const psFromSeed = buildPivotByJob(
     pbjInput({
       enriched: ownerEnriched,
-      reportRows: [tnRow('25000', 'HOURLY')],
+      reportRows: [tnRow('25000', 'HOURLY', { event: 'AP25000 Int (Carlos)' })],
       edits: { [liveJobId]: { percentSeed: 0.4 } },
     }),
   ).customers[0].jobs[0].analysis;
@@ -2200,6 +2209,27 @@ export function runSelfTests(): boolean {
     'Slot A percentage seed classifies the job as profit-share even when TimeNavi says HOURLY',
     [psFromSeed.percent, psFromSeed.hourly],
     ['HOURLY', false],
+  );
+  // Round 11 — an event whose title names no crew lead defaults to HOURLY…
+  const noLead = buildPivotByJob(pbjInput({ enriched: ownerEnriched, reportRows: [tnRow('25000', 0.5)] }))
+    .customers[0].jobs[0].analysis;
+  check('R11: a calendar title with no crew lead → HOURLY', [noLead.crewLead, noLead.hourly], ['HOURLY', true]);
+  // …but a job with no calendar event at all stays blank, so the "hours on a
+  // job not on the calendar" red flag (piece-rate only) can still fire.
+  const offCal = buildPivotByJob(pbjInput({ enriched: ownerEnriched, reportRows: [] })).customers[0].jobs[0].analysis;
+  check('R11: no calendar event → lead blank, not HOURLY', [offCal.crewLead, offCal.onCalendar], ['', 'NOT ON CALENDAR']);
+  // Round 11 — typed WO values survive on an HOURLY job.
+  const hourlyWo = buildPivotByJob(
+    pbjInput({
+      enriched: ownerEnriched,
+      reportRows: [tnRow('25000', 'HOURLY')],
+      edits: { [liveJobId]: { woOverride: 1200, woPct: 0.4, estimator: 'PG', notes: 'call first' } },
+    }),
+  ).customers[0].jobs[0].analysis;
+  check(
+    'R11: WO Override / WO% / Estimator / Notes edits kept on an HOURLY job',
+    [hourlyWo.hourly, hourlyWo.woOverride, hourlyWo.woPct, hourlyWo.estimator, hourlyWo.notes],
+    [true, 1200, 0.4, 'PG', 'call first'],
   );
 
   // §3.2 — the export writes a real cross-sheet formula.

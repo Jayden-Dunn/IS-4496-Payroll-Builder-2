@@ -643,6 +643,17 @@ export interface ManualSectionRow {
   excludedFromPayroll: boolean;
   notes: string;
   colorHex: string | null;
+  /**
+   * Round 11 — the same "On Calendar?" reference the main pivot shows:
+   * `TimeNavi row N`, or `NOT ON CALENDAR`.
+   */
+  onCalendar?: string;
+  /**
+   * Round 11 — a no-hours job has nothing under its date columns, so those
+   * cells (dates + Total hrs) merge into one free-text cell. Editable, and
+   * written merged-and-centered on export.
+   */
+  hoursNote?: string;
 }
 
 export interface PivotByJobModel {
@@ -664,6 +675,8 @@ export interface PivotByJobModel {
 /** Sparse user edits on Pivot by Job rows (keyed by PbjJobRow.id). */
 export interface PbjJobEdit {
   apKey?: string | null;
+  /** Round 11 — the Estimator column is editable on every row. */
+  estimator?: string;
   crewLead?: string;
   woOverride?: number | null;
   woPct?: number | null;
