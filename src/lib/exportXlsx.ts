@@ -804,6 +804,11 @@ function buildPivotSheet(wb: ExcelJS.Workbook, pivot: PivotModel, palette: Reado
     const crewRow = ws.addRow([crew.crew]);
     blackBand(crewRow);
     crewRow.outlineLevel = 0;
+    // Round 11 — a rule above and below the crew-lead row, A through the
+    // estimator helper column (E–K used to have no bottom edge).
+    for (let c = 1; c <= estHelperCol; c++) {
+      crewRow.getCell(c).border = { top: { style: 'thin' }, bottom: { style: 'thin' } };
+    }
 
     for (const emp of crew.employees) {
       // Painter email row = level 1; jobs + "… Total" nest under it at level 2.
@@ -843,8 +848,9 @@ function buildPivotSheet(wb: ExcelJS.Workbook, pivot: PivotModel, palette: Reado
     }
   }
 
-  // Grand Total row: bold, gray/white on column A and every value column; B:D plain.
-  // Estimator helper left blank (Round 7 §7).
+  // Grand Total row. Round 11 — #808080 with white bold text across the WHOLE
+  // row (B:D and the estimator helper used to be left white), and one double
+  // rule along its top edge only.
   const grandRow = ws.addRow([
     'Grand Total',
     '',
@@ -854,15 +860,13 @@ function buildPivotSheet(wb: ExcelJS.Workbook, pivot: PivotModel, palette: Reado
     '',
   ]);
   grandRow.outlineLevel = 0;
-  paint(grandRow.getCell(1), { fill: HEADER_GRAY, color: WHITE, bold: true });
-  for (let c = 2; c <= 4; c++) paint(grandRow.getCell(c), {});
-  for (let c = 5; c <= gtCol; c++) {
+  for (let c = 1; c <= estHelperCol; c++) {
     const cell = grandRow.getCell(c);
     paint(cell, { fill: HEADER_GRAY, color: WHITE, bold: true });
+    cell.border = { top: { style: 'double' } };
     if (typeof cell.value === 'number') cell.numFmt = HOURS_FMT;
-    if (c < gtCol) cell.alignment = { horizontal: 'center' };
+    if (c >= 5 && c < gtCol) cell.alignment = { horizontal: 'center' };
   }
-  paint(grandRow.getCell(estHelperCol), {});
 }
 
 // ---------------------------------------------------------------------------

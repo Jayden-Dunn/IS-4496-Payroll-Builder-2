@@ -5,6 +5,39 @@
 import { extractApKey, timesheetApKey } from './apkey';
 import type { CellValue, EnrichedTimesheetRow, SalesRow, SheetData } from './types';
 
+/**
+ * Round 11 — Sales by Rep / UT Sales by Rep column widths A–M, in screen
+ * pixels as specified. The web table uses them as-is; the workbook converts
+ * them to Excel's character units (see `pxToExcelWidth`).
+ */
+export const SALES_BY_REP_WIDTHS_PX: readonly number[] = [77, 110, 716, 357, 176, 66, 176, 121, 176, 108, 132, 132, 66];
+
+/** Round 11 — columns J, K, L (0-based 9–11) use the Accounting format. */
+export const SALES_BY_REP_ACCOUNTING_COLS: ReadonlySet<number> = new Set([9, 10, 11]);
+
+/**
+ * Pixels → Excel column width. Excel measures widths in "characters" of the
+ * default font (Calibri 11: 7px per digit plus 5px of cell padding).
+ */
+export function pxToExcelWidth(px: number): number {
+  return Math.round(((px - 5) / 7) * 100) / 100;
+}
+
+/**
+ * Round 11 — timesheet columns nobody reads during the weekly run. They stay
+ * in the workbook (hidden, like TimeNavi's Attendees/Location) and collapse to
+ * thin stubs on screen, with the value still in the tooltip.
+ */
+export const TIMESHEET_COLLAPSED_HEADERS: ReadonlySet<string> = new Set([
+  'number',
+  'billable',
+  'class',
+  'department',
+  'service_item',
+  'has_flags',
+  'flag_types',
+]);
+
 export interface SalesByRepMirrorRow {
   apKey: string;
   cols: CellValue[]; // B–M (12 upload columns in file order)

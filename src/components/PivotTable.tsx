@@ -14,8 +14,15 @@ interface PivotTableProps {
 }
 
 const BLACK_BAND: CSSProperties = { backgroundColor: '#000', color: '#fff' };
+/** Round 11 — crew-lead rows: black, ruled top and bottom across the table. */
+const CREW_ROW: CSSProperties = { ...BLACK_BAND, borderTop: '1px solid #000', borderBottom: '1px solid #000' };
+/** Round 11 — every Grand Total cell, A through the last column. */
+const GRAND_ROW: CSSProperties = {
+  backgroundColor: '#808080',
+  color: '#fff',
+  borderTop: '3px double #000',
+};
 const HEADER_GRAY: CSSProperties = { backgroundColor: '#808080', color: '#000' };
-const GRAND_GRAY: CSSProperties = { backgroundColor: '#808080', color: '#fff' };
 const GT_BAND: CSSProperties = { backgroundColor: '#D9D9D9' };
 const OVERTIME_BG = '#FFFF99';
 
@@ -365,19 +372,21 @@ export function PivotTable({ pivot, fullPivot, colorByEstimator, view, onViewCha
               />
             );
           })}
+          {/* Round 11 — the whole Grand Total row is #808080 (B–D were left
+              white), under one double rule across the full width. */}
           <tr>
-            <td className="xcell font-bold" style={GRAND_GRAY}>
+            <td className="xcell font-bold" style={GRAND_ROW}>
               Grand Total
             </td>
-            <td className="xcell" />
-            <td className="xcell" />
-            <td className="xcell" />
+            <td className="xcell" style={GRAND_ROW} />
+            <td className="xcell" style={GRAND_ROW} />
+            <td className="xcell" style={GRAND_ROW} />
             {estCols.map((e) => (
-              <td key={e} className="xcell text-center font-bold" style={GRAND_GRAY}>
+              <td key={e} className="xcell text-center font-bold" style={GRAND_ROW}>
                 {pivot.grandByEstimator[e] !== undefined ? fmtHoursFixed(pivot.grandByEstimator[e]) : ''}
               </td>
             ))}
-            <td className="xcell text-right font-bold" style={GRAND_GRAY}>
+            <td className="xcell text-right font-bold" style={GRAND_ROW}>
               {fmtHoursFixed(pivot.grandTotal)}
             </td>
           </tr>
@@ -415,7 +424,8 @@ function CrewRows({
   return (
     <>
       <tr>
-        <td className="xcell" style={BLACK_BAND} colSpan={totalCols}>
+        {/* Round 11 — a crew-lead row carries a rule above and below, end to end. */}
+        <td className="xcell" style={CREW_ROW} colSpan={totalCols}>
           <span className="inline-flex items-center">
             <CollapseToggle open={crewOpen} onClick={onToggleCrew} label={crew.crew} light />
             {crew.crew}

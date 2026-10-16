@@ -1,6 +1,14 @@
 import type { CellValue } from '../lib/types';
-import type { SalesByCustMirrorRow, SalesByRepMirrorRow, TimesheetMirrorRow } from '../lib/mirrorTabs';
-import { fmtHoursFixed } from '../lib/format';
+import {
+  SALES_BY_REP_ACCOUNTING_COLS,
+  SALES_BY_REP_WIDTHS_PX,
+  TIMESHEET_COLLAPSED_HEADERS,
+  type SalesByCustMirrorRow,
+  type SalesByRepMirrorRow,
+  type TimesheetMirrorRow,
+} from '../lib/mirrorTabs';
+import type { CSSProperties } from 'react';
+import { fmtAccounting, fmtHoursFixed } from '../lib/format';
 
 function fmtCell(v: CellValue): string {
   if (v === null || v === undefined) return '';
@@ -23,10 +31,35 @@ interface MirrorTableProps {
    * cell's tooltip, matching the widths the workbook exports.
    */
   compact?: boolean;
+  /**
+   * Round 11 — columns drawn as thin stubs; the full value stays in the
+   * cell's tooltip.
+   */
+  collapsed?: ReadonlySet<string>;
+  /** Round 11 — fixed pixel widths for the leading columns (overrides `compact`). */
+  widthsPx?: readonly number[];
+  /** Round 11 — 0-based columns shown as accounting money (1,234.56). */
+  accountingCols?: ReadonlySet<number>;
 }
 
 /** Round 6 — generic read-only mirror grid for %'s helper tabs. */
-export function MirrorTable({ headers, rows, boldFirstCol, compact }: MirrorTableProps): JSX.Element {
+export function MirrorTable({
+  headers,
+  rows,
+  boldFirstCol,
+  compact,
+  collapsed,
+  widthsPx,
+  accountingCols,
+}: MirrorTableProps): JSX.Element {
+  const isStub = (h: string): boolean => collapsed?.has(h) === true;
+  /** Fixed px width for column `i`, when one was given. */
+  const fixed = (i: number): string | undefined =>
+    widthsPx && i < widthsPx.length ? `${widthsPx[i]}px` : undefined;
+  const colStyle = (h: string, i: number): CSSProperties | undefined => {
+    const w = fixed(i) ?? (compact ? widthFor(h, i) : undefined);
+    return w ? { width: w, minWidth: w, maxWidth: w } : undefined;
+  };
   /** Round 10 — the same width buckets the export uses, in rem. */
   const widthFor = (header: string, i: number): string | undefined => {
     if (!compact) return undefined;
@@ -43,16 +76,22 @@ export function MirrorTable({ headers, rows, boldFirstCol, compact }: MirrorTabl
       <table className={`min-w-[320px] border-collapse bg-white text-xs ${compact ? 'table-fixed w-auto' : 'w-max'}`}>
         <thead>
           <tr>
-            {headers.map((h, i) => (
-              <th
-                key={i}
-                className="xcell2 truncate text-left font-bold whitespace-nowrap"
-                style={compact ? { width: widthFor(h, i), maxWidth: widthFor(h, i) } : undefined}
-                title={h}
-              >
-                {h}
-              </th>
-            ))}
+            {headers.map((h, i) =>
+              isStub(h) ? (
+                <th key={i} className="xcell2 p-0 text-center font-normal text-neutral-400" title={`${h} (collapsed)`}>
+                  ⋮
+                </th>
+              ) : (
+                <th
+                  key={i}
+                  className="xcell2 truncate text-left font-bold whitespace-nowrap"
+                  style={colStyle(h, i)}
+                  title={h}
+                >
+                  {h}
+                </th>
+              ),
+            )}
           </tr>
         </thead>
         <tbody>
@@ -67,14 +106,27 @@ export function MirrorTable({ headers, rows, boldFirstCol, compact }: MirrorTabl
               <tr key={ri}>
                 {headers.map((h, ci) => {
                   const text = fmtCell(row[ci] ?? null);
+                  if (isStub(h)) {
+                    // `whitespace-nowrap` keeps a long value from wrapping
+                    // inside the stub and stretching the whole row.
+                    return (
+                      <td key={ci} className="xcell p-0" title={text ? `${h}: ${text}` : h}>
+                        <div className="w-[7px] overflow-hidden whitespace-nowrap text-transparent">{text}</div>
+                      </td>
+                    );
+                  }
+                  const raw = row[ci] ?? null;
+                  const money = accountingCols?.has(ci) === true && typeof raw === 'number';
+                  const shown = money ? fmtAccounting(raw) : text;
+                  const sized = colStyle(h, ci) !== undefined;
                   return (
                     <td
                       key={ci}
-                      className={`xcell whitespace-nowrap ${compact ? 'truncate' : ''} ${boldFirstCol && ci === 0 ? 'font-bold' : ''}`}
-                      style={compact ? { width: widthFor(h, ci), maxWidth: widthFor(h, ci) } : undefined}
-                      title={compact ? text : undefined}
+                      className={`xcell whitespace-nowrap ${sized ? 'truncate' : ''} ${money ? 'text-right' : ''} ${boldFirstCol && ci === 0 ? 'font-bold' : ''}`}
+                      style={colStyle(h, ci)}
+                      title={sized ? shown : undefined}
                     >
-                      {text}
+                      {shown}
                     </td>
                   );
                 })}
@@ -102,8 +154,17 @@ export function SalesByRepTable({
     while (body.length < 12) body.push(null);
     return [r.apKey, ...body, r.dateCopy, r.qboJobName];
   });
-  // Round 10 — compact widths so columns A–M are visible without scrolling.
-  return <MirrorTable headers={allHeaders} rows={grid} boldFirstCol compact />;
+  // Round 11 — A–M at the specified pixel widths; J, K, L as accounting.
+  return (
+    <MirrorTable
+      headers={allHeaders}
+      rows={grid}
+      boldFirstCol
+      compact
+      widthsPx={SALES_BY_REP_WIDTHS_PX}
+      accountingCols={SALES_BY_REP_ACCOUNTING_COLS}
+    />
+  );
 }
 
 /** §3.3 / §3.4 Sales by Cust mirrors. */
@@ -155,5 +216,5 @@ export function TimesheetMirrorTable({ rows }: { rows: TimesheetMirrorRow[] }): 
     while (raw.length < 24) raw.push(null);
     return [...raw, r.apname, r.apKey, r.estimator, r.qboJobName, r.notOnCalendar];
   });
-  return <MirrorTable headers={TS_HEADERS} rows={grid} />;
+  return <MirrorTable headers={TS_HEADERS} rows={grid} collapsed={TIMESHEET_COLLAPSED_HEADERS} />;
 }

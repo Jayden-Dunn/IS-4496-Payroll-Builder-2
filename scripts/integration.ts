@@ -1093,10 +1093,35 @@ async function testExport(): Promise<void> {
   // Round 4 §2.4: hour values centered in the estimator columns.
   check('hour value centered (estimator column)', pv.getCell('H7').alignment?.horizontal, 'center');
 
-  // §2.5 + Round 2 §1: Grand Total row bold, gray/white on A + value columns,
-  // B:D unfilled.
+  // §2.5: Grand Total row bold, gray/white. Round 11 — the WHOLE row is
+  // #808080 (B:D and the helper column used to be left white), with a double
+  // rule along its top edge.
   check('grand row A gray white bold', [fillOf(pv.getCell(grandRowNum, 1)), pv.getCell(grandRowNum, 1).font?.color?.argb, pv.getCell(grandRowNum, 1).font?.bold], ['FF808080', 'FFFFFFFF', true]);
-  check('grand row B:D unfilled', [2, 3, 4].map((c) => fillOf(pv.getCell(grandRowNum, c))), [null, null, null]);
+  const pvLastCol = gtColNum + 1;
+  check(
+    'R11: grand row filled #808080 from A to the last column',
+    Array.from({ length: pvLastCol }, (_, i) => fillOf(pv.getCell(grandRowNum, i + 1))).every((f) => f === 'FF808080'),
+    true,
+  );
+  check(
+    'R11: grand row has a double TOP border, end to end',
+    Array.from({ length: pvLastCol }, (_, i) => pv.getCell(grandRowNum, i + 1).border?.top?.style).every((b) => b === 'double'),
+    true,
+  );
+  {
+    let crewRowNum = 0;
+    pv.eachRow((row, n) => {
+      if (!crewRowNum && /crew$/i.test(String(row.getCell(1).value ?? '')) && fillOf(row.getCell(1)) === 'FF000000') crewRowNum = n;
+    });
+    check(
+      'R11: a crew-lead row is ruled top and bottom across A–L',
+      crewRowNum > 0 &&
+        Array.from({ length: pvLastCol }, (_, i) => pv.getCell(crewRowNum, i + 1).border).every(
+          (b) => b?.top?.style === 'thin' && b?.bottom?.style === 'thin',
+        ),
+      true,
+    );
+  }
   check('grand row value cells gray white bold + 0.00', [pv.getCell(grandRowNum, gtColNum).value, fillOf(pv.getCell(grandRowNum, gtColNum)), pv.getCell(grandRowNum, gtColNum).font?.bold, pv.getCell(grandRowNum, gtColNum).numFmt], [62, 'FF808080', true, '0.00']);
 
   // §2.7: Calibri 12 body, hours 0.00, widths.
@@ -1229,6 +1254,32 @@ async function testExport(): Promise<void> {
     if (String(row.getCell(26).value ?? '') === '24314') noc24314 = String(row.getCell(nocCol).value ?? '');
   });
   check('timesheets sheet: 24314 Not on Calendar = TimeNavi row 3', noc24314, 'TimeNavi row 3');
+  {
+    // Round 11 — seven rarely-read columns are collapsed (hidden), nothing else.
+    const hidden: string[] = [];
+    for (let c = 1; c <= TS_HEADERS.length + 5; c++) {
+      if (tsSheet.getColumn(c).hidden) hidden.push(String(tsSheet.getCell(1, c).value));
+    }
+    check('R11: timesheets hides exactly the seven collapsed columns', hidden, [
+      'number', 'billable', 'class', 'department', 'service_item', 'has_flags', 'flag_types',
+    ]);
+  }
+  {
+    // Round 11 — Sales by Rep: A–M at the specified px widths; J, K, L accounting.
+    const sbr = readBack.getWorksheet('Sales by Rep') as ExcelJS.Worksheet;
+    const px = [77, 110, 716, 357, 176, 66, 176, 121, 176, 108, 132, 132, 66];
+    check(
+      'R11: Sales by Rep widths A–M from pixels',
+      px.map((_, i) => sbr.getColumn(i + 1).width),
+      px.map((p) => Math.round(((p - 5) / 7) * 100) / 100),
+    );
+    let fmt: string[] = [];
+    sbr.eachRow((row, n) => {
+      if (n !== 2) return;
+      fmt = [10, 11, 12].map((c) => (typeof row.getCell(c).value === 'number' ? String(row.getCell(c).numFmt) : 'n/a'));
+    });
+    check('R11: Sales by Rep J/K/L numbers carry thousands separators', fmt.filter((f) => f !== 'n/a').every((f) => f.includes('#,##0.00')), true);
+  }
 
   // ---------- Payroll Preview (Round 7 — separate payroll workbook) ----------
   const pp = payWb.getWorksheet('PAYROLL PREVIEW') as ExcelJS.Worksheet;
