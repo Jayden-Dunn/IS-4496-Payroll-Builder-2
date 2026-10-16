@@ -81,7 +81,7 @@ import {
 } from './jobNames';
 import { lastPaidMapFromPivot, readDescriptionPercents, reportRowIds } from './timenavi';
 import type { TimeNaviEvent } from './types';
-import { reviewScopes } from './reportDiff';
+import { buildUpdateDetails, flattenQbHourEdits, reviewScopes } from './reportDiff';
 import {
   ALL_MIGRATIONS,
   applySettingsMigrations,
@@ -2488,6 +2488,63 @@ export function runSelfTests(): boolean {
     [orphaned.conflicts.length, orphaned.orphans.length, orphaned.orphans[0]?.editKey],
     [0, 1, 'nv:AP9'],
   );
+
+  // Round 11 — the summary after an update can be opened to the exact changes.
+  check(
+    'R11 Update: each unedited change is recorded with its location and values',
+    reviewed.silentChanges.map((c) => [c.rowLabel, c.fieldLabel, c.oldValue, c.newValue]),
+    [['AP2', '% Completion', '10%', '25%']],
+  );
+  {
+    const pivotBefore = defaults([
+      [K('nv:J1', 'woPct'), '38%'],
+      [K('nv:J1\u0000jdoe', 'qbHours'), '8'],
+      [K('nv:J1\u0000asmith', 'qbHours'), '4'],
+    ]);
+    const pivotAfter = defaults([
+      [K('nv:J1', 'woPct'), '40%'],
+      [K('nv:J1\u0000jdoe', 'qbHours'), '9'],
+      [K('nv:J1\u0000asmith', 'qbHours'), '6'],
+    ]);
+    const pv = reviewScopes([
+      {
+        scope: 'pivot',
+        before: pivotBefore,
+        after: pivotAfter,
+        labels: new Map([['nv:J1', 'AP1 \u00b7 Cust Job']]),
+        edited: [
+          { editKey: 'nv:J1', field: 'woPct', manualValue: '35%' },
+          ...flattenQbHourEdits({ 'nv:J1\u0000jdoe': 7.5 }),
+        ],
+      },
+    ]);
+    check(
+      'R11 Update: QB Hrs edits share the Pivot scope — no change counted twice',
+      [
+        pv.conflicts.map((c) => [c.scope, c.field]),
+        pv.silentChangeCount,
+        pv.silentChanges.map((c) => [c.scope, c.fieldLabel, c.oldValue, c.newValue]),
+      ],
+      [
+        [
+          ['pivot', 'woPct'],
+          ['qbHours', 'qbHours'],
+        ],
+        1,
+        [['qbHours', 'QB Hrs', '4', '6']],
+      ],
+    );
+    const woConflict = pv.conflicts.find((c) => c.field === 'woPct')!;
+    check(
+      'R11 Update details: tab, AP# row, column and "X changed to Y" for every line',
+      buildUpdateDetails(pv, [woConflict], []).map((d) => [d.group, d.tab, d.row, d.column, d.change]),
+      [
+        ['replaced', 'Pivot by Job', 'AP1 \u00b7 Cust Job', 'WO%', '35% changed to 40% (your edit replaced by the new file)'],
+        ['kept', 'Pivot by Job', 'nv:J1\u0000jdoe', 'QB Hrs', 'kept your 7.5 \u2014 the new file has 9 (was 8)'],
+        ['changed', 'Pivot by Job', 'nv:J1\u0000asmith', 'QB Hrs', '4 changed to 6'],
+      ],
+    );
+  }
 
   const failed = results.filter((r) => !r.pass);
   const label = `[% of Completion Builder self-test] ${results.length - failed.length}/${results.length} passed`;

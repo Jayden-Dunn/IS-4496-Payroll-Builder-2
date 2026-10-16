@@ -60,6 +60,29 @@ export interface Conflict {
 
 export type ConflictScope = 'timenavi' | 'pivot' | 'qbHours' | 'payroll';
 
+/** Round 11 — the web-app tab each scope's cells live on, as the tab strip names it. */
+export const SCOPE_TAB: Record<ConflictScope, string> = {
+  timenavi: 'TimeNavi Export',
+  pivot: 'Pivot by Job',
+  qbHours: 'Pivot by Job',
+  payroll: 'Payroll Preview',
+};
+
+/**
+ * Round 11 — one value the new input moved on a cell nobody had edited. Kept
+ * whole (not just counted) so the summary after an update can say exactly
+ * what changed and where.
+ */
+export interface ValueChange {
+  scope: ConflictScope;
+  editKey: string;
+  field: string;
+  rowLabel: string;
+  fieldLabel: string;
+  oldValue: string;
+  newValue: string;
+}
+
 /** An edit whose row is not in the new file at all — shown, never gated. */
 export interface OrphanedEdit {
   editKey: string;
@@ -74,6 +97,8 @@ export interface UpdateReview {
   orphans: OrphanedEdit[];
   /** How many computed values the new input moves that nobody had edited. */
   silentChangeCount: number;
+  /** Round 11 — those same values, one entry each (`length === silentChangeCount`). */
+  silentChanges: ValueChange[];
 }
 
 const SEP = '\u0000';
@@ -181,6 +206,7 @@ const PIVOT_FIELD_LABELS: Record<string, string> = {
   customer: 'Customer',
   job: 'Job',
   estimator: 'Estimator',
+  qbHours: 'QB Hrs',
 };
 
 export function collectPivotDefaults(model: PivotByJobModel): DefaultsMap {
@@ -255,7 +281,7 @@ const PAYROLL_FIELD_LABELS: Record<string, string> = {
   materials: 'Materials (books)',
   mileageNew: 'Mileage - New',
   hourlyPay: 'Hourly Pay',
-  reimbursements: 'Reimbursements',
+  reimbursements: 'Reimbursements/additional pay',
   deductions: 'Deductions/Sundries',
   miles: 'miles',
   amount: 'amount',
@@ -348,6 +374,13 @@ export interface EditedField {
   editKey: string;
   field: string;
   manualValue: string;
+  /**
+   * Round 11 — the map this edit lives in, when it differs from its scope's.
+   * QB Hrs edits sit in their own map but on the Pivot by Job's cells, so they
+   * share that scope's before/after defaults and are tagged instead of being
+   * a second scope over the same cells (which counted every change twice).
+   */
+  scope?: ConflictScope;
 }
 
 export function flattenTimenaviEdits(edits: EditsMap): EditedField[] {
@@ -378,6 +411,7 @@ export function flattenQbHourEdits(qbHours: QbHoursMap): EditedField[] {
     editKey,
     field: 'qbHours',
     manualValue: fmtNum(v),
+    scope: 'qbHours' as const,
   }));
 }
 
@@ -387,12 +421,23 @@ export function flattenPayrollEdits(edits: PayrollEditsMap): EditedField[] {
     for (const [field, v] of Object.entries(e)) {
       if (v === undefined) continue;
       // Memo text has no computed counterpart to conflict with.
-      if (field === 'reimbMemo' || field === 'deductMemo') continue;
+      if (MEMO_FIELDS.has(field)) continue;
       out.push({ editKey, field, manualValue: printEditValue(field, v) });
     }
   }
   return out;
 }
+
+/** Free-text notes typed beside payroll values — never computed, never in conflict. */
+const MEMO_FIELDS = new Set([
+  'reimbMemo',
+  'deductMemo',
+  'memo',
+  'hourlyPayMemo',
+  'mileageNewMemo',
+  'amountMemo',
+  'mileageMemo',
+]);
 
 function printEditValue(field: string, v: unknown): string {
   if (v === null) return '';
@@ -441,16 +486,30 @@ export interface ScopeInput {
 export function reviewScopes(scopes: readonly ScopeInput[]): UpdateReview {
   const conflicts: Conflict[] = [];
   const orphans: OrphanedEdit[] = [];
-  let silent = 0;
+  const silentChanges: ValueChange[] = [];
 
   for (const s of scopes) {
     const editedFlatKeys = new Set(s.edited.map((e) => keyOf(e.editKey, e.field)));
 
-    // Everything the new input moves that nobody had edited: counted only.
+    // Everything the new input moves that nobody had edited: never asked
+    // about, but recorded so the summary can list it.
     for (const [flatKey, beforeValue] of s.before) {
       const afterValue = s.after.get(flatKey);
       if (afterValue === undefined || afterValue === beforeValue) continue;
-      if (!editedFlatKeys.has(flatKey)) silent++;
+      if (editedFlatKeys.has(flatKey)) continue;
+      const cut = flatKey.lastIndexOf(SEP);
+      const editKey = flatKey.slice(0, cut);
+      const field = flatKey.slice(cut + 1);
+      const scope: ConflictScope = field === 'qbHours' ? 'qbHours' : s.scope;
+      silentChanges.push({
+        scope,
+        editKey,
+        field,
+        rowLabel: s.labels.get(editKey) ?? editKey,
+        fieldLabel: labelFor(scope, field),
+        oldValue: beforeValue,
+        newValue: afterValue,
+      });
     }
 
     // Edited fields whose computed value moved: the only thing we ask about.
@@ -460,12 +519,13 @@ export function reviewScopes(scopes: readonly ScopeInput[]): UpdateReview {
       const afterValue = s.after.get(flatKey);
       if (beforeValue === undefined || afterValue === undefined) continue;
       if (beforeValue === afterValue) continue;
+      const scope = e.scope ?? s.scope;
       conflicts.push({
         editKey: e.editKey,
         field: e.field,
-        scope: s.scope,
+        scope,
         rowLabel: s.labels.get(e.editKey) ?? e.editKey,
-        fieldLabel: labelFor(s.scope, e.field),
+        fieldLabel: labelFor(scope, e.field),
         manualValue: e.manualValue,
         oldValue: beforeValue,
         newValue: afterValue,
@@ -483,14 +543,100 @@ export function reviewScopes(scopes: readonly ScopeInput[]): UpdateReview {
       const goneNow = fields.every((f) => s.after.get(keyOf(editKey, f.field)) === undefined);
       const wasThere = fields.some((f) => s.before.get(keyOf(editKey, f.field)) !== undefined);
       if (!goneNow || !wasThere) continue;
+      const scope = fields[0].scope ?? s.scope;
       orphans.push({
         editKey,
-        scope: s.scope,
+        scope,
         rowLabel: s.labels.get(editKey) ?? editKey,
-        summary: fields.map((f) => `${labelFor(s.scope, f.field)} ${f.manualValue || '(blank)'}`).join(', '),
+        summary: fields.map((f) => `${labelFor(scope, f.field)} ${f.manualValue || '(blank)'}`).join(', '),
       });
     }
   }
 
-  return { conflicts, orphans, silentChangeCount: silent };
+  return { conflicts, orphans, silentChangeCount: silentChanges.length, silentChanges };
+}
+
+// ---------------------------------------------------------------------------
+// Round 11 — the details behind the "N values changed" summary
+// ---------------------------------------------------------------------------
+
+export type UpdateDetailGroup = 'replaced' | 'kept' | 'orphanDiscarded' | 'orphanKept' | 'changed';
+
+/** One line of the post-update details: where, and what happened there. */
+export interface UpdateDetail {
+  group: UpdateDetailGroup;
+  /** The web-app tab, as the tab strip names it ("TimeNavi Export"). */
+  tab: string;
+  /** "AP24379 · CCSD Earl Jenkins ES Int" */
+  row: string;
+  /** The column heading ("Last % Paid"); blank for a whole-row orphan. */
+  column: string;
+  /** "40% changed to 38%" */
+  change: string;
+}
+
+const shown = (v: string): string => v || '(blank)';
+
+/** "40% changed to 38%" — the sentence every changed cell is described with. */
+export function describeChange(from: string, to: string): string {
+  return `${shown(from)} changed to ${shown(to)}`;
+}
+
+/**
+ * Everything an applied update did, one line per cell, in the order the
+ * summary lists them: manual edits the user let the new file replace, manual
+ * edits kept over a new value, edits on rows that left the file, then every
+ * value that moved on a cell nobody had edited.
+ */
+export function buildUpdateDetails(
+  review: UpdateReview,
+  taken: readonly Conflict[],
+  discarded: readonly OrphanedEdit[],
+): UpdateDetail[] {
+  const conflictId = (c: Conflict): string => `${c.scope}${SEP}${c.editKey}${SEP}${c.field}`;
+  const orphanId = (o: OrphanedEdit): string => `${o.scope}${SEP}${o.editKey}`;
+  const takenIds = new Set(taken.map(conflictId));
+  const discardedIds = new Set(discarded.map(orphanId));
+  const out: UpdateDetail[] = [];
+
+  for (const c of review.conflicts) {
+    if (!takenIds.has(conflictId(c))) continue;
+    out.push({
+      group: 'replaced',
+      tab: SCOPE_TAB[c.scope],
+      row: c.rowLabel,
+      column: c.fieldLabel,
+      change: `${describeChange(c.manualValue, c.newValue)} (your edit replaced by the new file)`,
+    });
+  }
+  for (const c of review.conflicts) {
+    if (takenIds.has(conflictId(c))) continue;
+    out.push({
+      group: 'kept',
+      tab: SCOPE_TAB[c.scope],
+      row: c.rowLabel,
+      column: c.fieldLabel,
+      change: `kept your ${shown(c.manualValue)} — the new file has ${shown(c.newValue)} (was ${shown(c.oldValue)})`,
+    });
+  }
+  for (const o of review.orphans) {
+    const gone = discardedIds.has(orphanId(o));
+    out.push({
+      group: gone ? 'orphanDiscarded' : 'orphanKept',
+      tab: SCOPE_TAB[o.scope],
+      row: o.rowLabel,
+      column: '',
+      change: `${gone ? 'discarded' : 'kept (parked)'}: ${o.summary} — the row is not in the new file`,
+    });
+  }
+  for (const v of review.silentChanges) {
+    out.push({
+      group: 'changed',
+      tab: SCOPE_TAB[v.scope],
+      row: v.rowLabel,
+      column: v.fieldLabel,
+      change: describeChange(v.oldValue, v.newValue),
+    });
+  }
+  return out;
 }

@@ -23,6 +23,7 @@ import { PivotTable } from './components/PivotTable';
 import { SettingsModal } from './components/SettingsModal';
 import { TimeNaviTable } from './components/TimeNaviTable';
 import { TopBar } from './components/TopBar';
+import { UpdateDetailsModal } from './components/UpdateDetailsModal';
 import { UpdateReviewModal } from './components/UpdateReviewModal';
 import { UploadSlot, type SlotChip } from './components/UploadSlot';
 import { timesheetApKey } from './lib/apkey';
@@ -79,6 +80,7 @@ import {
   type SessionSlotMeta,
 } from './lib/session';
 import {
+  buildUpdateDetails,
   collectPayrollDefaults,
   collectPayrollLabels,
   collectPivotDefaults,
@@ -93,6 +95,7 @@ import {
   type Conflict,
   type OrphanedEdit,
   type ScopeInput,
+  type UpdateDetail,
   type UpdateReview,
 } from './lib/reportDiff';
 import { buildShadowPayroll, buildShadowPercents } from './lib/shadowBuild';
@@ -344,7 +347,10 @@ export default function App(): JSX.Element {
     slots: string[];
     changed: number;
     kept: number;
+    /** Round 11 — every cell the update touched, for the details popup. */
+    details: UpdateDetail[];
   } | null>(null);
+  const [updateDetailsOpen, setUpdateDetailsOpen] = useState(false);
   /**
    * Crash recovery. The pointer is a SYNCHRONOUS localStorage read, so the very
    * first paint already knows whether a session is coming back and can say so
@@ -1791,7 +1797,9 @@ export default function App(): JSX.Element {
         slots: slotNames,
         changed: review.silentChangeCount + choices.take.length,
         kept: review.conflicts.length - choices.take.length,
+        details: buildUpdateDetails(review, choices.take, choices.discardOrphans),
       });
+      setUpdateDetailsOpen(false);
     },
     [pendingChips, commitPending],
   );
@@ -1804,27 +1812,24 @@ export default function App(): JSX.Element {
     if (mode === 'percents') {
       const b = buildShadowPercents(parsed, shadowDeps);
       const a = buildShadowPercents(after, shadowDeps);
+      // Labels from both builds, the new one winning, so a row the update
+      // removed still reads by its AP# in the details.
       scopes.push({
         scope: 'timenavi',
         before: collectReportDefaults(b.reportRows),
         after: collectReportDefaults(a.reportRows),
-        labels: collectReportLabels(a.reportRows.length > 0 ? a.reportRows : b.reportRows),
+        labels: new Map([...collectReportLabels(b.reportRows), ...collectReportLabels(a.reportRows)]),
         edited: flattenTimenaviEdits(edits),
       });
       if (b.pivotByJob && a.pivotByJob) {
+        // One scope over the Pivot by Job's cells; QB Hrs edits ride along
+        // tagged with their own map, so no change is counted twice.
         scopes.push({
           scope: 'pivot',
           before: collectPivotDefaults(b.pivotByJob),
           after: collectPivotDefaults(a.pivotByJob),
-          labels: collectPivotLabels(a.pivotByJob),
-          edited: flattenPivotEdits(pbjEdits),
-        });
-        scopes.push({
-          scope: 'qbHours',
-          before: collectPivotDefaults(b.pivotByJob),
-          after: collectPivotDefaults(a.pivotByJob),
-          labels: collectPivotLabels(a.pivotByJob),
-          edited: flattenQbHourEdits(qbHours),
+          labels: new Map([...collectPivotLabels(b.pivotByJob), ...collectPivotLabels(a.pivotByJob)]),
+          edited: [...flattenPivotEdits(pbjEdits), ...flattenQbHourEdits(qbHours)],
         });
       }
     } else {
@@ -1835,7 +1840,7 @@ export default function App(): JSX.Element {
           scope: 'payroll',
           before: collectPayrollDefaults(b.payroll),
           after: collectPayrollDefaults(a.payroll),
-          labels: collectPayrollLabels(a.payroll),
+          labels: new Map([...collectPayrollLabels(b.payroll), ...collectPayrollLabels(a.payroll)]),
           edited: flattenPayrollEdits(payrollEdits),
         });
       }
@@ -2303,21 +2308,43 @@ export default function App(): JSX.Element {
           className="fixed bottom-4 left-1/2 z-[60] flex -translate-x-1/2 items-center gap-3 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900 shadow-lg"
           role="status"
         >
-          <span>
+          <button
+            type="button"
+            className="text-left underline decoration-dotted underline-offset-2 hover:text-amber-950"
+            title="See exactly what changed"
+            onClick={() => setUpdateDetailsOpen(true)}
+          >
             Updated from {updateSummary.slots.join(', ') || 'the new upload'} ·{' '}
             {updateSummary.changed} {updateSummary.changed === 1 ? 'value' : 'values'} changed
             {updateSummary.kept > 0 && (
               <> · {updateSummary.kept} manual {updateSummary.kept === 1 ? 'edit' : 'edits'} kept</>
             )}
-          </span>
+          </button>
+          <button
+            type="button"
+            className="rounded bg-amber-600 px-1.5 py-0.5 text-[11px] text-white hover:bg-amber-700"
+            onClick={() => setUpdateDetailsOpen(true)}
+          >
+            see changes
+          </button>
           <button
             type="button"
             className="rounded bg-amber-200 px-1.5 py-0.5 text-[11px] hover:bg-amber-300"
-            onClick={() => setUpdateSummary(null)}
+            onClick={() => {
+              setUpdateSummary(null);
+              setUpdateDetailsOpen(false);
+            }}
           >
             dismiss
           </button>
         </div>
+      )}
+      {updateSummary && updateDetailsOpen && (
+        <UpdateDetailsModal
+          details={updateSummary.details}
+          sourceLabel={updateSummary.slots.join(', ') || 'the new upload'}
+          onClose={() => setUpdateDetailsOpen(false)}
+        />
       )}
     </div>
   );

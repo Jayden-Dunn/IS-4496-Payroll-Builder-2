@@ -51,6 +51,20 @@ rows and layout drift are tolerated; parse problems show up as a friendly error 
 Everything else (Last % Paid, QBO Job Name, In QBO Time?, Job Total $, $ Difference, Invoice Date,
 Date Difference, the pivot, and the Exceptions list) recomputes live.
 
+Last % Paid comes from last week's workbook (slot 8, its `Pivot by Job` % of Completion for the
+AP#) and, failing that, from the next-older % in the calendar Description — skipping "no pay" lines
+and this week's own line. A Description with only this week's entry leaves it blank.
+
+On **Pivot by Job**, Notes (default `*PAID XX% LAST WK*`), WO Override, WO% (HOURLY jobs included),
+% of Completion and Estimator are editable on every row, including the no-hours rows below the Grand
+Total. A blank WO Override shows `suggest $X` (job total × the WO%) as a hint; the hint is not written
+to the .xlsx. Every typed value is written to the download — the integration suite exports a set of
+edits, reads the file back, and re-reads it as next week's slot 8 to prove it.
+
+On the **Payroll Preview**, each value row has a memo cell beside it, and the T-SHEETS totals obey
+total + taxes + NEST = net: type the net and the taxes fill in (shown as `-150.00`), or type the
+taxes and the net follows. The workbook carries the same thing as a live formula.
+
 ## When one input changes mid-session
 
 A corrected timesheet, a fixed calendar export or a re-run P&L does **not** mean re-uploading
@@ -64,8 +78,10 @@ does not move until you ask it to.
 
 The update only asks about one thing: a cell you hand-edited whose underlying value the new file
 would change. It shows your edit, what it was, and what the new file says, and you either keep yours
-or take the new one — all at once or row by row. Values you never touched are applied silently and
-counted in the summary line, because there is nothing there to decide. Edits whose row is not in the
+or take the new one — all at once or row by row. Values you never touched are applied without a
+prompt, because there is nothing there to decide. The summary line afterwards (*Updated from … · N
+values changed*) opens a list of every cell the update touched — tab, AP#, column and what happened,
+e.g. *TimeNavi Export · 24403 · % Completion · 77% changed to 35%* — with a filter box. Edits whose row is not in the
 new file are listed separately; keeping one parks it, and it re-attaches if that row comes back.
 
 Under the hood this runs the builders a second time with empty edit maps (`src/lib/shadowBuild.ts`),
@@ -105,6 +121,7 @@ The timesheet's own `payroll item` column decides both the rate and the overtime
 | `Crew Lead - Hourly Wage` | the crew-lead rate (profit-share jobs) |
 | `Commercial Hourly` | the person's Commercial Hourly rate |
 | `Wages 2` | the person's Wages 2 rate |
+| `Davis Bacon` | the prevailing rate in Settings ($19.18) |
 | `Overtime Pay` / `Crew Lead - Hourly Wage Overtime` / `Daily Overtime` | 1.5× the matching rate |
 
 Only the overtime rows are paid at 1.5× — the rest of that job's hours stay at straight time. When a
@@ -119,7 +136,11 @@ job, and the band it pays into is whatever the `Crew Lead` column on `Pivot by J
 - Estimator color legend (hex fills, add/remove) — the exact colors used for row fills on screen and in the export
 - Estimator order — drives row sorting and pivot column order
 - Wage rates — five columns per person: PS (profit-share/work-order), hrly (T&M jobs), lead
-  (a crew lead's own hours on profit-share jobs), comm (`Commercial Hourly`) and wg2 (`Wages 2`)
+  (a crew lead's own hours on profit-share jobs), comm (`Commercial Hourly`) and wg2 (`Wages 2`);
+  always listed A→Z
+- Crew lead nicknames — a calendar parenthetical like `(Pepe)` or `(Andy)` → the crew lead it means
+  (case-insensitive)
+- NEST [IRA] participants — only these people get the NEST column on their T-SHEETS block
 - Payroll line items — per-person extra rows on the Payroll Preview (Aflac, Health Insurance,
   Gas Reimb, Reimbursements), each a deduction, a reimbursement or a labeled blank note, weekly or
   only on the first pay date of the month (a pay date on the 1st–7th)
@@ -154,7 +175,7 @@ Both harnesses compile to gitignored folders, so build them fresh before you
 run them — an old build silently passing is the one trap here.
 
 ```sh
-# 306 unit assertions
+# 359 unit assertions
 rm -rf .selftest && npx tsc src/lib/__selftest__.ts --outDir .selftest \
   --module commonjs --target es2022 --moduleResolution node \
   --skipLibCheck --esModuleInterop --strict false
