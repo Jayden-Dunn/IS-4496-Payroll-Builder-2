@@ -18,7 +18,7 @@
  */
 
 /** Straight-time rate slot a pay item selects. */
-export type PayRateKind = 'regular' | 'crewLead' | 'commercialHourly' | 'wages2' | 'salary';
+export type PayRateKind = 'regular' | 'crewLead' | 'commercialHourly' | 'wages2' | 'salary' | 'davisBacon';
 
 /** How an hour is classified once the pay item is read. */
 export type PayItemKind =
@@ -44,6 +44,14 @@ export function isCommercialHourlyPayItem(payItem: string): boolean {
   return /commercial\s*hourly/.test(norm(payItem));
 }
 
+/**
+ * Round 11 — the "Davis Bacon" pay item (and its overtime twin). These hours
+ * pay the Davis-Bacon rate from Settings, whatever the person's usual rate.
+ */
+export function isDavisBaconPayItem(payItem: string): boolean {
+  return /davis[\s-]*bacon/.test(norm(payItem));
+}
+
 /** True for the "Wages 2" pay item (Round 9 §18). */
 export function isWages2PayItem(payItem: string): boolean {
   return /^wages\s*2$/.test(norm(payItem));
@@ -60,7 +68,9 @@ export function classifyPayItem(payItem: string): PayItemKind {
   const daily = /daily/.test(t);
 
   let rate: PayRateKind = 'regular';
-  if (isCrewLeadPayItem(t)) rate = 'crewLead';
+  // Checked first: a Davis-Bacon line is paid by statute, not by role.
+  if (isDavisBaconPayItem(t)) rate = 'davisBacon';
+  else if (isCrewLeadPayItem(t)) rate = 'crewLead';
   else if (isCommercialHourlyPayItem(t)) rate = 'commercialHourly';
   else if (isWages2PayItem(t)) rate = 'wages2';
   else if (/^salary$/.test(t)) rate = 'salary';
@@ -83,6 +93,8 @@ export function payItemTag(payItem: string): string {
       return ' [Commercial Hourly]';
     case 'wages2':
       return ' [Wages 2]';
+    case 'davisBacon':
+      return ' [Davis Bacon]';
     default:
       return '';
   }

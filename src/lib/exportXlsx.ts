@@ -94,6 +94,16 @@ function solidFill(argb: string): ExcelJS.Fill {
   return { type: 'pattern', pattern: 'solid', fgColor: { argb } };
 }
 
+/**
+ * The fill for a CONDITIONAL format. Excel reads a conditional solid fill from
+ * `bgColor`, not `fgColor` — the opposite of a cell fill — so `solidFill` here
+ * produced the rule's red text with no pink behind it. Both are set so any
+ * reader that does look at `fgColor` agrees.
+ */
+function cfFill(argb: string): ExcelJS.Fill {
+  return { type: 'pattern', pattern: 'solid', fgColor: { argb }, bgColor: { argb } };
+}
+
 // Round 8 §4.1 — carried jobs painted this gray must not flow to payroll.
 const EXCLUSION_GRAY_HEX = 'A6A6A6';
 
@@ -659,7 +669,7 @@ function buildTimeNaviSheet(wb: ExcelJS.Workbook, input: ExportInput, palette: R
             `AND($${col}2<>"",OR($${col}2="NotClockedIn",COUNTIF($${col}$2:$${col}$${lastRow},$${col}2)>1))`,
           ],
           style: {
-            fill: solidFill(PINK_FILL),
+            fill: cfFill(PINK_FILL),
             font: { name: FONT, size: 10, color: { argb: PINK_TEXT } },
           },
         },

@@ -439,10 +439,29 @@ export interface AppSettings {
    */
   dailyOtExemptNames: string[];
   /**
+   * Round 11 — nicknames used in calendar event titles, e.g. "(Welder)" for
+   * Color Enterprises LLC. Matched case-insensitively against the title's
+   * crew-lead parenthetical before any directory lookup.
+   */
+  crewLeadAliases: CrewLeadAlias[];
+  /**
+   * Round 11 — the only people whose Payroll Preview blocks carry a
+   * `NEST [IRA]` column. Token-matched against the block name.
+   */
+  nestNames: string[];
+  /**
    * One-time data migrations already applied to this settings blob (e.g.
    * 'r8-rf-color'). Persisted so each runs exactly once per stored settings.
    */
   appliedMigrations: string[];
+}
+
+/** Round 11 — a calendar-title nickname for a crew lead. */
+export interface CrewLeadAlias {
+  /** As written in the title, without parentheses: "Welder". */
+  alias: string;
+  /** The crew lead it stands for: "Color Enterprises LLC". */
+  lead: string;
 }
 
 /** Round 6 §7.2 — job-specific pay rule. */

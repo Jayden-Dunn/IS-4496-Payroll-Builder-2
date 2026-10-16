@@ -447,6 +447,9 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
   const segKeyFor = (cls: ReturnType<typeof classifyPayItem>): string => {
     if (cls.kind === 'overtime') {
       if (cls.reason === 'daily') return ':DOT';
+      // Davis-Bacon overtime is 1.5 × the Davis-Bacon rate, so it must not
+      // share a bucket (and a rate) with ordinary overtime.
+      if (cls.rate === 'davisBacon') return ':DBOT';
       return cls.rate === 'crewLead' ? ':CLOT' : ':OT';
     }
     switch (cls.rate) {
@@ -458,6 +461,8 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
         return ':W2';
       case 'salary':
         return ':SAL';
+      case 'davisBacon':
+        return ':DB';
       default:
         return '';
     }

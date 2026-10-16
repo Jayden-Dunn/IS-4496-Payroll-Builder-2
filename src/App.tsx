@@ -126,7 +126,7 @@ import {
   type DirectoryStoreStatus,
   type SettingsStoreStatus,
 } from './lib/settings';
-import { buildReportRows, sortReportRows } from './lib/timenavi';
+import { buildReportRows, lastPaidMapFromPivot, sortReportRows } from './lib/timenavi';
 import type {
   AppSettings,
   DirectoryEmployee,
@@ -859,6 +859,9 @@ export default function App(): JSX.Element {
     return m;
   }, [combinedTimesheet]);
 
+  /** `Last % Paid` source #1 — input #8's Pivot by Job `% of Completion` by AP#. */
+  const lastPaidByAp = useMemo(() => lastPaidMapFromPivot(parsed.lastWeekPbj), [parsed.lastWeekPbj]);
+
   const reportRows = useMemo(() => {
     if (
       !createdPercents ||
@@ -879,7 +882,7 @@ export default function App(): JSX.Element {
         utSales: parsed.utSales,
         nvTotals: parsed.nvTotals,
         utTotals: parsed.utTotals,
-        lastWeekMap: parsed.lastWeek,
+        lastWeekMap: lastPaidByAp,
         timesheetJobcodeByApKey: timesheetApKeyMap,
         knownEstimators,
       },
@@ -894,7 +897,7 @@ export default function App(): JSX.Element {
     parsed.utSales,
     parsed.nvTotals,
     parsed.utTotals,
-    parsed.lastWeek,
+    lastPaidByAp,
     edits,
     timesheetApKeyMap,
     knownEstimators,
@@ -1063,8 +1066,9 @@ export default function App(): JSX.Element {
       directory: effectiveDirectory ?? directoryFromTimesheet(rows),
       crewGroups,
       subcontractors: settings.subcontractors,
+      aliases: settings.crewLeadAliases,
     };
-  }, [effectiveDirectory, combinedTimesheet, settings.subcontractors]);
+  }, [effectiveDirectory, combinedTimesheet, settings.subcontractors, settings.crewLeadAliases]);
 
   /** Round 9 §6 — the payroll side resolves leads against ITS timesheet. */
   const payrollLeadCtx = useMemo<LeadResolverContext>(() => {
@@ -1074,8 +1078,9 @@ export default function App(): JSX.Element {
       directory: effectiveDirectory ?? directoryFromTimesheet(rows),
       crewGroups,
       subcontractors: settings.subcontractors,
+      aliases: settings.crewLeadAliases,
     };
-  }, [effectiveDirectory, payrollTimesheet, settings.subcontractors]);
+  }, [effectiveDirectory, payrollTimesheet, settings.subcontractors, settings.crewLeadAliases]);
 
   /**
    * Round 9 §6 — the payroll process's Pivot by Job, built straight from Slot

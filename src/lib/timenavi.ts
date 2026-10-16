@@ -21,12 +21,22 @@ import type {
 // Description → % pre-fill parser (pay-date driven)
 // ---------------------------------------------------------------------------
 
-const STATUS_DATE_RE = /^\s*[♦*]?\s*(\d{1,2})\/(\d{1,2})\/(\d{2,4})\b/;
+/**
+ * A status line opens with its date. Leading bullets are tolerated — ♦, ◆, •,
+ * *, dashes, ">" — because a line the regex skips is not just lost: the line
+ * below it gets promoted to "this week", which is how an old 100% ended up in
+ * `% Completion` above a newer HOURLY entry.
+ */
+const STATUS_DATE_RE = /^\s*[♦◆•*>\-–—]*\s*(\d{1,2})\/(\d{1,2})\/(\d{2,4})\b/;
 const PCT_RE = /(\d{1,3}(?:\.\d+)?)\s*%/;
+/** "no pay", "no-pay", "nopay" — a week the job was not paid; never a "last paid". */
+const NO_PAY_RE = /\bno[\s-]*pay\b/i;
 
 interface StatusLine {
   date: Date;
   line: string;
+  /** File order, so lines sharing a date still sort deterministically. */
+  order: number;
 }
 
 function statusLineDate(month: string, day: string, year: string): Date {
@@ -42,9 +52,93 @@ function extractStatusLines(description: string): StatusLine[] {
     if (!line) continue;
     const m = STATUS_DATE_RE.exec(line);
     if (!m) continue;
-    out.push({ date: statusLineDate(m[1], m[2], m[3]), line });
+    out.push({ date: statusLineDate(m[1], m[2], m[3]), line, order: out.length });
   }
   return out;
+}
+
+/** What one status line says about the job's state that week. */
+function readStatusValue(text: string): PercentValue {
+  const pct = PCT_RE.exec(text);
+  if (pct) {
+    const n = Number(pct[1]);
+    if (n >= 0 && n <= 100) return n / 100;
+  }
+  if (/hourly/i.test(text)) return 'HOURLY';
+  // §2.4 — the slot where the % normally sits can instead read "subbed out"
+  // or "set rate"; both are valid states, not missing data.
+  if (matchesSubbedOut(text)) return 'SUBBED';
+  if (matchesSetRate(text)) return 'SET RATE';
+  return null;
+}
+
+/**
+ * This week's line: the one dated on the pay date, else the latest line dated
+ * on or before it. Lines dated after the pay date are next week's notes.
+ */
+function selectCurrentLine(lines: readonly StatusLine[], payDate: Date): StatusLine | null {
+  const payMs = dateOnly(payDate).getTime();
+  const exact = lines.find((s) => dateOnly(s.date).getTime() === payMs);
+  if (exact) return exact;
+  const eligible = lines.filter((s) => dateOnly(s.date).getTime() <= payMs);
+  if (eligible.length === 0) return null;
+  return eligible.reduce((best, cur) =>
+    dateOnly(cur.date).getTime() > dateOnly(best.date).getTime() ? cur : best,
+  );
+}
+
+export interface DescriptionPercents {
+  /** This week's state — `% Completion`. */
+  current: { value: PercentValue; line: string | null };
+  /**
+   * The most recent ACTUAL percentage below this week's line, skipping "no
+   * pay" weeks and any line that is not a percentage (HOURLY, subbed, set
+   * rate). Not necessarily last week: a job unpaid for three weeks still
+   * reports the last % it was actually paid at.
+   */
+  previous: { value: number; line: string } | null;
+  /**
+   * True when this week's line is the only dated line on or before the pay
+   * date. That means the job started this pay week, so there IS no last paid
+   * percentage — and printing this week's figure again as last week's is the
+   * duplication bug this guards against.
+   */
+  onlyCurrent: boolean;
+}
+
+/**
+ * Read a calendar description once for both columns. Keeping `% Completion`
+ * and `Last % Paid` on one parse guarantees they can never pick the same line.
+ */
+export function readDescriptionPercents(description: string, payDate: Date | null): DescriptionPercents {
+  const none: DescriptionPercents = { current: { value: null, line: null }, previous: null, onlyCurrent: false };
+  if (!payDate) return none;
+  const lines = extractStatusLines(description);
+  if (lines.length === 0) return none;
+
+  const currentLine = selectCurrentLine(lines, payDate);
+  if (!currentLine) return none;
+  const current = { value: readStatusValue(currentLine.line), line: currentLine.line };
+
+  const curMs = dateOnly(currentLine.date).getTime();
+  const payMs = dateOnly(payDate).getTime();
+  const others = lines.filter((s) => s !== currentLine && dateOnly(s.date).getTime() <= payMs);
+
+  // Newest first; a later position in the text is the older entry on a tie.
+  const older = others
+    .filter((s) => dateOnly(s.date).getTime() < curMs || (dateOnly(s.date).getTime() === curMs && s.order > currentLine.order))
+    .sort((a, b) => dateOnly(b.date).getTime() - dateOnly(a.date).getTime() || a.order - b.order);
+
+  let previous: DescriptionPercents['previous'] = null;
+  for (const s of older) {
+    if (NO_PAY_RE.test(s.line)) continue;
+    const v = readStatusValue(s.line);
+    if (typeof v === 'number') {
+      previous = { value: v, line: s.line };
+      break;
+    }
+  }
+  return { current, previous, onlyCurrent: others.length === 0 };
 }
 
 /**
@@ -56,33 +150,26 @@ export function suggestPercent(
   description: string,
   payDate: Date | null,
 ): { value: PercentValue; line: string | null } {
-  const statusLines = extractStatusLines(description);
-  if (statusLines.length === 0 || !payDate) return { value: null, line: null };
+  return readDescriptionPercents(description, payDate).current;
+}
 
-  const payMs = dateOnly(payDate).getTime();
-  let selected =
-    statusLines.find((s) => dateOnly(s.date).getTime() === payMs) ?? null;
-
-  if (!selected) {
-    const eligible = statusLines.filter((s) => dateOnly(s.date).getTime() <= payMs);
-    if (eligible.length === 0) return { value: null, line: null };
-    selected = eligible.reduce((best, cur) =>
-      dateOnly(cur.date).getTime() > dateOnly(best.date).getTime() ? cur : best,
-    );
+/**
+ * `Last % Paid` source #1 — last week's Pivot by Job (input #8), `% of
+ * Completion` by AP#. Only real percentages count: a job that was HOURLY last
+ * week has no "% paid", so the calendar fallback gets its turn instead.
+ */
+export function lastPaidMapFromPivot(
+  rows: readonly { apKey: string; percent: PercentValue }[] | null,
+): Map<string, number> {
+  const m = new Map<string, number>();
+  for (const r of rows ?? []) {
+    const key = normalizeApInput(r.apKey);
+    if (!key || typeof r.percent !== 'number') continue;
+    // The last row for an AP# wins: the sheet is in row order, so a later row
+    // is the more recent statement of what that job was paid to.
+    m.set(key, r.percent);
   }
-
-  const text = selected.line;
-  const pct = PCT_RE.exec(text);
-  if (pct) {
-    const n = Number(pct[1]);
-    if (n >= 0 && n <= 100) return { value: n / 100, line: selected.line };
-  }
-  if (/hourly/i.test(text)) return { value: 'HOURLY', line: selected.line };
-  // §2.4 — the slot where the % normally sits can instead read "subbed out"
-  // or "set rate"; both are valid states, not missing data.
-  if (matchesSubbedOut(text)) return { value: 'SUBBED', line: selected.line };
-  if (matchesSetRate(text)) return { value: 'SET RATE', line: selected.line };
-  return { value: null, line: selected.line };
+  return m;
 }
 
 /** First "(XX)" group of 2–3 uppercase letters in an event title. */
@@ -119,7 +206,11 @@ export interface ReportDeps {
   utSales: SalesRow[];
   nvTotals: ReadonlyMap<string, number>;
   utTotals: ReadonlyMap<string, number>;
-  lastWeekMap: ReadonlyMap<string, PrevPercent> | null;
+  /**
+   * `Last % Paid` source #1: last week's Pivot by Job `% of Completion` by
+   * AP# (see `lastPaidMapFromPivot`). The calendar description is the fallback.
+   */
+  lastWeekMap: ReadonlyMap<string, number> | null;
   /** apKey → jobcode_2 of the FIRST timesheet row with that key. */
   timesheetJobcodeByApKey: ReadonlyMap<string, string>;
   /** Known estimator initials (palette + configured lists) for the title fallback. */
@@ -198,7 +289,8 @@ export function buildReportRows(
     const apKey = edit.apKey !== undefined ? edit.apKey : ev.apKey;
     const included = edit.included !== undefined ? edit.included : apKey !== null;
 
-    const suggestion = suggestPercent(ev.description, payDate);
+    const desc = readDescriptionPercents(ev.description, payDate);
+    const suggestion = desc.current;
     const percent = edit.percent !== undefined ? edit.percent : suggestion.value;
 
     const nvMatch = apKey ? nv.byApKey.get(apKey) : undefined;
@@ -213,17 +305,25 @@ export function buildReportRows(
         : booksEstimator || estimatorFromTitle(ev.event, deps.knownEstimators) || '';
 
     /**
-     * K: the `% Completion` recorded for this AP# in last week's finished
-     * workbook (Slot 8) — never from the Description. Round 10 — a typed
-     * value on the grid wins, so a wrong carry-forward can be corrected in
-     * place before the workbook is downloaded.
+     * K: `Last % Paid`.
+     *
+     *   1. This week's line is the only dated line → blank. The job started
+     *      this pay week; showing this week's % again as "last paid" was the
+     *      duplication bug.
+     *   2. Last week's Pivot by Job (input #8) `% of Completion` for this AP#
+     *      — the record of what was actually paid.
+     *   3. Otherwise the most recent real % below this week's line in the
+     *      description, skipping "no pay" weeks — not necessarily last week.
+     *   4. Otherwise blank.
+     *
+     * A typed value on the grid still wins over all of it.
      */
-    const lastPaid =
+    const lastPaid: PrevPercent | null =
       edit.lastPaid !== undefined
         ? edit.lastPaid
-        : apKey && deps.lastWeekMap
-          ? (deps.lastWeekMap.get(apKey) ?? null)
-          : null;
+        : desc.onlyCurrent
+          ? null
+          : ((apKey ? deps.lastWeekMap?.get(apKey) : undefined) ?? desc.previous?.value ?? null);
 
     const qboJobName =
       edit.qboJobName !== undefined ? edit.qboJobName : (nvMatch?.name2 ?? utMatch?.name2 ?? '');

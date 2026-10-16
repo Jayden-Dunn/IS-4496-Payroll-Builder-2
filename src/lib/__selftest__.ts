@@ -76,12 +76,16 @@ import {
   jobDisplayPair,
   type JobDisplaySources,
 } from './jobNames';
-import { reportRowIds } from './timenavi';
+import { lastPaidMapFromPivot, readDescriptionPercents, reportRowIds } from './timenavi';
 import type { TimeNaviEvent } from './types';
 import { reviewScopes } from './reportDiff';
 import {
+  ALL_MIGRATIONS,
   applySettingsMigrations,
+  DEFAULT_CREW_LEAD_ALIASES,
   defaultSettings,
+  fixNameSpelling,
+  fixNameSpellingInText,
   parseSettings,
   DEFAULT_LEGEND,
   DEFAULT_PAINTER_ROSTER,
@@ -151,6 +155,46 @@ export function runSelfTests(): boolean {
   check('%: same file, pay 7/17 → 100%', suggestPercent(multiWeek, day(7, 17, 2026)).value, 1);
   check('%: no exact match → latest ≤ pay date', suggestPercent(multiWeek, day(7, 8, 2026)).value, 'HOURLY');
   check('%: all lines after pay date → blank', suggestPercent(multiWeek, day(6, 1, 2026)).value, null);
+
+  // --- Round 11: % Completion vs Last % Paid from one parse ------------------
+  {
+    const r = readDescriptionPercents('9/04/26- 100% Complete - JT\n8/28/26- 60% Complete - JT', day(9, 4, 2026));
+    check('R11 %: user example — 100% this week, 60% last paid', [r.current.value, r.previous?.value, r.onlyCurrent], [1, 0.6, false]);
+  }
+  {
+    const r = readDescriptionPercents('10/16/26- HOURLY\n5/22/26- 100% COMPLETE', day(10, 16, 2026));
+    check('R11 %: HOURLY this week keeps the older 100% as last paid', [r.current.value, r.previous?.value], ['HOURLY', 1]);
+  }
+  {
+    const r = readDescriptionPercents('9/04/26 45% Complete', day(9, 4, 2026));
+    check('R11 %: a lone this-week line is never last paid too', [r.current.value, r.previous, r.onlyCurrent], [0.45, null, true]);
+  }
+  {
+    const r = readDescriptionPercents('9/04/26 100%\n8/28/26 no pay\n8/21/26 NO-PAY 55%\n8/14/26 40% complete', day(9, 4, 2026));
+    check('R11 %: "no pay" weeks are skipped, even ones that carry a %', r.previous?.value, 0.4);
+  }
+  {
+    const r = readDescriptionPercents('9/04/26 100%\n8/28/26 HOURLY\n8/21/26 30%', day(9, 4, 2026));
+    check('R11 %: a non-% line is not a "% paid"', r.previous?.value, 0.3);
+  }
+  check(
+    'R11 %: a bulleted line still parses (and is not skipped into an older one)',
+    readDescriptionPercents('- 10/16/26 HOURLY\n• 5/22/26 100% COMPLETE', day(10, 16, 2026)).current.value,
+    'HOURLY',
+  );
+  {
+    const r = readDescriptionPercents('9/11/26 20% next week\n9/04/26 70%\n8/28/26 50%', day(9, 4, 2026));
+    check('R11 %: next week\'s note is neither current nor previous', [r.current.value, r.previous?.value], [0.7, 0.5]);
+  }
+  check(
+    'R11 %: input #8 map keeps only real percentages',
+    [...lastPaidMapFromPivot([
+      { apKey: '24314', percent: 0.6 },
+      { apKey: 'AP24222', percent: 'HOURLY' },
+      { apKey: '24403', percent: null },
+    ]).entries()],
+    [['24314', 0.6]],
+  );
   check(
     '%: exact-match line beats a newer line above it',
     suggestPercent('7/10/26 95% COMPLETE -SH\n7/03/26 90% Complete', day(7, 10, 2026)).value,
@@ -419,6 +463,68 @@ export function runSelfTests(): boolean {
   const calixto = resolveCrewLead('Calixto', ctx);
   check('lead resolve: inactive-only match used but flagged', [calixto.display, calixto.flags.some((f) => f.kind === 'inactiveMatch')], ['CALIXTO EFRAIN CLIMACO', true]);
   check('lead resolve: empty raw → empty, no flags', resolveCrewLead(null, ctx), { display: '', names: [], split: 1, sub: false, raw: '', flags: [] });
+
+  // --- Round 11: crew-lead nicknames ----------------------------------------
+  {
+    const aliasCtx = { ...ctx, aliases: DEFAULT_CREW_LEAD_ALIASES };
+    const welder = resolveCrewLead('WELDER', aliasCtx);
+    check('R11 alias: (WELDER) is Color Enterprises, a sub, any case', [welder.display, welder.sub], ['COLOR ENTERPRISES LLC', true]);
+    check('R11 alias: (pepe) → Pepe\'s Painting LLC', resolveCrewLead('pepe', aliasCtx).display, "PEPE'S PAINTING LLC");
+    check('R11 alias: (Carlito) → the directory spelling', resolveCrewLead('Carlito', aliasCtx).display, 'CARLOS RUIZ CRUZ');
+    check('R11 alias: (Miguel) is no longer ambiguous', resolveCrewLead('Miguel', aliasCtx).display, 'MIGUEL MARTIN');
+    const andy = resolveCrewLead('Andy', aliasCtx);
+    check('R11 alias: a new lead not yet in the directory still resolves, unflagged', [andy.display, andy.flags], ['ANDREW MAZZEO', []]);
+  }
+
+  // --- Round 11: name spelling fixes ----------------------------------------
+  check('R11 name: Damian Vasquez → Vazquez', fixNameSpelling('Damian', 'Vasquez'), { first: 'Damian', last: 'Vazquez' });
+  // Every matched token takes the corrected spelling, case included.
+  check('R11 name: any case', fixNameSpelling('DAMIAN', 'vasquez'), { first: 'Damian', last: 'Vazquez' });
+  check('R11 name: other people untouched', fixNameSpelling('Juan', 'Vasquez'), { first: 'Juan', last: 'Vasquez' });
+  check('R11 name: crew label text', fixNameSpellingInText("Damian Vasquez's Crew"), "Damian Vazquez's Crew");
+
+  // --- Round 11: settings migration over a stale saved blob -----------------
+  {
+    const stale = {
+      ...defaultSettings(),
+      wageRates: [
+        { name: 'Zed Last', rate: 18 },
+        { name: 'Damian Vasquez', rate: 17 },
+        { name: 'Emily Trujillo', rate: 18, hourlyRate: 18 },
+        { name: 'Thomas Slater', rate: 18, hourlyRate: 30 },
+        { name: 'Miguel Martin', rate: 20, hourlyRate: 20 },
+      ],
+      profitShare: [
+        { lead: 'Color Enterprises LLC', pct: 0.5 },
+        { lead: 'Damian Vasquez', pct: 0.38 },
+      ],
+      legend: DEFAULT_LEGEND.filter((l) => l.estimator !== 'JT'),
+      payrollLineItems: defaultSettings().payrollLineItems.map((i) =>
+        i.id === 'li-mike-holden-health' ? { ...i, kind: 'deduction' as const } : i,
+      ).filter((i) => !i.id.endsWith('-holiday')),
+      crewLeadAliases: [],
+      appliedMigrations: ALL_MIGRATIONS.filter((m) => m !== 'r11-settings'),
+    };
+    const m = applySettingsMigrations(stale);
+    const w = (n: string) => m.wageRates.find((x) => x.name === n);
+    check('R11 migrate: Damian renamed, $18/$18, no duplicate row', [w('Damian Vazquez')?.rate, w('Damian Vazquez')?.hourlyRate, m.wageRates.filter((x) => /damian/i.test(x.name)).length], [18, 18, 1]);
+    check('R11 migrate: Emily $16 across the board', [w('Emily Trujillo')?.rate, w('Emily Trujillo')?.hourlyRate], [16, 16]);
+    check('R11 migrate: Thomas Slater $35/$35', [w('Thomas Slater')?.rate, w('Thomas Slater')?.hourlyRate], [35, 35]);
+    check('R11 migrate: Miguel Martin $18 PS / $20 hourly', [w('Miguel Martin')?.rate, w('Miguel Martin')?.hourlyRate], [18, 20]);
+    check('R11 migrate: Andrew Mazzeo added to wages', w('Andrew Mazzeo')?.rate, 18);
+    check(
+      'R11 migrate: wage list is alphabetical',
+      m.wageRates.map((x) => x.name).join('|') === [...m.wageRates.map((x) => x.name)].sort((a, b) => a.localeCompare(b, 'en', { sensitivity: 'base' })).join('|'),
+      true,
+    );
+    check('R11 migrate: Color Enterprises at 53%', m.profitShare.find((p) => p.lead === 'Color Enterprises LLC')?.pct, 0.53);
+    check('R11 migrate: Damian renamed in profit share', m.profitShare.some((p) => p.lead === 'Damian Vazquez'), true);
+    check('R11 migrate: Andrew Mazzeo is a crew lead at the default %', m.profitShare.find((p) => p.lead === 'Andrew Mazzeo')?.pct, 0.38);
+    check('R11 migrate: JT colored DDD9C4', m.legend.find((l) => l.estimator === 'JT')?.color, 'DDD9C4');
+    check('R11 migrate: Mike Holden health insurance is a reimbursement', m.payrollLineItems.find((i) => i.id === 'li-mike-holden-health')?.kind, 'reimbursement');
+    check('R11 migrate: holiday pay rows added', m.payrollLineItems.filter((i) => i.label === 'Holiday pay').map((i) => i.person), ['Emily Trujillo', 'Sandra Hermosillo']);
+    check('R11 migrate: aliases seeded', m.crewLeadAliases.map((a) => a.alias), ['Pepe', 'Welder', 'Carlito', 'Santos', 'Miguel', 'Andy']);
+  }
   check('tokens: middle initial optional', tokensSubset('Antonio Zuniga', 'Antonio J Zuniga'), true);
 
   // --- Round 3 §3.4: overtime split ---------------------------------------------------------
@@ -559,6 +665,19 @@ export function runSelfTests(): boolean {
     'pw: default 25 stays 25 on the same job',
     resolveLineRate('RAFAEL AGUILAR', 'AP24393 SNRHA *SS*', false, pwSettings).rate,
     25,
+  );
+  // Round 11 — the "Davis Bacon" PAY ITEM pays $19.18 on any job, whatever
+  // the person's usual rate, and is recognized from the timesheet text.
+  check('R11 DB: pay item classified', classifyPayItem('Davis Bacon'), { kind: 'regular', rate: 'davisBacon' });
+  check('R11 DB: overtime twin stays Davis-Bacon', classifyPayItem('Davis-Bacon Overtime'), {
+    kind: 'overtime',
+    rate: 'davisBacon',
+    reason: 'weekly',
+  });
+  check(
+    'R11 DB: a $25 painter on a non-DB job, Davis Bacon pay item → $19.18',
+    resolveLineRate('RAFAEL AGUILAR', 'AP24314 Ext', false, { ...pwSettings, payRateKind: 'davisBacon' }),
+    { rate: 19.18, defaulted: false, prevailing: true },
   );
   check(
     'pw: hourly job uses the hourly-jobs rate',

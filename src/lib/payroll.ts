@@ -9,6 +9,7 @@ import { baseApKey } from './jobNames';
 import type { PayRateKind } from './payTypes';
 import type {
   ConditionalRateRule,
+  CrewLeadAlias,
   CrewLeadResolution,
   DirectoryEmployee,
   JobRateRule,
@@ -133,6 +134,8 @@ export interface LeadResolverContext {
   /** Timesheet `group` labels (for the "is a crew lead" preference). */
   crewGroups: string[];
   subcontractors: string[];
+  /** Round 11 — calendar-title nicknames ("Welder" → Color Enterprises LLC). */
+  aliases?: readonly CrewLeadAlias[];
 }
 
 /** Strip the "'s Crew" suffix from a group label; null when absent. */
@@ -168,6 +171,23 @@ function resolveCandidate(
   const flags: CrewLeadResolution['flags'] = [];
   const candLower = candidate.toLowerCase();
   const candTokens = nameTokens(candidate);
+
+  /**
+   * Round 11 — a nickname from Settings is an explicit instruction, not a
+   * guess: "(Welder)" IS Color Enterprises LLC. Resolve the real name the
+   * normal way so it picks up the directory spelling and the sub flag, and
+   * if the directory does not know them yet (a new lead with no hours), use
+   * the name as configured rather than reporting "no match".
+   */
+  const alias = ctx.aliases?.find((a) => a.alias.trim().toLowerCase() === candLower.trim());
+  if (alias) {
+    const target = resolveCandidate(alias.lead, { ...ctx, aliases: [] });
+    // They are a crew lead because Settings says so.
+    const kept = target.flags.filter((f) => f.kind !== 'notACrewLead' && f.kind !== 'noMatch');
+    if (target.name) return { ...target, flags: kept };
+    const sub = ctx.subcontractors.some((s) => tokensSubset(alias.lead, s) || tokensSubset(s, alias.lead));
+    return { name: stripSingleLetterTokens(alias.lead).toUpperCase(), sub, flags: kept };
+  }
 
   let matches = ctx.directory.filter((e) => {
     if (candTokens.length > 1) return tokensSubset(candidate, e.fullName);
@@ -787,6 +807,14 @@ export function resolveLineRate(
     payRateKind?: PayRateKind;
   },
 ): LineRate {
+  /**
+   * Round 11 — hours clocked on the "Davis Bacon" pay item pay the Davis-Bacon
+   * rate, full stop. It outranks every rule below because it is what the
+   * person actually clocked, and the rate is set by statute, not by role.
+   */
+  if (settings.payRateKind === 'davisBacon') {
+    return { rate: settings.prevailingMinRate, defaulted: false, prevailing: true };
+  }
   const apKey = settings.apKey ?? extractApKey(jobText);
   const perJob = matchPerJobRateOverride(employeeName, apKey, settings.perJobRateOverrides);
   const jobRule = perJob ? null : matchJobRateRule(employeeName, apKey, settings.jobRateRules);
