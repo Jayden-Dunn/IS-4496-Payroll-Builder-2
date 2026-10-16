@@ -24,7 +24,9 @@ import {
   isPrevailingWageJob,
   jobDisplayName,
   resolveCrewLead,
+  hasNest,
   resolveLineRate,
+  resolveNetRow,
   splitDailyOvertime,
   splitOvertime,
   stripSingleLetterTokens,
@@ -823,6 +825,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
         label: item.label,
         amount: e.amount !== undefined ? e.amount : item.amount,
         kind: item.kind,
+        memo: e.memo ?? '',
       });
     }
     return out;
@@ -1124,6 +1127,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     const totalHours = round2(lines.reduce((a, l) => a + l.hours, 0));
     const totalPay = round2(lines.reduce((a, l) => a + l.hours * l.rate, 0));
     const blockEdit = edits[`hb:${emp.username}`] ?? {};
+    const showNest = hasNest(emp.fullName, settings.nestNames);
     // Round 9 §19/§23 — person-scoped extra rows (Gas Reimb, Aflac, …). A crew
     // lead's own T-SHEETS block skips them: the PS band directly above it
     // already carries that person's rows, and a deduction must only bite once.
@@ -1136,9 +1140,8 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       lines,
       totalHours,
       totalPay,
-      taxes: blockEdit.taxes !== undefined ? blockEdit.taxes : null,
-      nest: blockEdit.nest !== undefined ? blockEdit.nest : null,
-      net: blockEdit.net !== undefined ? blockEdit.net : null,
+      ...resolveNetRow(totalPay, blockEdit, showNest),
+      showNest,
       inactive: emp.inactive,
       extras,
       netPay: round2(totalPay + extrasNet(extras)),
@@ -1586,6 +1589,8 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       leadName: leadUpper,
       displayName: leadDisplayName,
       sub: meta.sub,
+      hourlyPayMemo: be.hourlyPayMemo ?? '',
+      mileageNewMemo: be.mileageNewMemo ?? '',
       jobs,
       total,
       mileageNew,
@@ -1638,6 +1643,9 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     const extras = extrasFor(entry.name, key);
     return {
       key,
+      amountMemo: e.amountMemo ?? '',
+      mileageMemo: e.mileageMemo ?? '',
+      reimbMemo: e.reimbMemo ?? '',
       name: stripSingleLetterTokens(entry.name),
       role: entry.role,
       amount: entry.amount,

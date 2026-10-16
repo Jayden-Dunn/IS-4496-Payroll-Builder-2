@@ -51,6 +51,8 @@ import type {
 const BLACK = 'FF000000';
 const WHITE = 'FFFFFFFF';
 const HEADER_GRAY = 'FF808080';
+/** Round 11 — taxes / NEST / net: a leading minus sign, red, no parentheses. */
+const SIGNED_FMT = '#,##0.00;[Red]-#,##0.00';
 const GRAND_TOTAL_GRAY = 'FFD9D9D9';
 
 // Round 4 §1.1 — Excel's classic "bad" style for the pink review flags.
@@ -1302,7 +1304,8 @@ function buildPayrollPreviewSheet(
       // Round 6 §6.1 — bold `(-) taxes` / `NEST [IRA]` / `net` labels on the LAST job line.
       if (isLast) {
         r.getCell(6).value = '(-) taxes';
-        r.getCell(7).value = 'NEST [IRA]';
+        // Round 11 — only people on the NEST list get the NEST [IRA] column.
+        r.getCell(7).value = block.showNest ? 'NEST [IRA]' : '';
         r.getCell(8).value = 'net';
         for (const c of [6, 7, 8]) {
           r.getCell(c).font = { ...baseFont, bold: true };
@@ -1325,12 +1328,26 @@ function buildPayrollPreviewSheet(
     const sums = ws.addRow(['', '']);
     sums.getCell(3).value = { formula: `SUM(C${firstLineRow}:C${lastLineRow})` };
     sums.getCell(5).value = { formula: `SUM(E${firstLineRow}:E${lastLineRow})` };
-    // Round 6 §6.1 — taxes / NEST / net blank by default (independent manual cells).
-    sums.getCell(6).value = block.taxes ?? '';
-    sums.getCell(7).value = block.nest ?? '';
+    /**
+     * Round 11 — total + taxes + NEST = net, live in the workbook. Net (H) and
+     * NEST (G) are values; taxes (F) is a formula off them, so typing a net in
+     * Excel back-fills the taxes just as it does on screen. The cached result
+     * is written too, so the cell shows a number before Excel recalculates.
+     */
+    const sn = sums.number;
+    sums.getCell(6).value = {
+      formula: `IF(H${sn}="","",H${sn}-E${sn}-N(G${sn}))`,
+      result: block.taxes ?? '',
+    };
+    sums.getCell(7).value = block.showNest ? (block.nest ?? '') : '';
     sums.getCell(8).value = block.net ?? '';
-    for (const c of [3, 5, 6, 7, 8]) {
+    for (const c of [3, 5]) {
       sums.getCell(c).numFmt = HOURS_FMT;
+      sums.getCell(c).alignment = center;
+    }
+    for (const c of [6, 7, 8]) {
+      // Negatives read "-1,234.56" (red), not "(1,234.56)".
+      sums.getCell(c).numFmt = SIGNED_FMT;
       sums.getCell(c).alignment = center;
     }
     sums.font = { ...baseFont, bold: true };
@@ -1352,7 +1369,8 @@ function buildPayrollPreviewSheet(
     if (block.extras.length > 0) {
       const extraRows = block.extras.map((x) => ({
         extra: x,
-        row: ws.addRow([x.label, '', '', '', x.amount ?? '']).number,
+        // Round 11 — the note sits in F, immediately right of the amount.
+        row: ws.addRow([x.label, '', '', '', x.amount ?? '', x.memo]).number,
       }));
       for (const r of extraRows) {
         ws.getCell(`E${r.row}`).numFmt = ACCOUNTING_FMT;
@@ -1451,19 +1469,18 @@ function buildPayrollPreviewSheet(
     ws.addRow([]);
     const totalRow = ws.addRow(['Total']).number;
     // Round 10 — one column per job, like every other chain row.
-    const mileNewRow = ws.addRow([
-      'Mileage - New',
-      block.mileageNew,
-      ...block.jobs.slice(1).map(() => ''),
-    ]).number;
+    // Round 11 — every single-value row carries its note in column C, the
+    // cell immediately right of the value, as on screen.
+    const mileNewRow = ws.addRow(['Mileage - New', block.mileageNew, block.mileageNewMemo]).number;
     const hourlyPayRow = ws.addRow(['Hourly Pay']).number;
-    const reimbRow = ws.addRow(['Reimbursements', block.reimbursements, block.reimbMemo]).number;
+    ws.getCell(`C${hourlyPayRow}`).value = block.hourlyPayMemo;
+    const reimbRow = ws.addRow(['Reimbursements/additional pay', block.reimbursements, block.reimbMemo]).number;
     const deductRow = ws.addRow(['Deductions/Sundries']).number;
     // Round 9 §19/§23 — configured extra rows sit directly above Total Pay so
     // the formula below can pick them up.
     const extraRows = block.extras.map((x) => ({
       extra: x,
-      row: ws.addRow([x.label, x.amount ?? '']).number,
+      row: ws.addRow([x.label, x.amount ?? '', x.memo]).number,
     }));
     const totalPayRow = ws.addRow(['Total Pay']).number;
     const inputRef = inputRefsByLeadKey?.get(block.key);
@@ -1620,22 +1637,23 @@ function buildPayrollPreviewSheet(
       BLACK,
     );
     // §5.4 — the date-range cell renders 9pt like the office PO cells.
-    const r1 = ws.addRow([model.weekRange ? `(${model.weekRange})` : '', block.role, block.amount]);
+    // Round 11 — each value row's note sits in D, immediately right of it.
+    const r1 = ws.addRow([model.weekRange ? `(${model.weekRange})` : '', block.role, block.amount, block.amountMemo]);
     r1.getCell(1).font = { ...baseFont, size: 9 };
     r1.getCell(3).numFmt = ACCOUNTING_FMT;
     // Round 9 §28 — a flat labeled reimbursements row replaces mileage reimb
     // for the people configured that way (Jodi Dunn).
     // Round 10 — some people carry no mileage row at all.
     const r2 = block.reimbursementsLabel
-      ? ws.addRow([block.reimbursementsLabel, '', block.reimbursements])
+      ? ws.addRow([block.reimbursementsLabel, '', block.reimbursements, block.reimbMemo])
       : block.noMileageRow
         ? null
-        : ws.addRow([`mileage reimb: ${block.name} - ${block.miles} miles`, '', block.mileageReimb]);
+        : ws.addRow([`mileage reimb: ${block.name} - ${block.miles} miles`, '', block.mileageReimb, block.mileageMemo]);
     if (r2) r2.getCell(3).numFmt = ACCOUNTING_FMT;
     // Round 9 §19/§23/§24/§29 — configured extra rows.
     const extraRows = block.extras.map((x) => ({
       extra: x,
-      row: ws.addRow([x.label, '', x.amount ?? '']).number,
+      row: ws.addRow([x.label, '', x.amount ?? '', x.memo]).number,
     }));
     for (const r of extraRows) {
       ws.getCell(`C${r.row}`).numFmt = ACCOUNTING_FMT;

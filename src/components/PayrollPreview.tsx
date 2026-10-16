@@ -1,6 +1,7 @@
 import type { CSSProperties } from 'react';
 import {
   fmtAccounting,
+  fmtSigned,
   isDarkColor,
   NEGATIVE_TEXT_CLASS,
   negativeClass,
@@ -39,6 +40,7 @@ function NumCell({
   onCommit,
   pct,
   money,
+  signed,
   className,
   placeholder,
 }: {
@@ -47,6 +49,8 @@ function NumCell({
   pct?: boolean;
   /** Round 10 — render with a leading `$`, like the Profit Share row. */
   money?: boolean;
+  /** Round 11 — negatives as "-1,234.56" rather than "(1,234.56)". */
+  signed?: boolean;
   className?: string;
   placeholder?: string;
 }): JSX.Element {
@@ -55,9 +59,11 @@ function NumCell({
       ? ''
       : pct
         ? `${Math.round(value * 100)}%`
-        : money
-          ? `$${fmtAccounting(value)}`
-          : fmtAccounting(value);
+        : signed
+          ? fmtSigned(value)
+          : money
+            ? `$${fmtAccounting(value)}`
+            : fmtAccounting(value);
   return (
     <CellInput
       value={display}
@@ -106,16 +112,23 @@ function ExtraRow({
       >
         {extra.label}
       </td>
-      <td className={`xcell text-right ${color}`} colSpan={Math.max(1, span)}>
+      <td className={`xcell text-right ${color}`}>
         <NumCell
           value={extra.amount}
           onCommit={(n) => onEdit(extra.key, { amount: n })}
           className={color}
         />
       </td>
+      {/* Round 11 — a note beside the amount, on every extra row. */}
+      <td className="xcell" colSpan={Math.max(1, span - 1)}>
+        <MemoCell value={extra.memo} onCommit={(t) => onEdit(extra.key, { memo: t })} />
+      </td>
     </tr>
   );
 }
+
+/** Round 11 — the reimbursements row also covers additional pay. */
+const REIMB_LABEL = 'Reimbursements/additional pay';
 
 function jobCellStyle(hex: string | null): CSSProperties | undefined {
   if (!hex) return undefined;
@@ -136,7 +149,9 @@ function HourlyBlockView({
   onEdit: PayrollPreviewProps['onEdit'];
   tsheets?: boolean;
 }): JSX.Element {
-  // Round 6 §6.1 — taxes / nest / net are independent manual cells (never total − net).
+  // Round 11 — total + taxes + NEST = net; typing the net back-fills the
+  // taxes (see `resolveNetRow`). Only people on the NEST list get that column.
+  const tailCols = block.showNest ? 3 : 2;
   const bodyCls = tsheets ? 'bg-[#F9F9F9]' : '';
   const dotted = tsheets ? 'border-b border-dotted border-neutral-400' : '';
   return (
@@ -150,12 +165,12 @@ function HourlyBlockView({
             <th className="xcell border border-neutral-500 text-center" style={NEARWHITE} colSpan={5}>
               {block.employeeName.split(' ')[0]}&apos;s T-SHEETS BREAKDOWN
             </th>
-            <th className="xcell" colSpan={2} />
+            <th className="xcell" colSpan={tailCols} />
           </tr>
         ) : (
           <tr>
             {/* §5.4 — merged tan name band: name bold black + crew tag bold white. */}
-            <th className="xcell py-1 text-center" style={TAN} colSpan={7}>
+            <th className="xcell py-1 text-center" style={TAN} colSpan={5 + tailCols}>
               <span className="text-[13px] font-bold text-black">{block.employeeName}</span>
               {block.crewTag && <span className="ml-1 text-[11px] font-bold text-white">({block.crewTag})</span>}
               {block.inactive && <span className="ml-2 rounded bg-red-100 px-1 text-[10px] text-red-700">inactive (*)</span>}
@@ -168,8 +183,9 @@ function HourlyBlockView({
           <th className={`xcell w-16 text-center font-bold underline ${bodyCls}`}>hrs</th>
           <th className={`xcell w-16 text-center font-bold underline ${bodyCls}`}>rate</th>
           <th className={`xcell w-24 text-center font-bold underline ${bodyCls}`}>total</th>
-          <th className="xcell w-24" />
-          <th className="xcell w-24" />
+          {Array.from({ length: tailCols }, (_, i) => (
+            <th key={i} className="xcell w-24" />
+          ))}
         </tr>
       </thead>
       <tbody>
@@ -224,7 +240,7 @@ function HourlyBlockView({
                 {fmtAccounting(l.hours * l.rate)}
               </td>
               <td className="xcell text-center font-bold">{isLast ? '(-) taxes' : ''}</td>
-              <td className="xcell text-center font-bold">{isLast ? 'NEST [IRA]' : ''}</td>
+              {block.showNest && <td className="xcell text-center font-bold">{isLast ? 'NEST [IRA]' : ''}</td>}
               <td className="xcell text-center font-bold">{isLast ? 'net' : ''}</td>
             </tr>
           );
@@ -235,14 +251,28 @@ function HourlyBlockView({
           <td className={`xcell border-t border-t-neutral-500 text-center ${bodyCls}`}>{block.totalHours.toFixed(2)}</td>
           <td className={`xcell border-t border-t-neutral-500 ${bodyCls}`} />
           <td className={`xcell border-t border-t-neutral-500 text-center ${bodyCls}`}>{fmtAccounting(block.totalPay)}</td>
-          <td className="xcell text-center">
-            <NumCell value={block.taxes} onCommit={(n) => onEdit(`hb:${block.key}`, { taxes: n })} className="text-center" />
+          {/* Typing taxes clears a typed net (and vice versa), so the one the
+              clerk just entered is the one the other is derived from. */}
+          <td className="xcell text-center" title="Withholding — always negative. Type the net instead and this fills itself in.">
+            <NumCell
+              value={block.taxes}
+              signed
+              onCommit={(n) => onEdit(`hb:${block.key}`, { taxes: n, net: null })}
+              className="text-center"
+            />
           </td>
-          <td className="xcell text-center">
-            <NumCell value={block.nest} onCommit={(n) => onEdit(`hb:${block.key}`, { nest: n })} className="text-center" />
-          </td>
-          <td className="xcell text-center">
-            <NumCell value={block.net} onCommit={(n) => onEdit(`hb:${block.key}`, { net: n })} className="text-center" />
+          {block.showNest && (
+            <td className="xcell text-center" title="NEST [IRA] contribution — always negative">
+              <NumCell value={block.nest} signed onCommit={(n) => onEdit(`hb:${block.key}`, { nest: n })} className="text-center" />
+            </td>
+          )}
+          <td className="xcell text-center" title="Net pay. total + taxes + NEST = net; typing it here computes the taxes.">
+            <NumCell
+              value={block.net}
+              signed
+              onCommit={(n) => onEdit(`hb:${block.key}`, { net: n, taxes: null })}
+              className="text-center"
+            />
           </td>
         </tr>
         {/* Round 9 §19/§23 — extra rows (Gas Reimb, Aflac, …) under the totals. */}
@@ -258,9 +288,10 @@ function HourlyBlockView({
             >
               <NumCell value={x.amount} onCommit={(n) => onEdit(x.key, { amount: n })} className="text-center" />
             </td>
-            <td className="xcell" />
-            <td className="xcell" />
-            <td className="xcell" />
+            {/* Round 11 — a note beside the amount. */}
+            <td className="xcell" colSpan={tailCols}>
+              <MemoCell value={x.memo} onCommit={(t) => onEdit(x.key, { memo: t })} />
+            </td>
           </tr>
         ))}
         {block.extras.some((x) => x.kind !== 'note') && (
@@ -271,9 +302,7 @@ function HourlyBlockView({
             <td className="xcell" />
             <td className="xcell" />
             <td className="xcell text-center">{fmtAccounting(block.netPay)}</td>
-            <td className="xcell" />
-            <td className="xcell" />
-            <td className="xcell" />
+            <td className="xcell" colSpan={tailCols} />
           </tr>
         )}
       </tbody>
@@ -294,6 +323,8 @@ function PsBlockView({
   const label = (t: string): JSX.Element => <td className="xcell w-44 font-medium">{t}</td>;
   const psKey = (jobRowId: string): string => `ps:${block.key}:${jobRowId}`;
   const anySplit = block.jobs.some((j) => j.splitWith > 1);
+  /** Round 11 — the note cell right of a single value spans the rest of the band. */
+  const memoSpan = Math.max(1, block.jobs.length - 1);
   // §5.6 — PO/Name value cells: right-aligned, bold, estimator fill.
   const poNameCell = (j: PsBlock['jobs'][number], text: string, title?: string): JSX.Element => (
     <td
@@ -463,19 +494,20 @@ function PsBlockView({
           <td className="xcell" colSpan={1 + block.jobs.length} />
         </tr>
         <SummaryRow label="Total" value={fmtAccounting(block.total)} negative={block.total < 0} />
-        {/* Round 10 — one column per job, like every other chain row. */}
+        {/* Round 11 — every single-value row has an editable note in the cell
+            immediately to its right. A one-job band used to have no column
+            there at all, so the note could not be typed. */}
         <tr>
           {label('Mileage - New')}
-          {block.jobs.map((j, i) => (
-            <td key={j.jobRowId} className="xcell text-right">
-              {i === 0 ? (
-                <NumCell
-                  value={block.mileageNew}
-                  onCommit={(n) => onEdit(`psb:${block.key}`, { mileageNew: n ?? 0 })}
-                />
-              ) : null}
-            </td>
-          ))}
+          <td className="xcell text-right">
+            <NumCell
+              value={block.mileageNew}
+              onCommit={(n) => onEdit(`psb:${block.key}`, { mileageNew: n ?? 0 })}
+            />
+          </td>
+          <td className="xcell" colSpan={memoSpan}>
+            <MemoCell value={block.mileageNewMemo} onCommit={(t) => onEdit(`psb:${block.key}`, { mileageNewMemo: t })} />
+          </td>
         </tr>
         {/* §5.6 — Hourly Pay value cell highlighted yellow. */}
         {/* Round 10 — one cell immediately right of the label, never merged
@@ -485,18 +517,18 @@ function PsBlockView({
           <td className="xcell text-right" style={HOURLY_PAY_YELLOW}>
             <NumCell value={block.hourlyPay} onCommit={(n) => onEdit(`psb:${block.key}`, { hourlyPay: n ?? 0 })} />
           </td>
-          {block.jobs.length > 1 && <td className="xcell" colSpan={block.jobs.length - 1} />}
+          <td className="xcell font-normal" colSpan={memoSpan}>
+            <MemoCell value={block.hourlyPayMemo} onCommit={(t) => onEdit(`psb:${block.key}`, { hourlyPayMemo: t })} />
+          </td>
         </tr>
         <tr>
-          {label('Reimbursements')}
+          {label(REIMB_LABEL)}
           <td className="xcell text-right text-[#0070C0]">
             <NumCell value={block.reimbursements} onCommit={(n) => onEdit(`psb:${block.key}`, { reimbursements: n ?? 0 })} className="text-[#0070C0]" />
           </td>
-          {block.jobs.length > 1 && (
-            <td className="xcell" colSpan={block.jobs.length - 1}>
-              <MemoCell value={block.reimbMemo} onCommit={(t) => onEdit(`psb:${block.key}`, { reimbMemo: t })} />
-            </td>
-          )}
+          <td className="xcell" colSpan={memoSpan}>
+            <MemoCell value={block.reimbMemo} onCommit={(t) => onEdit(`psb:${block.key}`, { reimbMemo: t })} />
+          </td>
         </tr>
         {/* §5.6 — double line between Deductions/Sundries and Total Pay. */}
         <tr className="border-b-4 border-double border-b-neutral-600">
@@ -510,11 +542,9 @@ function PsBlockView({
           <td className="xcell text-right text-[#FF0000]">
             <NumCell value={block.deductions} onCommit={(n) => onEdit(`psb:${block.key}`, { deductions: n ?? 0 })} className="text-[#FF0000]" />
           </td>
-          {block.jobs.length > 1 && (
-            <td className="xcell" colSpan={block.jobs.length - 1}>
-              <MemoCell value={block.deductMemo} onCommit={(t) => onEdit(`psb:${block.key}`, { deductMemo: t })} />
-            </td>
-          )}
+          <td className="xcell" colSpan={memoSpan}>
+            <MemoCell value={block.deductMemo} onCommit={(t) => onEdit(`psb:${block.key}`, { deductMemo: t })} />
+          </td>
         </tr>
         {/* Round 9 §19/§23 — person-scoped extra rows; deductions come out of
             Total Pay, reimbursements go in, notes are labeled blank cells. */}
@@ -636,7 +666,7 @@ function SalaryBlockView({
     <table className="mb-3 w-full max-w-2xl border-collapse bg-white text-xs" id={`pp-${block.key}`}>
       <thead>
         <tr>
-          <th className="xcell text-left" style={headerStyle} colSpan={3}>
+          <th className="xcell text-left" style={headerStyle} colSpan={4}>
             {block.name}
             {block.timesheetHours > 0 && <span className="ml-1 font-normal">({block.timesheetHours}hrs)</span>}
             {/* Round 9 §26 — Kristina Benson & co. are subcontractors. */}
@@ -651,6 +681,9 @@ function SalaryBlockView({
           <td className="xcell w-44 text-[10px]">{weekRange ? `(${weekRange})` : ''}</td>
           <td className="xcell">{block.role}</td>
           <td className="xcell w-28 text-right">{fmtAccounting(block.amount)}</td>
+          <td className="xcell w-40">
+            <MemoCell value={block.amountMemo} onCommit={(t) => onEdit(block.key, { amountMemo: t })} />
+          </td>
         </tr>
         {/* Round 9 §28 — a person with a reimbursements label gets a flat
             editable row here instead of the miles × rate mileage row. */}
@@ -665,6 +698,9 @@ function SalaryBlockView({
                 className="text-[#0070C0]"
               />
             </td>
+            <td className="xcell">
+              <MemoCell value={block.reimbMemo} onCommit={(t) => onEdit(block.key, { reimbMemo: t })} />
+            </td>
           </tr>
         ) : block.noMileageRow ? null : (
           <tr>
@@ -673,6 +709,9 @@ function SalaryBlockView({
               <NumCell value={block.miles} onCommit={(n) => onEdit(block.key, { miles: n ?? 0 })} />
             </td>
             <td className="xcell text-right">{fmtAccounting(block.mileageReimb)}</td>
+            <td className="xcell">
+              <MemoCell value={block.mileageMemo} onCommit={(t) => onEdit(block.key, { mileageMemo: t })} />
+            </td>
           </tr>
         )}
         {/* Round 9 §19/§23/§24/§29 — Aflac, Health Insurance, Reimbursements… */}
@@ -689,12 +728,16 @@ function SalaryBlockView({
                 className={x.kind === 'deduction' ? 'text-[#FF0000]' : x.kind === 'reimbursement' ? 'text-[#0070C0]' : ''}
               />
             </td>
+            <td className="xcell">
+              <MemoCell value={x.memo} onCommit={(t) => onEdit(x.key, { memo: t })} />
+            </td>
           </tr>
         ))}
         <tr className="font-semibold">
           <td className="xcell">Total</td>
           <td className="xcell" />
           <td className="xcell text-right">{fmtAccounting(block.total)}</td>
+          <td className="xcell" />
         </tr>
         {/* Round 9 §34 — pre-filled taxes / net when the roster carries them. */}
         {(block.taxes !== null || block.net !== null) && (
@@ -705,6 +748,7 @@ function SalaryBlockView({
               <td className="xcell text-right">
                 <NumCell value={block.taxes} onCommit={(n) => onEdit(block.key, { taxes: n })} />
               </td>
+              <td className="xcell" />
             </tr>
             <tr className="font-semibold">
               <td className="xcell">net</td>
@@ -712,6 +756,7 @@ function SalaryBlockView({
               <td className="xcell text-right">
                 <NumCell value={block.net} onCommit={(n) => onEdit(block.key, { net: n })} />
               </td>
+              <td className="xcell" />
             </tr>
           </>
         )}

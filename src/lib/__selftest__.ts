@@ -40,11 +40,14 @@ import {
   extractLeadParenthetical,
   extractWoOverride,
   extractWoPct,
+  hasNest,
   isPrevailingWageJob,
   jobDisplayName,
   profitSharePctFor,
+  profitshareOutputLeads,
   resolveCrewLead,
   resolveLineRate,
+  resolveNetRow,
   resolveWageRate,
   splitDailyOvertime,
   splitLeadCandidates,
@@ -107,6 +110,7 @@ import type {
   PercentValue,
   PivotByJobModel,
   PivotModel,
+  PsBlock,
   PlParseResult,
   ReportRow,
   WorkbookData,
@@ -1631,6 +1635,53 @@ export function runSelfTests(): boolean {
     [stripPaidLastWeek('*PAID 60% LAST WK*'), stripPaidLastWeek('punch list *Paid 37.5% Last Week*')],
     ['', 'punch list'],
   );
+
+  // Round 11 — T-SHEETS totals: total + taxes + NEST = net.
+  check(
+    'R11 net: typing net derives taxes (negative), NEST counted',
+    resolveNetRow(1000, { net: 780, nest: 50 }, true),
+    { taxes: -170, nest: -50, net: 780 },
+  );
+  check(
+    'R11 net: typing taxes (either sign) derives net',
+    [resolveNetRow(1000, { taxes: 150 }, false), resolveNetRow(1000, { taxes: -150 }, false)],
+    [
+      { taxes: -150, nest: null, net: 850 },
+      { taxes: -150, nest: null, net: 850 },
+    ],
+  );
+  check(
+    'R11 net: NEST ignored for someone without the column',
+    resolveNetRow(1000, { taxes: 100, nest: 40 }, false),
+    { taxes: -100, nest: null, net: 900 },
+  );
+  check(
+    'R11 net: nothing typed → all blank',
+    resolveNetRow(1000, {}, true),
+    { taxes: null, nest: null, net: null },
+  );
+  check(
+    'R11 NEST list: token match in any order, others excluded',
+    [
+      hasNest('Aguilar Rafael', ['Rafael Aguilar']),
+      hasNest('Rafael Aguilar Campos', ['Rafael Aguilar']),
+      hasNest('Rafael Ortiz', ['Rafael Aguilar']),
+      hasNest('Anyone', undefined),
+    ],
+    [true, true, false, false],
+  );
+  {
+    const lead = (key: string, jobCount: number): PsBlock =>
+      ({ key, jobs: Array.from({ length: jobCount }, () => ({})) }) as unknown as PsBlock;
+    check(
+      'R11 PS Output: hourly-only lead dropped, Input #s index kept',
+      profitshareOutputLeads([lead('a', 2), lead('b', 0), lead('c', 1)]).map((x) => [x.block.key, x.inputIndex]),
+      [
+        ['a', 0],
+        ['c', 2],
+      ],
+    );
+  }
 
   const carriedRow = (over: Partial<ManualSectionRow> & { apKey: string; crewLead: string }): ManualSectionRow => ({
     id: `bal:${over.apKey}`,

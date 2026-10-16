@@ -16,7 +16,7 @@ import {
   type SalesByRepMirrorRow,
   type TimesheetMirrorRow,
 } from './mirrorTabs';
-import { hourSplitRows } from './payroll';
+import { hourSplitRows, profitshareOutputLeads } from './payroll';
 import { buildPrFinalCheckRows } from './prFinalCheck';
 import type {
   HourlyBlock,
@@ -661,7 +661,7 @@ function writePsChainValues(
     },
     { label: 'Hourly Pay', value: block.hourlyPay, highlight: true, formula: opts.hourlyPayRef },
     {
-      label: 'Reimbursements',
+      label: 'Reimbursements/additional pay',
       value: block.reimbursements,
       memo: block.reimbMemo,
       color: REIMB_BLUE,
@@ -824,14 +824,18 @@ export function buildProfitshareOutputSheet(
 ): void {
   const ws = wb.addWorksheet('Profitshare Output');
   // 8-col bands: 7 data + 1 spacer → A, I, Q, Y…
-  const leads = model?.leads ?? [];
+  const allLeads = model?.leads ?? [];
+  // Round 11 — hourly-only leads are left off; refs still index the Input #'s
+  // tab, which lists every lead.
+  const leads = profitshareOutputLeads(allLeads);
+  const inputRefs = inputNumbersCellRefs(allLeads.length);
   ws.columns = Array.from({ length: Math.max(8, leads.length * 8) }, (_, i) => ({
     width: i % 8 === 7 ? 3 : 14,
   }));
   let maxEndRow = 1;
-  leads.forEach((block, bi) => {
+  leads.forEach(({ block, inputIndex }, bi) => {
     const startCol = 1 + bi * 8;
-    const refs = inputNumbersCellRefs(leads.length)[bi];
+    const refs = inputRefs[inputIndex];
     const end = writePsChainValues(ws, block, startCol, {
       defaultPsPct,
       startRow: 1,
@@ -984,7 +988,7 @@ export function buildInputNumbersSheet(
     row++; // blank reported-materials entry row
 
     const reimb = ws.getRow(row);
-    reimb.getCell(2).value = 'Reimbursements';
+    reimb.getCell(2).value = 'Reimbursements/additional pay';
     reimb.getCell(3).value = block.reimbursements;
     reimb.getCell(3).numFmt = ACCOUNTING_FMT;
     reimb.getCell(4).value = block.reimbMemo;

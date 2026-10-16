@@ -755,7 +755,12 @@ const previewEdited = buildPayrollPreview({
   qbHours: {}, knownEstimators, leadCtx,
   nvSales, utSales, lastWeekPbj,
 })!;
-check('net edit stored (taxes/NEST/net independent; taxes not auto-derived)', previewEdited.painters[1].net, 600);
+// Round 11 — total + taxes + NEST = net: typing net back-fills taxes.
+check(
+  'R11: net edit stored, taxes derived as net − total (negative)',
+  [previewEdited.painters[1].net, previewEdited.painters[1].taxes],
+  [600, Math.round((600 - previewEdited.painters[1].totalPay) * 100) / 100],
+);
 const editedDaniel = previewEdited.leads.find((b) => b.leadName === 'DANIEL GONZALES BONILLA')!;
 const editedJob = editedDaniel.jobs.find((j) => j.apKey === '24403')!;
 // Round 8 §8.1 — % Completion is a term now, so editing it to 100% DOES move
@@ -1317,24 +1322,71 @@ async function testExport(): Promise<void> {
     ],
     [true, true, 'center', 'total'],
   );
-  // Round 6 §6.1 — `(-) taxes` / `NEST [IRA]` / `net` bold labels on a job line.
+  // Round 6 §6.1 / Round 11 — `(-) taxes` / `net` bold labels on a job line;
+  // `NEST [IRA]` only for people on the NEST list (nobody in this fixture).
   let taxesLabelOk = false;
+  let nestLabelSeen = false;
   pp.eachRow((row) => {
-    if (row.getCell(6).value === '(-) taxes' && row.getCell(7).value === 'NEST [IRA]' && row.getCell(8).value === 'net') {
+    if (row.getCell(6).value === '(-) taxes' && row.getCell(8).value === 'net') {
       taxesLabelOk = true;
+      if (row.getCell(7).value === 'NEST [IRA]') nestLabelSeen = true;
     }
   });
-  check('(-) taxes / NEST / net labels present', taxesLabelOk, true);
-  // taxes / NEST / net value cells blank by default (no E−G formula).
+  check('(-) taxes / net labels present, no NEST [IRA] off the NEST list', [taxesLabelOk, nestLabelSeen], [true, false]);
+  // Round 11 — NEST / net blank by default; taxes is a live formula off net.
   let taxesBlankOk = false;
   pp.eachRow((row) => {
     if (row.getCell(6).value === '(-) taxes') {
-      const sums = pp.getRow(row.number + 1);
+      const sn = row.number + 1;
+      const sums = pp.getRow(sn);
+      const f = sums.getCell(6).value as { formula?: string } | null;
       taxesBlankOk =
-        isBlank(sums.getCell(6).value) && isBlank(sums.getCell(7).value) && isBlank(sums.getCell(8).value);
+        f?.formula === `IF(H${sn}="","",H${sn}-E${sn}-N(G${sn}))` &&
+        isBlank(sums.getCell(7).value) &&
+        isBlank(sums.getCell(8).value);
     }
   });
-  check('taxes / NEST / net blank by default', taxesBlankOk, true);
+  check('taxes = IF(net blank, blank, net − total − NEST); NEST / net blank by default', taxesBlankOk, true);
+  {
+    // Round 11 — a painter on the NEST list gets the column, and a typed net
+    // back-fills the (negative) taxes in the cached result.
+    const juanKey = preview.painters[0].key;
+    const nestPreview = buildPayrollPreview({
+      pbj, enriched, reportRows: rows, pl, directory,
+      settings: { ...settings, nestNames: ['Juan Perez'] },
+      payDate,
+      edits: { [`hb:${juanKey}`]: { nest: 25, net: 500 } },
+      qbHours: {}, knownEstimators, leadCtx,
+      nvSales, utSales, lastWeekPbj,
+    })!;
+    const juanNest = nestPreview.painters[0];
+    const nestBuf = await buildPayrollWorkbookBuffer({
+      payDate,
+      weekStart: pbj.dates[0] ?? null,
+      weekEnd: pbj.dates[pbj.dates.length - 1] ?? null,
+      pl,
+      payrollPreview: nestPreview,
+      payrollExceptions: pGroups,
+      plSourceFileName: 'Profit and Loss by Customer.xlsx',
+    });
+    const nestWb = new ExcelJS.Workbook();
+    await nestWb.xlsx.load(nestBuf);
+    const np = nestWb.getWorksheet('PAYROLL PREVIEW') as ExcelJS.Worksheet;
+    let juanSums: unknown[] = [];
+    np.eachRow((row) => {
+      if (juanSums.length === 0 && row.getCell(7).value === 'NEST [IRA]') {
+        const sums = np.getRow(row.number + 1);
+        const f = sums.getCell(6).value as { result?: unknown } | null;
+        juanSums = [f?.result, sums.getCell(7).value, sums.getCell(8).value];
+      }
+    });
+    const expectTaxes = Math.round((500 - juanNest.totalPay + 25) * 100) / 100;
+    check(
+      'R11 NEST: listed painter gets the column; net typed → taxes = net − total − NEST',
+      [juanNest.showNest, juanNest.taxes, juanSums],
+      [true, expectTaxes, [expectTaxes, -25, 500]],
+    );
+  }
   // §5.4 — a painter name band is merged A–H with the DDD9C4 fill (rich text
   // name + crew tag). Find Juan's band via the merged cell's rich text.
   let bandOk = false;

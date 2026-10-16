@@ -475,7 +475,7 @@ const RAW_SALARIED: SalariedEntry[] = [
     role: 'Manager Salary',
     amount: 865,
     entity: 'NV',
-    reimbursementsLabel: 'Reimbursements',
+    reimbursementsLabel: 'Reimbursements/additional pay',
   },
   { name: 'Jason Thompson', section: 'ESTIMATORS', role: 'Salary', amount: 1200, entity: 'NV' },
   { name: 'Paul Good', section: 'ESTIMATORS', role: 'Commissions', amount: 1600, entity: 'NV' },
@@ -568,7 +568,7 @@ export const DEFAULT_PAYROLL_LINE_ITEMS: PayrollLineItem[] = [
     (person): PayrollLineItem => ({
       id: `li-${person.toLowerCase().replace(/\s+/g, '-')}-reimb`,
       person,
-      label: 'Reimbursements',
+      label: 'Reimbursements/additional pay',
       amount: null,
       kind: 'reimbursement',
       frequency: 'weekly',
@@ -1333,6 +1333,8 @@ export function applySettingsMigrations(settings: AppSettings): AppSettings {
         person: respell(i.person),
         // Paid TO Mike Holden, not withheld.
         ...(i.id === 'li-mike-holden-health' ? { kind: 'reimbursement' as const } : {}),
+        // The row covers additional pay as well.
+        ...(i.label.trim() === 'Reimbursements' ? { label: 'Reimbursements/additional pay' } : {}),
       })),
       ...DEFAULT_PAYROLL_LINE_ITEMS.filter((i) => !haveItems.has(i.id)).map((i) => ({ ...i })),
     ];
@@ -1351,7 +1353,13 @@ export function applySettingsMigrations(settings: AppSettings): AppSettings {
       crewLeadAliases,
       nestNames: next.nestNames && next.nestNames.length > 0 ? next.nestNames : [...DEFAULT_NEST_NAMES],
       painterRoster: next.painterRoster.map((r) => ({ ...r, name: respell(r.name) })),
-      salariedRoster: next.salariedRoster.map((r) => ({ ...r, name: respell(r.name) })),
+      salariedRoster: next.salariedRoster.map((r) => ({
+        ...r,
+        name: respell(r.name),
+        ...(r.reimbursementsLabel?.trim() === 'Reimbursements'
+          ? { reimbursementsLabel: 'Reimbursements/additional pay' }
+          : {}),
+      })),
       conditionalRateRules: next.conditionalRateRules.map((r) => ({
         ...r,
         person: respell(r.person),

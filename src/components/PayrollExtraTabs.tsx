@@ -13,7 +13,7 @@ import {
 } from '../lib/format';
 import { CellInput } from './CellInput';
 import { buildJournalEntryRows } from '../lib/journalEntry';
-import { hourSplitRows } from '../lib/payroll';
+import { hourSplitRows, profitshareOutputLeads } from '../lib/payroll';
 import { buildPrFinalCheckRows } from '../lib/prFinalCheck';
 import type {
   HourlyBlock,
@@ -310,7 +310,7 @@ function PsChainBody({
           {jobs.length > 1 && <td className="xcell" colSpan={jobs.length - 1} />}
         </tr>
         <tr>
-          {label('Reimbursements')}
+          {label('Reimbursements/additional pay')}
           <td className="xcell text-right text-[#0070C0]">
             {editable && onEdit ? (
               <NumCell
@@ -880,7 +880,8 @@ export function ProfitshareOutputTab({
   onEdit?: OnEdit;
 }): JSX.Element {
   if (!model) return <EmptyPayroll label="Profitshare Output needs Payroll Preview" />;
-  const leads = model.leads;
+  // Round 11 — a lead with only hourly jobs this week has no band here.
+  const leads = profitshareOutputLeads(model.leads).map((x) => x.block);
   return (
     <div className="overflow-x-auto p-3" style={GARAMOND}>
       <TitleBand title="Profitshare Output" />
