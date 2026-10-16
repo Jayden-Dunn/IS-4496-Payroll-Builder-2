@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ExceptionsPanel } from './components/ExceptionsPanel';
 import { JobsByCrewTable } from './components/JobsByCrewTable';
 import {
@@ -23,6 +23,7 @@ import { PivotTable } from './components/PivotTable';
 import { SettingsModal } from './components/SettingsModal';
 import { TimeNaviTable } from './components/TimeNaviTable';
 import { TopBar } from './components/TopBar';
+import { UpdateReviewModal } from './components/UpdateReviewModal';
 import { UploadSlot, type SlotChip } from './components/UploadSlot';
 import { timesheetApKey } from './lib/apkey';
 import {
@@ -63,6 +64,38 @@ import { buildPayrollExceptions } from './lib/payrollExceptions';
 import { buildPayrollPivotByJob } from './lib/payrollPivot';
 import { buildPayrollPreview, hasUtPayrollData, mergePayrollPreviews } from './lib/payrollPreview';
 import { buildPivot } from './lib/pivot';
+import {
+  clearSessionSlot,
+  deleteSession,
+  loadSession,
+  loadSessionPointer,
+  newSessionId,
+  saveSessionEnvelope,
+  saveSessionPointer,
+  saveSessionSlot,
+  sessionStorageAvailable,
+  SESSION_PARSER_VERSION,
+  SESSION_PAYLOAD_VERSION,
+  type SessionSlotMeta,
+} from './lib/session';
+import {
+  collectPayrollDefaults,
+  collectPayrollLabels,
+  collectPivotDefaults,
+  collectPivotLabels,
+  collectReportDefaults,
+  collectReportLabels,
+  flattenPayrollEdits,
+  flattenPivotEdits,
+  flattenQbHourEdits,
+  flattenTimenaviEdits,
+  reviewScopes,
+  type Conflict,
+  type OrphanedEdit,
+  type ScopeInput,
+  type UpdateReview,
+} from './lib/reportDiff';
+import { buildShadowPayroll, buildShadowPercents } from './lib/shadowBuild';
 import {
   buildPivotByJob,
   EMPTY_MANUAL_STATE,
@@ -291,6 +324,37 @@ export default function App(): JSX.Element {
   const [payrollEdits, setPayrollEdits] = useState<PayrollEditsMap>({});
   const [createdPercents, setCreatedPercents] = useState(false);
   const [createdPayroll, setCreatedPayroll] = useState(false);
+  /**
+   * A re-upload after a report exists is STAGED, not applied. The report keeps
+   * showing the numbers the user has been editing until they press "Update
+   * existing report" — which is also what makes a before/after comparison
+   * possible, so the review can name exactly which manual edits the new file
+   * would overwrite. Only the re-uploaded slot goes pending; every other slot
+   * keeps the file it already has, so one changed input never means
+   * re-uploading the rest.
+   */
+  const [pendingParsed, setPendingParsed] = useState<Partial<ParsedData>>({});
+  const [pendingChips, setPendingChips] = useState<Partial<Record<SlotId, SlotChip>>>({});
+  /** Open review for a staged update; null when there is nothing to decide. */
+  const [pendingReview, setPendingReview] = useState<UpdateReview | null>(null);
+  /** "Create new report" is destructive once edits exist, so it confirms first. */
+  const [confirmRestart, setConfirmRestart] = useState(false);
+  /** Passive "here is what the update did" line; dismissible, never a prompt. */
+  const [updateSummary, setUpdateSummary] = useState<{
+    slots: string[];
+    changed: number;
+    kept: number;
+  } | null>(null);
+  /**
+   * Crash recovery. The pointer is a SYNCHRONOUS localStorage read, so the very
+   * first paint already knows whether a session is coming back and can say so
+   * instead of flashing the empty placeholder at someone who has not lost
+   * anything. IndexedDB itself is async and arrives a moment later.
+   */
+  const [sessionId, setSessionId] = useState<string | null>(() => loadSessionPointer()?.id ?? null);
+  const [hydrating, setHydrating] = useState<boolean>(() => loadSessionPointer() !== null);
+  const [sessionWarning, setSessionWarning] = useState<string | null>(null);
+  const [restoredAt, setRestoredAt] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('timenavi');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [mode, setMode] = useState<AppMode>(() => loadAppMode());
@@ -361,11 +425,162 @@ export default function App(): JSX.Element {
     };
   }, []);
 
+  /**
+   * Restore the last session. Runs once, before anything can be uploaded —
+   * the slots and both buttons are disabled while this is in flight, so a fast
+   * upload cannot be overwritten by the restore landing on top of it.
+   *
+   * Every setter fires in one block so React batches them into a single
+   * commit: there is never a frame showing restored uploads with the edits
+   * still missing, which would flash un-edited numbers.
+   */
+  useEffect(() => {
+    const pointer = loadSessionPointer();
+    if (!pointer) return;
+    let cancelled = false;
+    void (async () => {
+      const restored = await loadSession(pointer.id);
+      if (cancelled) return;
+      if (!restored) {
+        setHydrating(false);
+        setSessionId(null);
+        return;
+      }
+      const env = restored.envelope;
+      const e = env.edits as {
+        edits?: EditsMap;
+        pbjEdits?: PbjEditsMap;
+        qbHours?: QbHoursMap;
+        balancesState?: ManualSectionState;
+        utState?: ManualSectionState;
+        payrollEdits?: PayrollEditsMap;
+      };
+      const parsedBack = restored.parsed as Partial<ParsedData>;
+      const nextParsed = { ...EMPTY_PARSED, ...parsedBack };
+
+      setParsed(nextParsed);
+      setChips((c) => ({ ...c, ...(restored.chips as Partial<Record<SlotId, SlotChip>>) }));
+      setPayDateIso(env.payDateIso);
+      setEdits(e.edits ?? {});
+      setPbjEdits(e.pbjEdits ?? {});
+      setQbHours(e.qbHours ?? {});
+      setBalancesState(e.balancesState ?? EMPTY_MANUAL_STATE);
+      setUtState(e.utState ?? EMPTY_MANUAL_STATE);
+      setPayrollEdits(e.payrollEdits ?? {});
+      // Only claim a report the restored inputs can actually build. The model
+      // memos guard on these flags, so setting them over a half-restored
+      // `parsed` would build a report from partial data.
+      setCreatedPercents(env.createdPercents && missingForPercents(nextParsed).length === 0);
+      setCreatedPayroll(env.createdPayroll && missingForPayroll(nextParsed).length === 0);
+      if (env.mode === 'payroll' || env.mode === 'percents') setMode(env.mode);
+      if (env.tab) setTab(env.tab as Tab);
+      setSessionId(env.id);
+      setRestoredAt(env.savedAt);
+      if (restored.degradedSlots.length > 0) {
+        setSessionWarning(
+          `Restored your session, but ${restored.degradedSlots.length} upload(s) could not be read back. Re-upload them to refresh those numbers.`,
+        );
+      }
+      setHydrating(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Mount-only: this restores INTO the initial state, and re-running it would
+    // overwrite whatever the user has done since.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     if (!settingsToast) return;
     const t = window.setTimeout(() => setSettingsToast(null), 3500);
     return () => window.clearTimeout(t);
   }, [settingsToast]);
+
+  /**
+   * Cache the editing state. Cells commit on blur/Enter rather than per
+   * keystroke, so one write per edit is already modest; the debounce just
+   * coalesces bursts. The short interval is the real protection — an
+   * IndexedDB write started during `pagehide` is not guaranteed to finish.
+   */
+  useEffect(() => {
+    if (hydrating || !sessionId || !sessionStorageAvailable()) return;
+    const t = window.setTimeout(() => {
+      const envelope = {
+        id: sessionId,
+        payloadVersion: SESSION_PAYLOAD_VERSION,
+        parserVersion: SESSION_PARSER_VERSION,
+        savedAt: new Date().toISOString(),
+        payDateIso,
+        createdPercents,
+        createdPayroll,
+        mode,
+        tab,
+        // Which slots a restore should read back. Without this the cached
+        // slot records exist but nothing knows to look for them.
+        slots: (Object.keys(chips) as SlotId[])
+          .filter((k) => k !== 'employees' && chips[k].status === 'ok')
+          .map((k) => ({
+            slot: k,
+            fileName: chips[k].fileName,
+            fileSize: 0,
+            fileLastModified: 0,
+            uploadedAt: new Date().toISOString(),
+            chip: chips[k],
+          })),
+        edits: { edits, pbjEdits, qbHours, balancesState, utState, payrollEdits },
+      };
+      void saveSessionEnvelope(envelope).then((result) => {
+        if (result === 'stale') {
+          setSessionWarning('Another tab is editing this session — changes here are not being saved.');
+          return;
+        }
+        if (result === 'failed') {
+          setSessionWarning('Could not save this session locally; your work is only in this tab.');
+          return;
+        }
+        saveSessionPointer({
+          id: sessionId,
+          savedAt: envelope.savedAt,
+          label: payDateIso,
+          slotCount: Object.values(chips).filter((c) => c.status === 'ok').length,
+        });
+      });
+    }, 600);
+    return () => window.clearTimeout(t);
+  }, [
+    hydrating,
+    sessionId,
+    payDateIso,
+    createdPercents,
+    createdPayroll,
+    mode,
+    tab,
+    edits,
+    pbjEdits,
+    qbHours,
+    balancesState,
+    utState,
+    payrollEdits,
+    chips,
+  ]);
+
+  /**
+   * A stray refresh used to take hours of hand-corrections with no warning.
+   * Registered only while there is something to lose.
+   */
+  const unsavedEditCount =
+    countEdits(edits) + countEdits(pbjEdits) + Object.keys(qbHours).length + countEdits(payrollEdits);
+  useEffect(() => {
+    if (unsavedEditCount === 0) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent): void => {
+      e.preventDefault();
+      // Browsers show their own wording; assigning returnValue is what arms it.
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [unsavedEditCount]);
 
   // ------------------------------------------------------------------ uploads
 
@@ -374,16 +589,85 @@ export default function App(): JSX.Element {
   // report's numbers; the payroll process now builds its own model from this
   // upload (see `payrollPivotByJob`) and the two sides never cross.
 
-  const handleFile = useCallback(async (id: SlotId, file: File): Promise<void> => {
+  /** Mint a session id on first use and publish the synchronous pointer. */
+  const sessionIdRef = useRef<string | null>(sessionId);
+  sessionIdRef.current = sessionId;
+  const ensureSessionId = useCallback((): string => {
+    const existing = sessionIdRef.current;
+    if (existing) return existing;
+    const id = newSessionId();
+    sessionIdRef.current = id;
+    setSessionId(id);
+    return id;
+  }, []);
+
+  /**
+   * Files staged but not yet applied. Held so that committing an update can
+   * cache them the same way a first upload is cached — without re-reading the
+   * file off disk, which the browser may no longer allow.
+   */
+  const pendingUploadsRef = useRef(
+    new Map<SlotId, { patch: Partial<ParsedData>; file: File; message: string; bytes: ArrayBuffer }>(),
+  );
+
+  /** Cache one slot's parsed patch (and its bytes) for crash recovery. */
+  const persistSlot = useCallback(
+    (slot: SlotId, patch: Partial<ParsedData>, file: File, message: string, bytes?: ArrayBuffer): void => {
+      if (!sessionStorageAvailable()) return;
+      const id = ensureSessionId();
+      const meta: SessionSlotMeta = {
+        slot,
+        fileName: file.name,
+        fileSize: file.size,
+        fileLastModified: file.lastModified,
+        uploadedAt: new Date().toISOString(),
+        chip: { status: 'ok', fileName: file.name, message },
+      };
+      void saveSessionSlot(id, slot, strippedForStorage(patch), meta, bytes).then((ok) => {
+        if (!ok) setSessionWarning('Could not cache this upload locally; your work is only in this tab.');
+      });
+    },
+    [ensureSessionId],
+  );
+
+  const handleFile = useCallback(
+    async (id: SlotId, file: File): Promise<void> => {
+    // Once a rail has a report on screen, a new file for one of its slots is
+    // STAGED rather than applied — the numbers the user has been editing must
+    // not move under them until they ask for it. Before that first report,
+    // this is the original straight-to-`parsed` path.
+    const rail = railForSlot(id);
+    const staged = rail === 'percents' ? createdPercents : rail === 'payroll' ? createdPayroll : false;
     const fail = (message: string): void => {
+      if (staged) {
+        // A bad re-upload must never damage the working report: drop the
+        // pending patch and leave the committed data alone.
+        setPendingChips((c) => ({ ...c, [id]: { status: 'error', fileName: file.name, message } }));
+        setPendingParsed((p) => {
+          const next = { ...p };
+          for (const k of Object.keys(clearForSlot(id)) as (keyof ParsedData)[]) delete next[k];
+          return next;
+        });
+        return;
+      }
       setChips((c) => ({ ...c, [id]: { status: 'error', fileName: file.name, message } }));
       setParsed((p) => ({ ...p, ...clearForSlot(id) }));
+      const sid = sessionIdRef.current;
+      if (sid) void clearSessionSlot(sid, id);
     };
     try {
-      const wbd = readWorkbook(await file.arrayBuffer());
+      const bytes = await file.arrayBuffer();
+      const wbd = readWorkbook(bytes);
       const ok = (message: string, patch: Partial<ParsedData>): void => {
+        if (staged) {
+          setPendingParsed((p) => ({ ...p, ...patch }));
+          setPendingChips((c) => ({ ...c, [id]: { status: 'ok', fileName: file.name, message } }));
+          pendingUploadsRef.current.set(id, { patch, file, message, bytes });
+          return;
+        }
         setParsed((p) => ({ ...p, ...patch }));
         setChips((c) => ({ ...c, [id]: { status: 'ok', fileName: file.name, message } }));
+        persistSlot(id, patch, file, message, bytes);
       };
       switch (id) {
         case 'timesheetNv': {
@@ -501,7 +785,9 @@ export default function App(): JSX.Element {
     } catch (err) {
       fail(err instanceof Error ? err.message : 'Could not read this file.');
     }
-  }, [payDateIso, settings.plAccountMapping]);
+    },
+    [payDateIso, settings.plAccountMapping, createdPercents, createdPayroll, persistSlot],
+  );
 
   /**
    * Combined NV+UT timesheet for the %'s REPORT side (NV first).
@@ -518,26 +804,8 @@ export default function App(): JSX.Element {
     };
   }, [parsed.timesheetNv, parsed.timesheetUt]);
 
-  const percentsMissingInputs = useMemo((): string[] => {
-    const checks: [Exclude<SlotId, 'employees'>, boolean][] = [
-      ['timesheetNv', parsed.timesheetNv !== null],
-      ['timenavi', parsed.events !== null],
-      ['nvSales', parsed.nvSales !== null],
-      ['nvSummary', parsed.nvTotals !== null],
-      ['utSales', parsed.utSales !== null],
-      ['utSummary', parsed.utTotals !== null],
-      // lastWeek + timesheetUt optional; pl is payroll-only
-    ];
-    return checks.filter(([, ok]) => !ok).map(([id]) => SLOT_LABELS[id]);
-  }, [parsed]);
-
-  const payrollMissingInputs = useMemo((): string[] => {
-    const checks: [Exclude<SlotId, 'employees'>, boolean][] = [
-      ['completedPercents', parsed.completedPercents !== null],
-      ['pl', parsed.pl !== null],
-    ];
-    return checks.filter(([, ok]) => !ok).map(([id]) => SLOT_LABELS[id]);
-  }, [parsed]);
+  const percentsMissingInputs = useMemo((): string[] => missingForPercents(parsed), [parsed]);
+  const payrollMissingInputs = useMemo((): string[] => missingForPayroll(parsed), [parsed]);
 
   const percentsReady = percentsMissingInputs.length === 0;
   const payrollReady = payrollMissingInputs.length === 0;
@@ -1321,25 +1589,254 @@ export default function App(): JSX.Element {
     setChips((c) => ({ ...c, employees: EMPTY_CHIP }));
   }, []);
 
-  const onCreatePercents = useCallback((): void => {
-    if (percentsMissingInputs.length > 0) {
-      setMissingInputWarning(percentsMissingInputs);
-      return;
-    }
-    setMissingInputWarning(null);
-    setCreatedPercents(true);
-    setTab('timenavi');
-  }, [percentsMissingInputs]);
+  /** Manual edits on the %'s rail, counted for the "start over" confirmation. */
+  const percentsEditCount = useMemo(
+    () =>
+      countEdits(edits) +
+      countEdits(pbjEdits) +
+      Object.keys(qbHours).length +
+      countEdits(balancesState.edits) +
+      countEdits(utState.edits),
+    [edits, pbjEdits, qbHours, balancesState, utState],
+  );
+  const payrollEditCount = useMemo(() => countEdits(payrollEdits), [payrollEdits]);
+  const activeEditCount = mode === 'percents' ? percentsEditCount : payrollEditCount;
+  /** Does the rail on screen already have a report built? */
+  const hasReport = mode === 'percents' ? createdPercents : createdPayroll;
+  const pendingSlots = useMemo(
+    () => (Object.keys(pendingChips) as SlotId[]).filter((k) => pendingChips[k]?.status === 'ok'),
+    [pendingChips],
+  );
 
-  const onCreatePayroll = useCallback((): void => {
-    if (payrollMissingInputs.length > 0) {
-      setMissingInputWarning(payrollMissingInputs);
+  /** Drop every manual edit on one rail — only ever from "Create new report". */
+  const clearRailEdits = useCallback((which: AppMode): void => {
+    if (which === 'percents') {
+      setEdits({});
+      setPbjEdits({});
+      setQbHours({});
+      setBalancesState(EMPTY_MANUAL_STATE);
+      setUtState(EMPTY_MANUAL_STATE);
+    } else {
+      setPayrollEdits({});
+    }
+  }, []);
+
+  /** Commit the staged uploads; nothing else about the session changes. */
+  const commitPending = useCallback((): void => {
+    setParsed((p) => ({ ...p, ...pendingParsed }));
+    for (const [slot, u] of pendingUploadsRef.current) {
+      persistSlot(slot, u.patch, u.file, u.message, u.bytes);
+    }
+    pendingUploadsRef.current.clear();
+    setPendingParsed({});
+    setPendingChips({});
+    setChips((c) => {
+      const next = { ...c };
+      for (const [slot, chip] of Object.entries(pendingChips)) {
+        if (chip && chip.status === 'ok') next[slot as SlotId] = chip;
+      }
+      return next;
+    });
+  }, [pendingParsed, pendingChips, persistSlot]);
+
+  const createReport = useCallback(
+    (which: AppMode): void => {
+      const missing = which === 'percents' ? percentsMissingInputs : payrollMissingInputs;
+      if (missing.length > 0) {
+        setMissingInputWarning(missing);
+        return;
+      }
+      setMissingInputWarning(null);
+      commitPending();
+      clearRailEdits(which);
+      if (which === 'percents') {
+        setCreatedPercents(true);
+        setTab('timenavi');
+      } else {
+        setCreatedPayroll(true);
+        setTab('payroll');
+      }
+    },
+    [percentsMissingInputs, payrollMissingInputs, commitPending, clearRailEdits],
+  );
+
+  /**
+   * "Create new report" starts over, so it throws away hand work. Ask first
+   * whenever there is any to lose; go straight through when there is not.
+   */
+  const onCreateReport = useCallback((): void => {
+    if (activeEditCount > 0 && (mode === 'percents' ? createdPercents : createdPayroll)) {
+      setConfirmRestart(true);
       return;
     }
-    setMissingInputWarning(null);
-    setCreatedPayroll(true);
-    setTab('payroll');
-  }, [payrollMissingInputs]);
+    createReport(mode);
+  }, [activeEditCount, mode, createdPercents, createdPayroll, createReport]);
+
+  /**
+   * "Update existing report" — re-derive from the staged upload while keeping
+   * the manual edits, and ask about nothing except the edits the new file would
+   * actually overwrite.
+   *
+   * Both shadow builds run with EMPTY edit maps, which is what exposes the
+   * computed layer the builders normally fold the edits into. Comparing the two
+   * gives "what the file changed"; intersecting that with the edit maps gives
+   * the only thing worth a decision.
+   */
+  const shadowDeps = useMemo(
+    () => ({
+      settings,
+      directory: effectiveDirectory,
+      payDate,
+      knownEstimators,
+      legendOrder,
+      balancesState,
+      utState,
+    }),
+    [settings, effectiveDirectory, payDate, knownEstimators, legendOrder, balancesState, utState],
+  );
+
+  /**
+   * Apply an update after the review. A conflict the user resolved as "take the
+   * new value" is applied by DELETING that one field from its edit map, which
+   * relinks the cell to the computed value — the same mechanism as the existing
+   * % relink. Everything not named here is left exactly as it was.
+   */
+  const applyUpdate = useCallback(
+    (review: UpdateReview, choices: { take: Conflict[]; discardOrphans: OrphanedEdit[] }): void => {
+      /**
+       * Remove one overridden field. When that was the row's last field the
+       * whole key goes too — an empty `{}` left behind would still be counted
+       * as a manual edit, which is what the "clears N edits" confirmation
+       * reads, and it would never be true again.
+       */
+      const withoutField = <M extends Record<string, object>>(prev: M, key: string, field: string): M => {
+        const row = { ...(prev[key] ?? {}) } as Record<string, unknown>;
+        delete row[field];
+        const next = { ...prev } as Record<string, unknown>;
+        if (Object.keys(row).length === 0) delete next[key];
+        else next[key] = row;
+        return next as M;
+      };
+      for (const c of choices.take) {
+        if (c.scope === 'timenavi') {
+          setEdits((prev) => withoutField(prev, c.editKey, c.field));
+        } else if (c.scope === 'pivot') {
+          setPbjEdits((prev) => withoutField(prev, c.editKey, c.field));
+        } else if (c.scope === 'qbHours') {
+          setQbHours((prev) => {
+            const next = { ...prev };
+            delete next[c.editKey];
+            return next;
+          });
+        } else {
+          setPayrollEdits((prev) => withoutField(prev, c.editKey, c.field));
+        }
+      }
+      for (const o of choices.discardOrphans) {
+        if (o.scope === 'timenavi') {
+          setEdits((prev) => {
+            const next = { ...prev };
+            delete next[o.editKey];
+            return next;
+          });
+        } else if (o.scope === 'pivot') {
+          setPbjEdits((prev) => {
+            const next = { ...prev };
+            delete next[o.editKey];
+            return next;
+          });
+        } else if (o.scope === 'qbHours') {
+          setQbHours((prev) => {
+            const next = { ...prev };
+            delete next[o.editKey];
+            return next;
+          });
+        } else {
+          setPayrollEdits((prev) => {
+            const next = { ...prev };
+            delete next[o.editKey];
+            return next;
+          });
+        }
+      }
+      const slotNames = (Object.keys(pendingChips) as SlotId[])
+        .filter((k) => pendingChips[k]?.status === 'ok')
+        .map((k) => SLOT_LABELS[k as Exclude<SlotId, 'employees'>] ?? k);
+      commitPending();
+      setPendingReview(null);
+      setUpdateSummary({
+        slots: slotNames,
+        changed: review.silentChangeCount + choices.take.length,
+        kept: review.conflicts.length - choices.take.length,
+      });
+    },
+    [pendingChips, commitPending],
+  );
+
+  const onUpdateReport = useCallback((): void => {
+    if (pendingSlots.length === 0) return;
+    const after = { ...parsed, ...pendingParsed };
+    const scopes: ScopeInput[] = [];
+
+    if (mode === 'percents') {
+      const b = buildShadowPercents(parsed, shadowDeps);
+      const a = buildShadowPercents(after, shadowDeps);
+      scopes.push({
+        scope: 'timenavi',
+        before: collectReportDefaults(b.reportRows),
+        after: collectReportDefaults(a.reportRows),
+        labels: collectReportLabels(a.reportRows.length > 0 ? a.reportRows : b.reportRows),
+        edited: flattenTimenaviEdits(edits),
+      });
+      if (b.pivotByJob && a.pivotByJob) {
+        scopes.push({
+          scope: 'pivot',
+          before: collectPivotDefaults(b.pivotByJob),
+          after: collectPivotDefaults(a.pivotByJob),
+          labels: collectPivotLabels(a.pivotByJob),
+          edited: flattenPivotEdits(pbjEdits),
+        });
+        scopes.push({
+          scope: 'qbHours',
+          before: collectPivotDefaults(b.pivotByJob),
+          after: collectPivotDefaults(a.pivotByJob),
+          labels: collectPivotLabels(a.pivotByJob),
+          edited: flattenQbHourEdits(qbHours),
+        });
+      }
+    } else {
+      const b = buildShadowPayroll(parsed, shadowDeps);
+      const a = buildShadowPayroll(after, shadowDeps);
+      if (b.payroll && a.payroll) {
+        scopes.push({
+          scope: 'payroll',
+          before: collectPayrollDefaults(b.payroll),
+          after: collectPayrollDefaults(a.payroll),
+          labels: collectPayrollLabels(a.payroll),
+          edited: flattenPayrollEdits(payrollEdits),
+        });
+      }
+    }
+
+    const review = reviewScopes(scopes);
+    if (review.conflicts.length === 0 && review.orphans.length === 0) {
+      // Nothing the user typed is affected — just apply it.
+      applyUpdate(review, { take: [], discardOrphans: [] });
+      return;
+    }
+    setPendingReview(review);
+  }, [
+    pendingSlots,
+    parsed,
+    pendingParsed,
+    mode,
+    shadowDeps,
+    edits,
+    pbjEdits,
+    qbHours,
+    payrollEdits,
+    applyUpdate,
+  ]);
 
   /** Fill Slot A from this session's %'s report (no re-upload). */
   const onUseSessionPercents = useCallback((): void => {
@@ -1397,6 +1894,8 @@ export default function App(): JSX.Element {
               hint={def.hint}
               optional={def.optional}
               chip={chips[def.id]}
+              pendingChip={pendingChips[def.id]}
+              disabled={hydrating}
               onFile={(file) => void handleFile(def.id, file)}
             />
           ))}
@@ -1437,6 +1936,30 @@ export default function App(): JSX.Element {
               </span>
             )}
           </button>
+          {/* The cached session is never invisible: it says it is there, when
+              it was saved, and offers the way out. */}
+          {(restoredAt || sessionWarning) && (
+            <div className="mt-1 rounded border border-sky-300 bg-sky-50 px-2 py-1.5 text-[11px] text-sky-900">
+              {restoredAt && (
+                <div>
+                  Session restored · saved{' '}
+                  {new Date(restoredAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+                </div>
+              )}
+              {sessionWarning && <div className="mt-0.5 font-semibold text-amber-800">{sessionWarning}</div>}
+              <button
+                type="button"
+                className="mt-1 rounded bg-sky-200 px-1.5 py-0.5 font-semibold hover:bg-sky-300"
+                onClick={() => {
+                  if (sessionId) void deleteSession(sessionId);
+                  window.location.reload();
+                }}
+                title="Forget the cached uploads and edits and start from an empty session"
+              >
+                Start fresh
+              </button>
+            </div>
+          )}
           <label className="mt-1 flex flex-col gap-1 text-xs font-semibold">
             Pay date
             <input
@@ -1449,26 +1972,98 @@ export default function App(): JSX.Element {
               Defaults to the NV timesheet week-ending Friday + 7 days. Drives the pivot title and the filename.
             </span>
           </label>
-          {mode === 'percents' ? (
+          {/* Once a report exists, "Update" is the everyday button and "Create
+              new" is the start-over — so Update leads and carries the accent. */}
+          {hasReport && (
             <button
               type="button"
-              className="btn-primary mt-1 py-2.5 text-base"
-              title={percentsReady ? 'Build the %\u2019s report tables' : 'Upload required inputs 1 and 3–7 first'}
-              onClick={onCreatePercents}
+              className={`mt-1 py-2.5 text-base ${pendingSlots.length > 0 ? 'btn-primary' : 'btn'}`}
+              disabled={pendingSlots.length === 0 || hydrating}
+              title={
+                pendingSlots.length > 0
+                  ? 'Re-derive from the new file, keeping your manual edits'
+                  : 'Upload a changed input first — the rest stay as they are'
+              }
+              onClick={onUpdateReport}
             >
-              Create %&apos;s Report
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="btn-primary mt-1 py-2.5 text-base"
-              title={payrollReady ? 'Build the payroll preview' : 'Upload Slot A and Slot B first'}
-              onClick={onCreatePayroll}
-            >
-              Create Payroll Preview
+              Update existing report
+              {pendingSlots.length > 0 && (
+                <span className="ml-1 text-xs font-normal">({pendingSlots.length} pending)</span>
+              )}
             </button>
           )}
+          <button
+            type="button"
+            className={hasReport ? 'btn mt-1 py-2 text-sm' : 'btn-primary mt-1 py-2.5 text-base'}
+            disabled={hydrating}
+            title={
+              hasReport
+                ? 'Start over from the uploads — clears every manual edit'
+                : mode === 'percents'
+                  ? percentsReady
+                    ? 'Build the %\u2019s report tables'
+                    : 'Upload required inputs 1 and 3–7 first'
+                  : payrollReady
+                    ? 'Build the payroll preview'
+                    : 'Upload Slot A and Slot B first'
+            }
+            onClick={onCreateReport}
+          >
+            {hasReport
+              ? 'Create new report'
+              : mode === 'percents'
+                ? "Create %'s Report"
+                : 'Create Payroll Preview'}
+          </button>
         </aside>
+
+        {pendingReview && (
+          <UpdateReviewModal
+            review={pendingReview}
+            sourceLabel={pendingSlots
+              .map((k) => SLOT_LABELS[k as Exclude<SlotId, 'employees'>] ?? k)
+              .join(', ')}
+            onCancel={() => setPendingReview(null)}
+            onApply={(choices) => applyUpdate(pendingReview, choices)}
+          />
+        )}
+
+        {confirmRestart && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="restart-title"
+          >
+            <div className="w-full max-w-md rounded-lg border border-neutral-300 bg-white p-5 shadow-xl">
+              <h2 id="restart-title" className="mb-2 text-base font-bold text-neutral-900">
+                Start over?
+              </h2>
+              <p className="mb-4 text-xs text-neutral-600">
+                This clears {activeEditCount} manual{' '}
+                {activeEditCount === 1 ? 'edit' : 'edits'} on the{' '}
+                {mode === 'percents' ? "%’s report" : 'payroll preview'} and rebuilds from the uploads.
+                To keep {activeEditCount === 1 ? 'it' : 'them'}, use{' '}
+                <span className="font-semibold">Update existing report</span> instead.
+              </p>
+              <div className="flex justify-end gap-2">
+                <button type="button" className="btn px-4 py-1.5 text-sm" onClick={() => setConfirmRestart(false)}>
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary px-4 py-1.5 text-sm"
+                  onClick={() => {
+                    setConfirmRestart(false);
+                    createReport(mode);
+                  }}
+                >
+                  Clear {activeEditCount} and rebuild
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {missingInputWarning && (
           <div
@@ -1554,7 +2149,16 @@ export default function App(): JSX.Element {
             ))}
           </nav>
           <div className="min-h-0 flex-1 overflow-auto bg-neutral-100">
-            {!modeCreated ? (
+            {hydrating ? (
+              <div className="flex h-full items-center justify-center p-10">
+                <div className="rounded-lg border border-sky-300 bg-sky-50 px-6 py-5 text-center">
+                  <div className="text-sm font-bold text-sky-900">Restoring your last session…</div>
+                  <div className="mt-1 text-xs text-sky-800">
+                    Reading the uploads and manual edits cached in this browser.
+                  </div>
+                </div>
+              </div>
+            ) : !modeCreated ? (
               <Placeholder mode={mode} ready={ready} />
             ) : tab === 'salesByRep' ? (
               <SalesByRepTable headers={salesByRepMirror.headers} rows={salesByRepMirror.rows} />
@@ -1668,8 +2272,103 @@ export default function App(): JSX.Element {
           {settingsToast}
         </div>
       )}
+
+      {/* What the last update actually did. Information, never a prompt — it
+          stays until dismissed so it survives a scroll through the tabs. */}
+      {updateSummary && (
+        <div
+          className="fixed bottom-4 left-1/2 z-[60] flex -translate-x-1/2 items-center gap-3 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900 shadow-lg"
+          role="status"
+        >
+          <span>
+            Updated from {updateSummary.slots.join(', ') || 'the new upload'} ·{' '}
+            {updateSummary.changed} {updateSummary.changed === 1 ? 'value' : 'values'} changed
+            {updateSummary.kept > 0 && (
+              <> · {updateSummary.kept} manual {updateSummary.kept === 1 ? 'edit' : 'edits'} kept</>
+            )}
+          </span>
+          <button
+            type="button"
+            className="rounded bg-amber-200 px-1.5 py-0.5 text-[11px] hover:bg-amber-300"
+            onClick={() => setUpdateSummary(null)}
+          >
+            dismiss
+          </button>
+        </div>
+      )}
     </div>
   );
+}
+
+/**
+ * Which report a slot feeds. Round 9 §6 keeps the two rails apart, so a
+ * re-upload is staged against the rail that owns it: re-reading Slot A can
+ * never stage against the %'s report, and vice versa. The employee directory
+ * belongs to neither — it persists on its own and is never staged.
+ */
+/**
+ * Which required uploads a rail is still missing. Pure, because the restore
+ * path has to ask the same question of a freshly-read `ParsedData` before it
+ * can claim a report is ready to show.
+ */
+/**
+ * Trim a slot's patch before caching it. `fills` is a dense per-cell grid (up
+ * to 400k cells) that only `rowHasExclusionGray` reads, during parsing — dead
+ * weight once the patch exists, and the bulkiest thing in it. The employee
+ * directory is skipped too: it already persists through `settings.ts`.
+ */
+function strippedForStorage(patch: Partial<ParsedData>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(patch)) {
+    if (k === 'directory') continue;
+    const asRecord = v as unknown as Record<string, unknown> | null;
+    if (asRecord && typeof asRecord === 'object' && 'rows' in asRecord && 'fills' in asRecord) {
+      const { fills: _dropped, ...rest } = asRecord;
+      out[k] = rest;
+      continue;
+    }
+    out[k] = v;
+  }
+  return out;
+}
+
+export function missingForPercents(parsed: ParsedData): string[] {
+  const checks: [Exclude<SlotId, 'employees'>, boolean][] = [
+    ['timesheetNv', parsed.timesheetNv !== null],
+    ['timenavi', parsed.events !== null],
+    ['nvSales', parsed.nvSales !== null],
+    ['nvSummary', parsed.nvTotals !== null],
+    ['utSales', parsed.utSales !== null],
+    ['utSummary', parsed.utTotals !== null],
+    // lastWeek + timesheetUt optional; pl is payroll-only
+  ];
+  return checks.filter(([, ok]) => !ok).map(([id]) => SLOT_LABELS[id]);
+}
+
+export function missingForPayroll(parsed: ParsedData): string[] {
+  const checks: [Exclude<SlotId, 'employees'>, boolean][] = [
+    ['completedPercents', parsed.completedPercents !== null],
+    ['pl', parsed.pl !== null],
+  ];
+  return checks.filter(([, ok]) => !ok).map(([id]) => SLOT_LABELS[id]);
+}
+
+/** Rows that still carry a field; an emptied-out edit object is not an edit. */
+function countEdits(map: Record<string, object>): number {
+  return Object.values(map).filter((row) => Object.keys(row).length > 0).length;
+}
+
+function railForSlot(id: SlotId): 'percents' | 'payroll' | null {
+  switch (id) {
+    case 'completedPercents':
+    case 'pl':
+    case 'plUt':
+      return 'payroll';
+    case 'employees':
+      return null;
+    default:
+      return 'percents';
+  }
 }
 
 function clearForSlot(id: SlotId): Partial<ParsedData> {

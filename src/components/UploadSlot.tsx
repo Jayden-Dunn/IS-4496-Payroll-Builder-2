@@ -13,15 +13,35 @@ interface UploadSlotProps {
   hint: string;
   optional?: boolean;
   chip: SlotChip;
+  /**
+   * A file dropped on this slot AFTER the report was built. It is parsed but
+   * not applied: the report keeps its current numbers until the user presses
+   * "Update existing report". Only the re-uploaded slot carries one, which is
+   * the visible proof that the other slots keep the files they already have.
+   */
+  pendingChip?: SlotChip;
+  /** True while a cached session is being restored, so a drop cannot race it. */
+  disabled?: boolean;
   onFile: (file: File) => void;
 }
 
-export function UploadSlot({ label, hint, optional = false, chip, onFile }: UploadSlotProps): JSX.Element {
+export function UploadSlot({
+  label,
+  hint,
+  optional = false,
+  chip,
+  pendingChip,
+  disabled = false,
+  onFile,
+}: UploadSlotProps): JSX.Element {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
 
-  const border =
-    chip.status === 'ok'
+  const border = disabled
+    ? 'border-neutral-200 bg-neutral-50 opacity-60'
+    : pendingChip
+    ? 'border-amber-500 bg-amber-50'
+    : chip.status === 'ok'
       ? 'border-green-500 bg-green-50'
       : chip.status === 'error'
         ? 'border-red-400 bg-red-50'
@@ -31,14 +51,20 @@ export function UploadSlot({ label, hint, optional = false, chip, onFile }: Uplo
 
   return (
     <div
-      className={`cursor-pointer rounded-md border border-dashed px-2.5 py-2 transition-colors ${border}`}
-      onClick={() => inputRef.current?.click()}
+      className={`rounded-md border border-dashed px-2.5 py-2 transition-colors ${
+        disabled ? 'cursor-default' : 'cursor-pointer'
+      } ${border}`}
+      onClick={() => {
+        if (!disabled) inputRef.current?.click();
+      }}
       onDragOver={(e) => {
+        if (disabled) return;
         e.preventDefault();
         setDragOver(true);
       }}
       onDragLeave={() => setDragOver(false)}
       onDrop={(e) => {
+        if (disabled) return;
         e.preventDefault();
         setDragOver(false);
         const file = e.dataTransfer.files[0];
@@ -75,6 +101,21 @@ export function UploadSlot({ label, hint, optional = false, chip, onFile }: Uplo
         >
           <div className="truncate font-semibold">{chip.fileName}</div>
           <div>{chip.message}</div>
+        </div>
+      )}
+      {pendingChip && (
+        <div
+          className={`mt-1 rounded px-1.5 py-0.5 text-[11px] font-medium ${
+            pendingChip.status === 'ok' ? 'bg-amber-100 text-amber-900' : 'bg-red-100 text-red-800'
+          }`}
+        >
+          <div className="truncate font-semibold">{pendingChip.fileName}</div>
+          <div>{pendingChip.message}</div>
+          {pendingChip.status === 'ok' && (
+            <div className="mt-0.5 font-bold uppercase tracking-wide">
+              pending — press Update existing report
+            </div>
+          )}
         </div>
       )}
     </div>

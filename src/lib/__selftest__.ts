@@ -76,6 +76,9 @@ import {
   jobDisplayPair,
   type JobDisplaySources,
 } from './jobNames';
+import { reportRowIds } from './timenavi';
+import type { TimeNaviEvent } from './types';
+import { reviewScopes } from './reportDiff';
 import {
   applySettingsMigrations,
   defaultSettings,
@@ -2179,6 +2182,111 @@ export function runSelfTests(): boolean {
     'Round 10: the roster-heal migration puts a dropped sub row back',
     applySettingsMigrations(stripped).salariedRoster.some((r) => r.name === 'Kristina Benson'),
     true,
+  );
+
+  // ---- Update existing report -------------------------------------------
+  /**
+   * The bug that made a re-upload feel destructive: row keys were positional,
+   * so inserting one event at the top shifted every key below it.
+   */
+  const evOf = (
+    index: number,
+    apKey: string | null,
+    event: string,
+    startDate: Date | null,
+  ): TimeNaviEvent => ({
+    index,
+    event,
+    startDate,
+    endDate: startDate,
+    calendar: 'Jobs',
+    attendees: '',
+    location: '',
+    description: '',
+    apKey,
+  });
+  const before = [evOf(0, 'AP24379', 'CCSD Earl Jenkins', new Date(2026, 7, 3))];
+  const after = [
+    evOf(0, 'AP24999', 'New job inserted above', new Date(2026, 7, 2)),
+    evOf(1, 'AP24379', 'CCSD Earl Jenkins', new Date(2026, 7, 3)),
+  ];
+  check(
+    'Update: a row key survives an event inserted above it',
+    reportRowIds(before)[0] === reportRowIds(after)[1],
+    true,
+  );
+  check(
+    'Update: an AP-less row keys off its own content, not its position',
+    reportRowIds([evOf(0, null, 'Shop day', new Date(2026, 7, 3))])[0] ===
+      reportRowIds([
+        evOf(0, 'AP1', 'Other', new Date(2026, 7, 1)),
+        evOf(1, null, 'Shop day', new Date(2026, 7, 3)),
+      ])[1],
+    true,
+  );
+  check(
+    'Update: a repeated AP# gets a distinct key, not a collision',
+    (() => {
+      const ids = reportRowIds([
+        evOf(0, 'AP24379', 'Visit one', new Date(2026, 7, 3)),
+        evOf(1, 'AP24379', 'Visit two', new Date(2026, 7, 4)),
+      ]);
+      return ids[0] !== ids[1] && ids[1].endsWith('#2');
+    })(),
+    true,
+  );
+
+  /**
+   * The review rule, stated as tests: ask about an edited value the new input
+   * moves, and about nothing else.
+   */
+  const defaults = (pairs: [string, string][]): Map<string, string> => new Map(pairs);
+  const K = (key: string, field: string): string => `${key}\u0000${field}`;
+  const reviewed = reviewScopes([
+    {
+      scope: 'timenavi',
+      before: defaults([
+        [K('ap:AP1', 'percent'), '40%'],
+        [K('ap:AP2', 'percent'), '10%'],
+        [K('ap:AP3', 'percent'), '55%'],
+      ]),
+      after: defaults([
+        [K('ap:AP1', 'percent'), '60%'], // edited AND moved  -> conflict
+        [K('ap:AP2', 'percent'), '25%'], // moved, not edited -> silent
+        [K('ap:AP3', 'percent'), '55%'], // edited, unmoved   -> nothing
+      ]),
+      labels: new Map([
+        ['ap:AP1', 'AP1'],
+        ['ap:AP2', 'AP2'],
+        ['ap:AP3', 'AP3'],
+      ]),
+      edited: [
+        { editKey: 'ap:AP1', field: 'percent', manualValue: '45%' },
+        { editKey: 'ap:AP3', field: 'percent', manualValue: '50%' },
+      ],
+    },
+  ]);
+  check(
+    'Update: only the edited value the new input moves becomes a conflict',
+    [reviewed.conflicts.length, reviewed.conflicts[0]?.editKey, reviewed.conflicts[0]?.newValue],
+    [1, 'ap:AP1', '60%'],
+  );
+  check('Update: an unedited change is counted, never asked about', reviewed.silentChangeCount, 1);
+  check('Update: an edit on an unmoved value raises nothing', reviewed.orphans.length, 0);
+
+  const orphaned = reviewScopes([
+    {
+      scope: 'pivot',
+      before: defaults([[K('nv:AP9', 'woPct'), '38%']]),
+      after: defaults([]),
+      labels: new Map([['nv:AP9', 'AP9 \u00b7 Gone Co']]),
+      edited: [{ editKey: 'nv:AP9', field: 'woPct', manualValue: '42%' }],
+    },
+  ]);
+  check(
+    'Update: an edit whose row left the file is an orphan, not a conflict',
+    [orphaned.conflicts.length, orphaned.orphans.length, orphaned.orphans[0]?.editKey],
+    [0, 1, 'nv:AP9'],
   );
 
   const failed = results.filter((r) => !r.pass);

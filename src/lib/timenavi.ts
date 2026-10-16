@@ -126,8 +126,59 @@ export interface ReportDeps {
   knownEstimators: ReadonlySet<string>;
 }
 
+/**
+ * A row key that survives a re-upload of the calendar export.
+ *
+ * It used to be `ev${ev.index}:${apKey}`, where `index` is just the row's
+ * position in the file (see `parsers.ts`, `index: events.length`). Re-uploading
+ * the calendar with one event added, removed or reordered shifted every later
+ * key: edits on AP#-bearing rows were silently orphaned, and edits on rows
+ * WITHOUT an AP# landed on whatever row had slid into that position. The drift
+ * reached payroll too, because calendar-only job columns key off
+ * `cal:${reportRow.id}`.
+ *
+ * The AP# is the real identity of a row, so it is the key when there is one.
+ * AP-less rows fall back to a hash of the content that identifies the event to
+ * a human — title, start date, calendar.
+ *
+ * NOTE: the key must come from the FILE's apKey, never the edited one. Keying
+ * off the edit would move an edit out from under itself the moment someone
+ * corrects a row's AP#.
+ */
 export function reportRowId(ev: TimeNaviEvent): string {
-  return `ev${ev.index}:${ev.apKey ?? ''}`;
+  if (ev.apKey) return `ap:${ev.apKey}`;
+  return `ev:${stableRowHash(ev)}`;
+}
+
+/** FNV-1a over the fields that identify an AP-less event to a human. */
+function stableRowHash(ev: TimeNaviEvent): string {
+  const text = [
+    ev.event.trim().toLowerCase(),
+    ev.startDate ? ev.startDate.toISOString().slice(0, 10) : '',
+    ev.calendar.trim().toLowerCase(),
+  ].join('\u0000');
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(36);
+}
+
+/**
+ * Two calendar events can legitimately share an AP# (one job, two visits), and
+ * two AP-less events can be identical in title, date and calendar. Both would
+ * collapse onto one key and make the second row un-editable, so repeats get a
+ * deterministic `#2`, `#3`… suffix in file order.
+ */
+export function reportRowIds(events: readonly TimeNaviEvent[]): string[] {
+  const seen = new Map<string, number>();
+  return events.map((ev) => {
+    const base = reportRowId(ev);
+    const n = (seen.get(base) ?? 0) + 1;
+    seen.set(base, n);
+    return n === 1 ? base : `${base}#${n}`;
+  });
 }
 
 export function buildReportRows(
@@ -138,9 +189,10 @@ export function buildReportRows(
 ): ReportRow[] {
   const nv = buildSalesIndex(deps.nvSales);
   const ut = buildSalesIndex(deps.utSales);
+  const ids = reportRowIds(events);
 
-  return events.map((ev) => {
-    const id = reportRowId(ev);
+  return events.map((ev, evIndex) => {
+    const id = ids[evIndex];
     const edit = edits[id] ?? {};
 
     const apKey = edit.apKey !== undefined ? edit.apKey : ev.apKey;

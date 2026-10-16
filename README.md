@@ -10,7 +10,9 @@ on screen (screenshot-ready) and downloadable as one styled `.xlsx`.
 ## Privacy
 
 Payroll and sales data is sensitive: **everything runs client-side in your browser.**
-No backend, no network calls, no telemetry. Files never leave your computer.
+No backend, no network calls, no telemetry. Files never leave your computer. The working session
+(uploads + manual edits) is cached in this browser's own storage so a crash does not lose it; that
+cache is local too, and **Start fresh** in the left rail clears it.
 
 ## Run it
 
@@ -48,6 +50,37 @@ rows and layout drift are tolerated; parse problems show up as a friendly error 
 
 Everything else (Last % Paid, QBO Job Name, In QBO Time?, Job Total $, $ Difference, Invoice Date,
 Date Difference, the pivot, and the Exceptions list) recomputes live.
+
+## When one input changes mid-session
+
+A corrected timesheet, a fixed calendar export or a re-run P&L does **not** mean re-uploading
+everything and starting over. Drop the one file that changed into its slot. Only that slot goes
+amber and says *pending* — every other slot keeps the file it already has, and the report on screen
+does not move until you ask it to.
+
+- **Update existing report** re-derives from the new file and keeps every manual edit.
+- **Create new report** is the explicit start-over. It clears the manual edits on that rail, and
+  says how many before it does.
+
+The update only asks about one thing: a cell you hand-edited whose underlying value the new file
+would change. It shows your edit, what it was, and what the new file says, and you either keep yours
+or take the new one — all at once or row by row. Values you never touched are applied silently and
+counted in the summary line, because there is nothing there to decide. Edits whose row is not in the
+new file are listed separately; keeping one parks it, and it re-attaches if that row comes back.
+
+Under the hood this runs the builders a second time with empty edit maps (`src/lib/shadowBuild.ts`),
+which re-exposes the computed layer they normally fold the edits into. Diffing those two shadow
+models is what makes "only what this file changed" an honest claim rather than a guess.
+
+## If the tab dies
+
+Uploads and edits are cached in this browser (IndexedDB) as you work, so a crash, a browser restart
+or an accidental refresh comes back to the same report — there is a "Session restored" note and a
+**Start fresh** button in the left rail. Closing a tab that holds manual edits also asks first.
+
+This is browser-local only; it never goes to a server, and the privacy note above still holds. It is
+a safety net, not a guarantee: a private window may refuse the cache, and a write in flight when the
+tab dies is lost.
 
 ## The two processes are independent
 
