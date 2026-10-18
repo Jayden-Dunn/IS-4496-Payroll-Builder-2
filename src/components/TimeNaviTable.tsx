@@ -282,7 +282,7 @@ export function TimeNaviTable({ rows, colorByEstimator, estimatorOptions, onEdit
               <td
                 className="xcell max-w-[9rem] truncate"
                 style={
-                  r.included && (r.inQboTime === 'NotClockedIn' || dupInQbo.has(r.inQboTime.trim()))
+                  r.inQboTime === 'NotClockedIn' || (r.included && dupInQbo.has(r.inQboTime.trim()))
                     ? PINK
                     : undefined
                 }
@@ -292,7 +292,7 @@ export function TimeNaviTable({ rows, colorByEstimator, estimatorOptions, onEdit
                   value={r.inQboTime}
                   onCommit={(text) => onEdit(r.id, { inQboTime: text })}
                   style={
-                    r.included && (r.inQboTime === 'NotClockedIn' || dupInQbo.has(r.inQboTime.trim()))
+                    r.inQboTime === 'NotClockedIn' || (r.included && dupInQbo.has(r.inQboTime.trim()))
                       ? PINK
                       : undefined
                   }

@@ -22,7 +22,7 @@ import { directoryFromTimesheet, type LeadResolverContext } from './payroll';
 import { buildPayrollPivotByJob } from './payrollPivot';
 import { buildPayrollPreview, hasUtPayrollData } from './payrollPreview';
 import { buildPivotByJob, EMPTY_MANUAL_STATE, type ManualSectionState } from './pivotByJob';
-import { buildReportRows, sortReportRows } from './timenavi';
+import { buildReportRows, lastPaidMapFromPivot, sortReportRows } from './timenavi';
 import type { CompletedPercentsResult } from './completedPercents';
 import type {
   AppSettings,
@@ -104,6 +104,7 @@ function leadContext(
     directory: directory ?? directoryFromTimesheet(rows as never),
     crewGroups,
     subcontractors: settings.subcontractors,
+    aliases: settings.crewLeadAliases,
   };
 }
 
@@ -132,7 +133,7 @@ export function buildShadowPercents(p: ShadowParsed, deps: ShadowDeps): {
         utSales: p.utSales,
         nvTotals: p.nvTotals,
         utTotals: p.utTotals,
-        lastWeekMap: p.lastWeek,
+        lastWeekMap: lastPaidMapFromPivot(p.lastWeekPbj),
         timesheetJobcodeByApKey,
         knownEstimators: deps.knownEstimators,
       },

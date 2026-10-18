@@ -1,7 +1,7 @@
 import * as XLSX from 'xlsx';
 import { extractApKey, normalizeApInput } from './apkey';
 import { isExclusionGray } from './fills';
-import { DEFAULT_PL_ACCOUNT_MAPPING } from './settings';
+import { DEFAULT_PL_ACCOUNT_MAPPING, fixNameSpelling, fixNameSpellingInText } from './settings';
 import type {
   CellFill,
   CellValue,
@@ -303,13 +303,16 @@ export function parseTimesheet(
       lunchRemoved++;
       continue;
     }
+    // Round 11 — known misspellings are corrected here, where every timesheet
+    // (NV, UT, and Slot A's) enters the app, so all tabs agree on one spelling.
+    const name = fixNameSpelling(asString(get('fname')), asString(get('lname')));
     rows.push({
       username,
       payrollId: asString(get('payroll_id')),
-      fname: asString(get('fname')),
-      lname: asString(get('lname')),
+      fname: name.first,
+      lname: name.last,
       number: asString(get('number')),
-      group: asString(get('group')),
+      group: fixNameSpellingInText(asString(get('group'))),
       localDate: parseDate(get('local_date')),
       localDay: asString(get('local_day')),
       localStartTime: parseDate(get('local_start_time')),
@@ -948,6 +951,7 @@ export function parseEmployeeList(wbd: WorkbookData): DirectoryEmployee[] {
         firstName = cleaned;
       }
     }
+    ({ first: firstName, last: lastName } = fixNameSpelling(firstName, lastName));
     const fullName = singleSpaced(`${firstName} ${lastName}`);
     if (!fullName) continue;
     out.push({ fullName, firstName, lastName, active });

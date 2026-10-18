@@ -9,11 +9,13 @@ import { baseApKey } from './jobNames';
 import type { PayRateKind } from './payTypes';
 import type {
   ConditionalRateRule,
+  CrewLeadAlias,
   CrewLeadResolution,
   DirectoryEmployee,
   JobRateRule,
   PercentValue,
   PerJobRateOverride,
+  PsBlock,
   TimesheetRow,
 } from './types';
 
@@ -133,6 +135,8 @@ export interface LeadResolverContext {
   /** Timesheet `group` labels (for the "is a crew lead" preference). */
   crewGroups: string[];
   subcontractors: string[];
+  /** Round 11 — calendar-title nicknames ("Welder" → Color Enterprises LLC). */
+  aliases?: readonly CrewLeadAlias[];
 }
 
 /** Strip the "'s Crew" suffix from a group label; null when absent. */
@@ -168,6 +172,23 @@ function resolveCandidate(
   const flags: CrewLeadResolution['flags'] = [];
   const candLower = candidate.toLowerCase();
   const candTokens = nameTokens(candidate);
+
+  /**
+   * Round 11 — a nickname from Settings is an explicit instruction, not a
+   * guess: "(Welder)" IS Color Enterprises LLC. Resolve the real name the
+   * normal way so it picks up the directory spelling and the sub flag, and
+   * if the directory does not know them yet (a new lead with no hours), use
+   * the name as configured rather than reporting "no match".
+   */
+  const alias = ctx.aliases?.find((a) => a.alias.trim().toLowerCase() === candLower.trim());
+  if (alias) {
+    const target = resolveCandidate(alias.lead, { ...ctx, aliases: [] });
+    // They are a crew lead because Settings says so.
+    const kept = target.flags.filter((f) => f.kind !== 'notACrewLead' && f.kind !== 'noMatch');
+    if (target.name) return { ...target, flags: kept };
+    const sub = ctx.subcontractors.some((s) => tokensSubset(alias.lead, s) || tokensSubset(s, alias.lead));
+    return { name: stripSingleLetterTokens(alias.lead).toUpperCase(), sub, flags: kept };
+  }
 
   let matches = ctx.directory.filter((e) => {
     if (candTokens.length > 1) return tokensSubset(candidate, e.fullName);
@@ -787,6 +808,14 @@ export function resolveLineRate(
     payRateKind?: PayRateKind;
   },
 ): LineRate {
+  /**
+   * Round 11 — hours clocked on the "Davis Bacon" pay item pay the Davis-Bacon
+   * rate, full stop. It outranks every rule below because it is what the
+   * person actually clocked, and the rate is set by statute, not by role.
+   */
+  if (settings.payRateKind === 'davisBacon') {
+    return { rate: settings.prevailingMinRate, defaulted: false, prevailing: true };
+  }
   const apKey = settings.apKey ?? extractApKey(jobText);
   const perJob = matchPerJobRateOverride(employeeName, apKey, settings.perJobRateOverrides);
   const jobRule = perJob ? null : matchJobRateRule(employeeName, apKey, settings.jobRateRules);
@@ -838,6 +867,58 @@ export function resolveLineRate(
     ...(kind === 'crewLead' ? { fromCrewLeadRate: true } : {}),
     ...(kind === 'commercialHourly' || kind === 'wages2' ? { fromPayItemRate: kind } : {}),
   };
+}
+
+/**
+ * Round 11 — the T-SHEETS totals row: total + taxes + NEST = net.
+ *
+ * Taxes and NEST are withholdings, so they are always stored NEGATIVE: typing
+ * "150" or "-150" both mean $150 withheld. The two ways in:
+ *
+ *   - net typed   → taxes = net − total − NEST  (the clerk's usual flow: read
+ *                   the net off the paystub, let the taxes fall out)
+ *   - taxes typed → net = total + taxes + NEST
+ *
+ * NEST only counts for the people who get the column; for everyone else it is
+ * forced blank so a stale value can never move their net.
+ */
+export function resolveNetRow(
+  total: number,
+  typed: { taxes?: number | null; nest?: number | null; net?: number | null },
+  showNest: boolean,
+): { taxes: number | null; nest: number | null; net: number | null } {
+  const withheld = (n: number | null | undefined): number | null =>
+    n === null || n === undefined ? null : -Math.abs(n);
+  const nest = showNest ? withheld(typed.nest) : null;
+  const nestAmt = nest ?? 0;
+  if (typed.net !== null && typed.net !== undefined) {
+    return { taxes: round2(typed.net - total - nestAmt), nest, net: typed.net };
+  }
+  const taxes = withheld(typed.taxes);
+  if (taxes !== null) return { taxes, nest, net: round2(total + taxes + nestAmt) };
+  return { taxes: null, nest, net: nest !== null ? round2(total + nestAmt) : null };
+}
+
+/** Round 11 — is this person on the NEST [IRA] list? Token match, any order. */
+export function hasNest(fullName: string, nestNames: readonly string[] | undefined): boolean {
+  return (nestNames ?? []).some((n) => tokensSubset(n, fullName) || tokensSubset(fullName, n));
+}
+
+/**
+ * Round 11 — the crew leads the Profitshare Output tab shows. HOURLY jobs
+ * never join a profit-share band, so a lead whose week was all hourly work
+ * arrives with no job columns: that band would be an empty chain, and the
+ * lead is left off. Their T-SHEETS block on the Payroll Preview is untouched.
+ *
+ * Each entry keeps the lead's position in `leads`, because the Input #'s tab
+ * still lists every lead and the band's formulas point into it by that index.
+ */
+export function profitshareOutputLeads(
+  leads: readonly PsBlock[],
+): { block: PsBlock; inputIndex: number }[] {
+  return leads
+    .map((block, inputIndex) => ({ block, inputIndex }))
+    .filter(({ block }) => block.jobs.length > 0);
 }
 
 /**

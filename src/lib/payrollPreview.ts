@@ -24,7 +24,9 @@ import {
   isPrevailingWageJob,
   jobDisplayName,
   resolveCrewLead,
+  hasNest,
   resolveLineRate,
+  resolveNetRow,
   splitDailyOvertime,
   splitOvertime,
   stripSingleLetterTokens,
@@ -246,6 +248,22 @@ function leadNamesFromDisplay(display: string): string[] {
     .filter((s) => s !== '');
 }
 
+/** Round 11 — an overtime line of either kind (weekly or NV daily). */
+function isOvertimeLine(l: { ot: boolean; dailyOt?: boolean }): boolean {
+  return l.ot || l.dailyOt === true;
+}
+
+/**
+ * Round 11 — remove the "*PAID XX% LAST WK*" note the Pivot by Job writes by
+ * default, wherever it sits in the note, leaving any other text intact.
+ */
+export function stripPaidLastWeek(note: string): string {
+  return note
+    .replace(/\*\s*paid\s+[\d.]+\s*%\s*last\s*w(?:ee)?k\.?\s*\*/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
 export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewModel {
   const { pbj, enriched, reportRows, settings, payDate, edits, qbHours } = input;
   // Round 8 §7.2/§7.3 — one builder, two tabs. The entity decides which
@@ -447,6 +465,9 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
   const segKeyFor = (cls: ReturnType<typeof classifyPayItem>): string => {
     if (cls.kind === 'overtime') {
       if (cls.reason === 'daily') return ':DOT';
+      // Davis-Bacon overtime is 1.5 × the Davis-Bacon rate, so it must not
+      // share a bucket (and a rate) with ordinary overtime.
+      if (cls.rate === 'davisBacon') return ':DBOT';
       return cls.rate === 'crewLead' ? ':CLOT' : ':OT';
     }
     switch (cls.rate) {
@@ -458,6 +479,8 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
         return ':W2';
       case 'salary':
         return ':SAL';
+      case 'davisBacon':
+        return ':DB';
       default:
         return '';
     }
@@ -802,6 +825,7 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
         label: item.label,
         amount: e.amount !== undefined ? e.amount : item.amount,
         kind: item.kind,
+        memo: e.memo ?? '',
       });
     }
     return out;
@@ -976,8 +1000,13 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
             ? ' [Daily OT]'
             : '';
       const isOfficeLine = officeStyle || j.office;
-      const notesSuffix = !isOfficeLine && j.notes.trim() ? ` — ${j.notes.trim()}` : '';
-      const typeTag = isOfficeLine ? '' : j.hourly ? ' [Hourly]' : ' [PS]';
+      // Round 11 — the Pivot by Job note now defaults to "*PAID XX% LAST WK*",
+      // which is pivot bookkeeping, not part of a job's name on a pay stub.
+      // Strip it here; anything else typed into the note still shows.
+      const lineNote = stripPaidLastWeek(j.notes);
+      const notesSuffix = !isOfficeLine && lineNote ? ` — ${lineNote}` : '';
+      // Round 11 — no "[PS]" tag; HOURLY is abbreviated to "[HRLY]".
+      const typeTag = isOfficeLine ? '' : j.hourly ? ' [HRLY]' : '';
       const label = isOfficeLine
         ? `Office${otTag}`
         : `${jobDisplayName(j.customer, j.jobcode2)}${typeTag}${otTag}${notesSuffix}`;
@@ -1091,9 +1120,14 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       }
     }
 
+    // Round 11 — every overtime line sits at the bottom of the breakdown, for
+    // every painter. The sort is stable, so jobs keep their order above it.
+    lines.sort((a, b) => Number(isOvertimeLine(a)) - Number(isOvertimeLine(b)));
+
     const totalHours = round2(lines.reduce((a, l) => a + l.hours, 0));
     const totalPay = round2(lines.reduce((a, l) => a + l.hours * l.rate, 0));
     const blockEdit = edits[`hb:${emp.username}`] ?? {};
+    const showNest = hasNest(emp.fullName, settings.nestNames);
     // Round 9 §19/§23 — person-scoped extra rows (Gas Reimb, Aflac, …). A crew
     // lead's own T-SHEETS block skips them: the PS band directly above it
     // already carries that person's rows, and a deduction must only bite once.
@@ -1106,9 +1140,8 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       lines,
       totalHours,
       totalPay,
-      taxes: blockEdit.taxes !== undefined ? blockEdit.taxes : null,
-      nest: blockEdit.nest !== undefined ? blockEdit.nest : null,
-      net: blockEdit.net !== undefined ? blockEdit.net : null,
+      ...resolveNetRow(totalPay, blockEdit, showNest),
+      showNest,
       inactive: emp.inactive,
       extras,
       netPay: round2(totalPay + extrasNet(extras)),
@@ -1556,6 +1589,8 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
       leadName: leadUpper,
       displayName: leadDisplayName,
       sub: meta.sub,
+      hourlyPayMemo: be.hourlyPayMemo ?? '',
+      mileageNewMemo: be.mileageNewMemo ?? '',
       jobs,
       total,
       mileageNew,
@@ -1608,6 +1643,9 @@ export function buildPayrollPreview(input: PayrollPreviewInput): PayrollPreviewM
     const extras = extrasFor(entry.name, key);
     return {
       key,
+      amountMemo: e.amountMemo ?? '',
+      mileageMemo: e.mileageMemo ?? '',
+      reimbMemo: e.reimbMemo ?? '',
       name: stripSingleLetterTokens(entry.name),
       role: entry.role,
       amount: entry.amount,

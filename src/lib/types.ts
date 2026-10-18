@@ -308,6 +308,8 @@ export interface PayrollExtraLine {
   label: string;
   amount: number | null;
   kind: 'deduction' | 'reimbursement' | 'note';
+  /** Round 11 — the free-text note typed in the cell right of the amount. */
+  memo: string;
 }
 
 /**
@@ -439,10 +441,29 @@ export interface AppSettings {
    */
   dailyOtExemptNames: string[];
   /**
+   * Round 11 — nicknames used in calendar event titles, e.g. "(Welder)" for
+   * Color Enterprises LLC. Matched case-insensitively against the title's
+   * crew-lead parenthetical before any directory lookup.
+   */
+  crewLeadAliases: CrewLeadAlias[];
+  /**
+   * Round 11 — the only people whose Payroll Preview blocks carry a
+   * `NEST [IRA]` column. Token-matched against the block name.
+   */
+  nestNames: string[];
+  /**
    * One-time data migrations already applied to this settings blob (e.g.
    * 'r8-rf-color'). Persisted so each runs exactly once per stored settings.
    */
   appliedMigrations: string[];
+}
+
+/** Round 11 — a calendar-title nickname for a crew lead. */
+export interface CrewLeadAlias {
+  /** As written in the title, without parentheses: "Welder". */
+  alias: string;
+  /** The crew lead it stands for: "Color Enterprises LLC". */
+  lead: string;
 }
 
 /** Round 6 §7.2 — job-specific pay rule. */
@@ -624,6 +645,17 @@ export interface ManualSectionRow {
   excludedFromPayroll: boolean;
   notes: string;
   colorHex: string | null;
+  /**
+   * Round 11 — the same "On Calendar?" reference the main pivot shows:
+   * `TimeNavi row N`, or `NOT ON CALENDAR`.
+   */
+  onCalendar?: string;
+  /**
+   * Round 11 — a no-hours job has nothing under its date columns, so those
+   * cells (dates + Total hrs) merge into one free-text cell. Editable, and
+   * written merged-and-centered on export.
+   */
+  hoursNote?: string;
 }
 
 export interface PivotByJobModel {
@@ -645,6 +677,8 @@ export interface PivotByJobModel {
 /** Sparse user edits on Pivot by Job rows (keyed by PbjJobRow.id). */
 export interface PbjJobEdit {
   apKey?: string | null;
+  /** Round 11 — the Estimator column is editable on every row. */
+  estimator?: string;
   crewLead?: string;
   woOverride?: number | null;
   woPct?: number | null;
@@ -729,10 +763,15 @@ export interface HourlyBlock {
   lines: HourlyLine[];
   totalHours: number;
   totalPay: number;
-  /** Round 6 §6.1 — independent manual cells; blank by default. */
+  /**
+   * Round 11 — total + taxes + NEST = net (see `resolveNetRow`). Taxes and
+   * NEST are withholdings, stored negative.
+   */
   taxes: number | null;
   nest: number | null;
   net: number | null;
+  /** Round 11 — only the people on the NEST list get the NEST [IRA] column. */
+  showNest: boolean;
   inactive: boolean;
   /** Round 9 §19/§23 — extra rows (Gas Reimb, Aflac, …) under the totals. */
   extras: PayrollExtraLine[];
@@ -818,6 +857,9 @@ export interface PsBlock {
   hourlyPay: number; // own T-SHEETS gross
   reimbursements: number; // editable
   reimbMemo: string;
+  /** Round 11 — notes typed beside the Hourly Pay and Mileage - New values. */
+  hourlyPayMemo: string;
+  mileageNewMemo: string;
   /** Round 8 §8.2 — entered POSITIVE and SUBTRACTED from Total Pay. */
   deductions: number;
   deductMemo: string;
@@ -860,6 +902,10 @@ export interface SalaryBlock {
   net: number | null;
   /** amount + reimbursements + extra reimbursements − extra deductions. */
   total: number;
+  /** Round 11 — notes typed beside the salary, mileage and reimbursement values. */
+  amountMemo: string;
+  mileageMemo: string;
+  reimbMemo: string;
 }
 
 /**
@@ -962,6 +1008,15 @@ export interface PayrollEdit {
   woPct?: number | null;
   /** Round 9 §19/§23 — an extra line's amount (`xl:` keys). */
   amount?: number | null;
+  /**
+   * Round 11 — the note typed in the cell right of a value: `memo` on an
+   * extra line, the named fields on a crew-lead band or a salary block.
+   */
+  memo?: string;
+  hourlyPayMemo?: string;
+  mileageNewMemo?: string;
+  amountMemo?: string;
+  mileageMemo?: string;
 }
 
 export type PayrollEditsMap = Record<string, PayrollEdit>;

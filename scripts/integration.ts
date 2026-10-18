@@ -36,7 +36,7 @@ import { buildPayrollPreview } from '../src/lib/payrollPreview';
 import { buildPivot } from '../src/lib/pivot';
 import { buildPivotByJob, EMPTY_MANUAL_STATE } from '../src/lib/pivotByJob';
 import { round2 } from '../src/lib/format';
-import { buildReportRows, sortReportRows } from '../src/lib/timenavi';
+import { buildReportRows, lastPaidMapFromPivot, sortReportRows } from '../src/lib/timenavi';
 import type { CellValue, EnrichedTimesheetRow } from '../src/lib/types';
 
 let failures = 0;
@@ -293,7 +293,10 @@ for (const r of timesheet.rows) {
 }
 
 const knownEstimators = new Set<string>([...DEFAULT_LEGEND.map((l) => l.estimator), ...DEFAULT_PIVOT_COLUMNS]);
-const deps = { nvSales, utSales, nvTotals, utTotals, lastWeekMap: lastWeek, timesheetJobcodeByApKey, knownEstimators };
+// Round 11 — Last % Paid's first source is input #8's PIVOT BY JOB sheet
+// (% of Completion by AP#), not its TimeNavi Export sheet.
+const lastPaidByAp = lastPaidMapFromPivot(parseLastWeekPivotByJob(lastWeekWb));
+const deps = { nvSales, utSales, nvTotals, utTotals, lastWeekMap: lastPaidByAp, timesheetJobcodeByApKey, knownEstimators };
 const legendOrder = DEFAULT_LEGEND.map((l) => l.estimator);
 const rows = sortReportRows(buildReportRows(events, {}, deps, payDate), legendOrder);
 
@@ -309,7 +312,9 @@ check('24314 estimator (UT first, then NV)', r24314.estimator, 'MH');
 // B-1: pay-date line (7/10 → 30%) wins over the newer 7/17 100% line on top.
 check('24314 suggested % is the PAY DATE line (30%, not 100%)', r24314.percent, 0.3);
 check('24314 % source line', r24314.suggestedSourceLine, '7/10/26 30% COMPLETE -SH');
-check('24314 last % paid (from workbook only)', r24314.lastPaid, 0.9);
+// Input #8's Pivot by Job has AP24314 at 100%, which outranks the 90% on the
+// description's 7/03 line.
+check('R11: 24314 last % paid from input #8 Pivot by Job, first', r24314.lastPaid, 1);
 check('24314 QBO job name (NV first)', r24314.qboJobName, 'AP24314 Ext');
 check('24314 In QBO Time', r24314.inQboTime, 'AP24314 Ext');
 check('24314 job total', r24314.jobTotal, 650);
@@ -325,7 +330,8 @@ const r24222 = byAp('24222');
 check('24222 estimator resolves via UT (JS)', r24222.estimator, 'JS');
 check('24222 job total from UT summary', r24222.jobTotal, 14410.63);
 check('24222 NotClockedIn (no Utah crew in timesheet)', r24222.inQboTime, 'NotClockedIn');
-check('24222 last % paid HOURLY (text as-is)', r24222.lastPaid, 'HOURLY');
+// Its only status line (7/8 90%) IS this week's, so there is no last paid.
+check('R11: 24222 last % paid blank — its only calendar line is this week\'s', r24222.lastPaid, null);
 check('24222 % from latest line ≤ pay date (7/8 → 90%)', r24222.percent, 0.9);
 
 const r24388 = byAp('24388');
@@ -361,9 +367,15 @@ const rows717 = buildReportRows(events, {}, deps, new Date(2026, 6, 17));
 check('pay 7/17: 24314 suggests 100%', rows717.find((r) => r.apKey === '24314')!.percent, 1);
 check('pay 7/17: 24388 suggests HOURLY', rows717.find((r) => r.apKey === '24388')!.percent, 'HOURLY');
 
-// E-4: with no prior-week workbook, every K cell is '-' (null).
+// Round 11 — with no prior-week workbook, Last % Paid falls back to the
+// calendar: AP24314's 7/03 line (90%) sits below this week's 7/10 line. Every
+// other event has only this week's line (or none), so it stays blank.
 const rowsNoPrev = buildReportRows(events, {}, { ...deps, lastWeekMap: null }, payDate);
-check('no prior workbook → all Last % Paid empty', rowsNoPrev.every((r) => r.lastPaid === null), true);
+check(
+  'R11: no prior workbook → Last % Paid from the calendar only',
+  rowsNoPrev.filter((r) => r.lastPaid !== null).map((r) => [r.apKey, r.lastPaid]),
+  [['24314', 0.9]],
+);
 
 console.log('enrichment + pivot…');
 const includedApKeys = new Set<string>();
@@ -581,17 +593,24 @@ check('split leads joined with / and tagged', [j24450.analysis.crewLead, j24450.
 
 // §4.6 seeds.
 check(
-  'BALANCES: <100%-paid NV jobs with no hours this week (notes blank — Round 7)',
+  // Round 11 — off the calendar, the note reads input #8's % of Completion.
+  'R11: BALANCES carries <100%-paid jobs, noted *PAID XX% LAST WK*',
   pbj.balances.map((r) => [r.apKey, r.notes]),
-  [['21848-A5', ''], ['20000', '']],
+  [['21848-A5', '*PAID 75% LAST WK*'], ['20000', '*PAID 50% LAST WK*']],
 );
 check('BALANCES: fully-paid job NOT carried', pbj.balances.some((r) => r.apKey === '24314'), false);
 check(
-  'UT PAYROLL: last week UT rows + this week Utah-calendar events (deduped)',
-  pbj.utPayroll.map((r) => r.apKey),
-  ['24111', '24222'],
+  // Round 11 — alphabetical by customer: SNRHA (24222) before Utah Customer (24111).
+  'R11: UT PAYROLL — carried + Utah-calendar rows, deduped, by customer',
+  pbj.utPayroll.map((r) => [r.customer, r.apKey]),
+  [['SNRHA', '24222'], ['Utah Customer', '24111']],
 );
-check('UT event seed carries resolved fields', pbj.utPayroll[1].percent, 0.9);
+check('UT event seed carries resolved fields', pbj.utPayroll.find((r) => r.apKey === '24222')?.percent, 0.9);
+check(
+  'R11: bottom rows get the same On Calendar? reference',
+  pbj.utPayroll.map((r) => [r.apKey, r.onCalendar]),
+  [['24222', 'TimeNavi row 2'], ['24111', 'NOT ON CALENDAR']],
+);
 
 // Manual-state merge: delete a seed, add a row, edit a seed.
 const pbj2 = buildPivotByJob({
@@ -608,9 +627,11 @@ check('QB Hrs override stored on the employee row', pbj2.customers[0].jobs[0].em
 // Round 9 §6/§11 — re-pointing 24314's AP# leaves the calendar row for 24314
 // with no timesheet hours, so it seeds into BALANCES (that is how a job with
 // no clocked hours reaches the payroll process now).
-check('manual delete removes the seed', pbj2.balances.map((r) => r.apKey), ['21848-A5', '24314']);
-check('manual edit applied to a seed', pbj2.balances[0].notes, 'edited note');
-check('manual add appended', pbj2.utPayroll.map((r) => r.apKey), ['24111', '24222', '24999']);
+// Round 11 — sections are alphabetical by customer, so assert membership and
+// look rows up by AP# rather than by position.
+check('manual delete removes the seed', pbj2.balances.map((r) => r.apKey).sort(), ['21848-A5', '24314']);
+check('manual edit applied to a seed', pbj2.balances.find((r) => r.apKey === '21848-A5')?.notes, 'edited note');
+check('manual add kept (customer "X" sorts last)', pbj2.utPayroll.map((r) => r.apKey), ['24222', '24111', '24999']);
 
 console.log('payroll preview…');
 const preview = buildPayrollPreview({
@@ -629,7 +650,8 @@ check('block totals (reg+OT = actual, pay = Σ h×r)', [leoBlock.totalHours, leo
 check('weekly OT tag on the line label', leoBlock.lines[1].jobLabel.endsWith('[OT]'), true);
 const juanB = preview.painters[0];
 check('unknown employee → fallback rate + flag', [juanB.lines[0].rate, juanB.lines[0].rateDefaulted], [18, true]);
-check('job display name on the line', juanB.lines[0].jobLabel, 'CCSD 5321 Lambrook Dr Int/Ext [PS]');
+// Round 11 — no "[PS]" tag on Payroll Preview job names.
+check('R11: job display name on the line, no [PS] tag', juanB.lines[0].jobLabel, 'CCSD 5321 Lambrook Dr Int/Ext');
 check('lines in first-encounter order', juanB.lines.map((l) => l.apKey), ['24403', '99999', '24450', '24500']);
 
 check(
@@ -733,7 +755,12 @@ const previewEdited = buildPayrollPreview({
   qbHours: {}, knownEstimators, leadCtx,
   nvSales, utSales, lastWeekPbj,
 })!;
-check('net edit stored (taxes/NEST/net independent; taxes not auto-derived)', previewEdited.painters[1].net, 600);
+// Round 11 — total + taxes + NEST = net: typing net back-fills taxes.
+check(
+  'R11: net edit stored, taxes derived as net − total (negative)',
+  [previewEdited.painters[1].net, previewEdited.painters[1].taxes],
+  [600, Math.round((600 - previewEdited.painters[1].totalPay) * 100) / 100],
+);
 const editedDaniel = previewEdited.leads.find((b) => b.leadName === 'DANIEL GONZALES BONILLA')!;
 const editedJob = editedDaniel.jobs.find((j) => j.apKey === '24403')!;
 // Round 8 §8.1 — % Completion is a term now, so editing it to 100% DOES move
@@ -752,11 +779,13 @@ const pGroups = buildPayrollExceptions({
   enriched, nvSales, utSales, lastWeekPbj,
 });
 const pg = (key: string) => pGroups.find((x) => x.key === key)!;
-check('lead resolution flags (not-a-crew-lead ×4 + missing lead on 24500)', pg('leadResolution').items.length, 5);
+// Round 11 — AP24500's calendar title names no crew lead, so it defaults to
+// HOURLY: no "missing lead" flag (4, not 5) and no blank-WO% item (8, not 9).
+check('R11: lead resolution flags (not-a-crew-lead ×4; 24500 is HOURLY now)', pg('leadResolution').items.length, 4);
 check('hours on a job not on the calendar (99999)', pg('hoursNotOnCalendar').items.length, 1);
 check('calendar job with no hours (24388, Utah excluded)', pg('calendarNoHours').items.length, 1);
 check('40+ hours item (Leonardo OT)', pg('hours40or10').items.length, 1);
-check('missing pay inputs (blank WO% on piece-rate jobs + default-rate employees)', pg('missingInputs').items.length, 9);
+check('R11: missing pay inputs (24500 is HOURLY, so no WO% item for it)', pg('missingInputs').items.length, 8);
 check('job missing from P&L: carried jobs with no P&L column', pg('missingFromPl').items.length, 2);
 // Round 8 §8.1 flips this group: multiplying by % Completion pushes both of
 // Daniel's jobs (30% and 10% complete) below the $25 threshold, while the
@@ -940,7 +969,8 @@ async function testExport(): Promise<void> {
   check('Invoice Date format mm/dd/yyyy', tn.getCell('R2').numFmt, 'mm/dd/yyyy');
   check('Date Difference integer format', [tn.getCell('S2').value, tn.getCell('S2').numFmt], [-7, '0']);
   check('percent stored as fraction + 0% format', [tn.getCell('I2').value, tn.getCell('I2').numFmt], [0.9, '0%']);
-  check('Last % Paid HOURLY text survives', tn.getCell('K2').value, 'HOURLY');
+  // Row 2 is AP24222 (JS sorts first); its only line is this week's → '-'.
+  check('R11: Last % Paid exports - when there is no last paid', tn.getCell('K2').value, '-');
   check(
     'money accounting format, no $',
     [tn.getCell('N2').value, String(tn.getCell('N2').numFmt).replace(/\\/g, '')],
@@ -1068,10 +1098,35 @@ async function testExport(): Promise<void> {
   // Round 4 §2.4: hour values centered in the estimator columns.
   check('hour value centered (estimator column)', pv.getCell('H7').alignment?.horizontal, 'center');
 
-  // §2.5 + Round 2 §1: Grand Total row bold, gray/white on A + value columns,
-  // B:D unfilled.
+  // §2.5: Grand Total row bold, gray/white. Round 11 — the WHOLE row is
+  // #808080 (B:D and the helper column used to be left white), with a double
+  // rule along its top edge.
   check('grand row A gray white bold', [fillOf(pv.getCell(grandRowNum, 1)), pv.getCell(grandRowNum, 1).font?.color?.argb, pv.getCell(grandRowNum, 1).font?.bold], ['FF808080', 'FFFFFFFF', true]);
-  check('grand row B:D unfilled', [2, 3, 4].map((c) => fillOf(pv.getCell(grandRowNum, c))), [null, null, null]);
+  const pvLastCol = gtColNum + 1;
+  check(
+    'R11: grand row filled #808080 from A to the last column',
+    Array.from({ length: pvLastCol }, (_, i) => fillOf(pv.getCell(grandRowNum, i + 1))).every((f) => f === 'FF808080'),
+    true,
+  );
+  check(
+    'R11: grand row has a double TOP border, end to end',
+    Array.from({ length: pvLastCol }, (_, i) => pv.getCell(grandRowNum, i + 1).border?.top?.style).every((b) => b === 'double'),
+    true,
+  );
+  {
+    let crewRowNum = 0;
+    pv.eachRow((row, n) => {
+      if (!crewRowNum && /crew$/i.test(String(row.getCell(1).value ?? '')) && fillOf(row.getCell(1)) === 'FF000000') crewRowNum = n;
+    });
+    check(
+      'R11: a crew-lead row is ruled top and bottom across A–L',
+      crewRowNum > 0 &&
+        Array.from({ length: pvLastCol }, (_, i) => pv.getCell(crewRowNum, i + 1).border).every(
+          (b) => b?.top?.style === 'thin' && b?.bottom?.style === 'thin',
+        ),
+      true,
+    );
+  }
   check('grand row value cells gray white bold + 0.00', [pv.getCell(grandRowNum, gtColNum).value, fillOf(pv.getCell(grandRowNum, gtColNum)), pv.getCell(grandRowNum, gtColNum).font?.bold, pv.getCell(grandRowNum, gtColNum).numFmt], [62, 'FF808080', true, '0.00']);
 
   // §2.7: Calibri 12 body, hours 0.00, widths.
@@ -1085,11 +1140,12 @@ async function testExport(): Promise<void> {
   check('pbj A1 title', pj.getCell('A1').value, 'NV PAYROLL: 7/10/2026');
   check(
     // Round 10 — every value on the sheet is 8pt, the title included.
-    'pbj title black/white 8pt bold, height 31.5',
+    'R11: pbj title black/white 9pt bold, height 31.5',
     [fillOf(pj.getCell('A1')), pj.getCell('A1').font?.color?.argb, pj.getCell('A1').font?.size, pj.getRow(1).height],
-    ['FF000000', 'FFFFFFFF', 8, 31.5],
+    ['FF000000', 'FFFFFFFF', 9, 31.5],
   );
-  check('pbj values are 8pt', pj.getCell('A4').font?.size, 8);
+  check('R11: pbj values are 9pt', pj.getCell('A4').font?.size, 9);
+  check('R11: pbj opens at 94% zoom', pj.views[0]?.zoomScale, 94);
   // 5 date cols → Total hrs at G1; % of Completion header red, Notes dark red.
   check('pbj Total hrs header position (computed from 5 dates)', pj.getCell('G1').value, 'Total hrs');
   const lastColNum = 1 + 5 + 2 + 8;
@@ -1115,9 +1171,10 @@ async function testExport(): Promise<void> {
     true,
   );
   check('pbj job % of Completion 0% format', pctComplCell.numFmt, '0%');
-  // Round 7 — Notes column keeps the header label; job/BALANCES/UT data cells stay empty.
   check('pbj Notes header present', pj.getCell(1, lastColNum).value, 'Notes');
-  check('pbj Notes data empty on job row (Round 7)', isBlank(pj.getCell(4, lastColNum).value), true);
+  // Round 11 — notes are WRITTEN (they used to be cleared on every download).
+  // AP24314 is on the calendar with Last % Paid 100%.
+  check('R11: pbj Notes written on the job row', pj.getCell(4, lastColNum).value, '*PAID 100% LAST WK*');
   check('pbj hours 0.00 format', pj.getCell('G4').numFmt, '0.00');
   check('pbj widths (A, first date, Crew Lead)', [pj.getColumn(1).width, pj.getColumn(2).width, pj.getColumn(12).width], [40, 10, 43]);
   // Outline levels: customer 0, job 1, employee 2; summaryAbove.
@@ -1202,6 +1259,32 @@ async function testExport(): Promise<void> {
     if (String(row.getCell(26).value ?? '') === '24314') noc24314 = String(row.getCell(nocCol).value ?? '');
   });
   check('timesheets sheet: 24314 Not on Calendar = TimeNavi row 3', noc24314, 'TimeNavi row 3');
+  {
+    // Round 11 — seven rarely-read columns are collapsed (hidden), nothing else.
+    const hidden: string[] = [];
+    for (let c = 1; c <= TS_HEADERS.length + 5; c++) {
+      if (tsSheet.getColumn(c).hidden) hidden.push(String(tsSheet.getCell(1, c).value));
+    }
+    check('R11: timesheets hides exactly the seven collapsed columns', hidden, [
+      'number', 'billable', 'class', 'department', 'service_item', 'has_flags', 'flag_types',
+    ]);
+  }
+  {
+    // Round 11 — Sales by Rep: A–M at the specified px widths; J, K, L accounting.
+    const sbr = readBack.getWorksheet('Sales by Rep') as ExcelJS.Worksheet;
+    const px = [77, 110, 716, 357, 176, 66, 176, 121, 176, 108, 132, 132, 66];
+    check(
+      'R11: Sales by Rep widths A–M from pixels',
+      px.map((_, i) => sbr.getColumn(i + 1).width),
+      px.map((p) => Math.round(((p - 5) / 7) * 100) / 100),
+    );
+    let fmt: string[] = [];
+    sbr.eachRow((row, n) => {
+      if (n !== 2) return;
+      fmt = [10, 11, 12].map((c) => (typeof row.getCell(c).value === 'number' ? String(row.getCell(c).numFmt) : 'n/a'));
+    });
+    check('R11: Sales by Rep J/K/L numbers carry thousands separators', fmt.filter((f) => f !== 'n/a').every((f) => f.includes('#,##0.00')), true);
+  }
 
   // ---------- Payroll Preview (Round 7 — separate payroll workbook) ----------
   const pp = payWb.getWorksheet('PAYROLL PREVIEW') as ExcelJS.Worksheet;
@@ -1239,24 +1322,71 @@ async function testExport(): Promise<void> {
     ],
     [true, true, 'center', 'total'],
   );
-  // Round 6 §6.1 — `(-) taxes` / `NEST [IRA]` / `net` bold labels on a job line.
+  // Round 6 §6.1 / Round 11 — `(-) taxes` / `net` bold labels on a job line;
+  // `NEST [IRA]` only for people on the NEST list (nobody in this fixture).
   let taxesLabelOk = false;
+  let nestLabelSeen = false;
   pp.eachRow((row) => {
-    if (row.getCell(6).value === '(-) taxes' && row.getCell(7).value === 'NEST [IRA]' && row.getCell(8).value === 'net') {
+    if (row.getCell(6).value === '(-) taxes' && row.getCell(8).value === 'net') {
       taxesLabelOk = true;
+      if (row.getCell(7).value === 'NEST [IRA]') nestLabelSeen = true;
     }
   });
-  check('(-) taxes / NEST / net labels present', taxesLabelOk, true);
-  // taxes / NEST / net value cells blank by default (no E−G formula).
+  check('(-) taxes / net labels present, no NEST [IRA] off the NEST list', [taxesLabelOk, nestLabelSeen], [true, false]);
+  // Round 11 — NEST / net blank by default; taxes is a live formula off net.
   let taxesBlankOk = false;
   pp.eachRow((row) => {
     if (row.getCell(6).value === '(-) taxes') {
-      const sums = pp.getRow(row.number + 1);
+      const sn = row.number + 1;
+      const sums = pp.getRow(sn);
+      const f = sums.getCell(6).value as { formula?: string } | null;
       taxesBlankOk =
-        isBlank(sums.getCell(6).value) && isBlank(sums.getCell(7).value) && isBlank(sums.getCell(8).value);
+        f?.formula === `IF(H${sn}="","",H${sn}-E${sn}-N(G${sn}))` &&
+        isBlank(sums.getCell(7).value) &&
+        isBlank(sums.getCell(8).value);
     }
   });
-  check('taxes / NEST / net blank by default', taxesBlankOk, true);
+  check('taxes = IF(net blank, blank, net − total − NEST); NEST / net blank by default', taxesBlankOk, true);
+  {
+    // Round 11 — a painter on the NEST list gets the column, and a typed net
+    // back-fills the (negative) taxes in the cached result.
+    const juanKey = preview.painters[0].key;
+    const nestPreview = buildPayrollPreview({
+      pbj, enriched, reportRows: rows, pl, directory,
+      settings: { ...settings, nestNames: ['Juan Perez'] },
+      payDate,
+      edits: { [`hb:${juanKey}`]: { nest: 25, net: 500 } },
+      qbHours: {}, knownEstimators, leadCtx,
+      nvSales, utSales, lastWeekPbj,
+    })!;
+    const juanNest = nestPreview.painters[0];
+    const nestBuf = await buildPayrollWorkbookBuffer({
+      payDate,
+      weekStart: pbj.dates[0] ?? null,
+      weekEnd: pbj.dates[pbj.dates.length - 1] ?? null,
+      pl,
+      payrollPreview: nestPreview,
+      payrollExceptions: pGroups,
+      plSourceFileName: 'Profit and Loss by Customer.xlsx',
+    });
+    const nestWb = new ExcelJS.Workbook();
+    await nestWb.xlsx.load(nestBuf);
+    const np = nestWb.getWorksheet('PAYROLL PREVIEW') as ExcelJS.Worksheet;
+    let juanSums: unknown[] = [];
+    np.eachRow((row) => {
+      if (juanSums.length === 0 && row.getCell(7).value === 'NEST [IRA]') {
+        const sums = np.getRow(row.number + 1);
+        const f = sums.getCell(6).value as { result?: unknown } | null;
+        juanSums = [f?.result, sums.getCell(7).value, sums.getCell(8).value];
+      }
+    });
+    const expectTaxes = Math.round((500 - juanNest.totalPay + 25) * 100) / 100;
+    check(
+      'R11 NEST: listed painter gets the column; net typed → taxes = net − total − NEST',
+      [juanNest.showNest, juanNest.taxes, juanSums],
+      [true, expectTaxes, [expectTaxes, -25, 500]],
+    );
+  }
   // §5.4 — a painter name band is merged A–H with the DDD9C4 fill (rich text
   // name + crew tag). Find Juan's band via the merged cell's rich text.
   let bandOk = false;
@@ -1361,7 +1491,137 @@ async function testExport(): Promise<void> {
   check('PR Final Check has data rows from P&L', prfc.actualRowCount > 1, true);
 }
 
+/**
+ * Round 11 — "we cannot be losing any manual edits when the user edits the
+ * report in the web app then downloads the .xlsx file."
+ *
+ * Type an edit of every Pivot by Job kind, export, read the file back, then
+ * re-read the same file as next week's input #8 and as this week's Slot A — a
+ * merged cell or a written note must not break either parser.
+ */
+async function testEditRoundTrip(): Promise<void> {
+  console.log('manual edits survive the download…');
+  const edited = buildPivotByJob({
+    enriched,
+    reportRows: rows,
+    settings,
+    leadCtx,
+    knownEstimators,
+    payDate,
+    edits: {
+      [j24314.id]: {
+        notes: 'call Regina before 8am',
+        estimator: 'PG',
+        woOverride: 1234.5,
+        woPct: 0.42,
+        crewLead: 'HOURLY', // an HOURLY job must still keep its WO values
+      },
+    },
+    qbHours: {},
+    lastWeekPbj,
+    balancesState: {
+      added: [],
+      deleted: [],
+      edits: { 'balances:21848-A5': { notes: 'waiting on change order', hoursNote: 'subbed out — no hours' } },
+    },
+    utState: EMPTY_MANUAL_STATE,
+    pl: null,
+    nvTotals,
+    utTotals,
+    nvSales,
+    utSales,
+  });
+  const buf = await buildPercentsWorkbookBuffer({
+    rows,
+    pivot,
+    legend: DEFAULT_LEGEND,
+    payDate,
+    pivotByJob: edited,
+    percentExceptions: groups,
+    salesByRep: buildSalesByRepMirrorFromParsed(nvSales),
+    salesByCust: [],
+    utSalesByRep: buildSalesByRepMirrorFromParsed(utSales),
+    utSalesByCust: [],
+    timesheetMirror: buildTimesheetMirror(enriched, new Map()),
+    jobsByCrew: buildJobsByCrew(enriched),
+  });
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(buf);
+  const ws = wb.getWorksheet('Pivot by Job') as ExcelJS.Worksheet;
+
+  const dates = edited.dateIsos.length;
+  const analysisStart = 1 + dates + 2 + 1;
+  const col = {
+    est: analysisStart + 2,
+    lead: analysisStart + 3,
+    wo: analysisStart + 4,
+    woPct: analysisStart + 5,
+    notes: analysisStart + 7,
+    onCal: analysisStart + 1,
+  };
+  const rowWhere = (pred: (r: ExcelJS.Row) => boolean): ExcelJS.Row | null => {
+    let hit: ExcelJS.Row | null = null;
+    ws.eachRow((r) => {
+      if (!hit && pred(r)) hit = r;
+    });
+    return hit;
+  };
+  const jobRow = rowWhere((r) => String(r.getCell(analysisStart).value ?? '') === '24314');
+  check(
+    'R11 round trip: main-row Notes / Estimator / WO$ / WO% on an HOURLY job all reach the file',
+    jobRow
+      ? [
+          jobRow.getCell(col.notes).value,
+          jobRow.getCell(col.est).value,
+          jobRow.getCell(col.lead).value,
+          jobRow.getCell(col.wo).value,
+          jobRow.getCell(col.woPct).value,
+        ]
+      : 'row not found',
+    ['call Regina before 8am', 'PG', 'HOURLY', 1234.5, 0.42],
+  );
+  const balRow = rowWhere((r) => String(r.getCell(analysisStart).value ?? '') === '21848-A5');
+  check(
+    'R11 round trip: bottom-row Notes + On Calendar? reach the file',
+    balRow ? [balRow.getCell(col.notes).value, balRow.getCell(col.onCal).value] : 'row not found',
+    ['waiting on change order', 'NOT ON CALENDAR'],
+  );
+  check(
+    'R11 round trip: the no-hours cells are ONE merged, centered cell carrying the typed text',
+    balRow
+      ? [
+          balRow.getCell(2).value,
+          balRow.getCell(2).isMerged,
+          balRow.getCell(1 + dates + 1).isMerged,
+          (balRow.getCell(2).alignment ?? {}).horizontal,
+        ]
+      : 'row not found',
+    ['subbed out — no hours', true, true, 'center'],
+  );
+  const pctCell = jobRow ? jobRow.getCell(analysisStart + 6) : null;
+  check('R11: % of Completion text is black on a job row', pctCell?.font?.color?.argb, 'FF000000');
+
+  // The same file, read back the way the app reads it next week.
+  const asInput = readWorkbook(buf);
+  const asLastWeek = parseLastWeekPivotByJob(asInput);
+  const lw = asLastWeek.find((r) => r.apKey === '21848-A5');
+  check(
+    'R11 round trip: re-read as next week\'s input #8, the bottom row keeps its note and AP#',
+    lw ? [lw.section, lw.notes] : 'row not found',
+    ['balances', 'waiting on change order'],
+  );
+  check(
+    'R11 round trip: re-read as input #8, the main row keeps the typed WO values',
+    (() => {
+      const m = asLastWeek.find((r) => r.apKey === '24314');
+      return m ? [m.woOverride, m.woPct, m.notes] : 'row not found';
+    })(),
+    [1234.5, 0.42, 'call Regina before 8am'],
+  );
+}
+
 testExport()
+  .then(() => testEditRoundTrip())
   .catch((err: unknown) => {
     failures++;
     console.error('  FAIL  export threw:', err);

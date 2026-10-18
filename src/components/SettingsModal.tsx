@@ -1,8 +1,10 @@
 import { useRef, useState } from 'react';
 import {
   DEFAULT_CONDITIONAL_RATE_RULES,
+  DEFAULT_CREW_LEAD_ALIASES,
   DEFAULT_DAILY_OT_HOURS_THRESHOLD,
   DEFAULT_LEGEND,
+  DEFAULT_NEST_NAMES,
   DEFAULT_NV_DAILY_OT_RATE_THRESHOLD,
   DEFAULT_DAILY_OT_EXEMPT,
   DEFAULT_FULL_MATERIALS_LEADS,
@@ -17,12 +19,14 @@ import {
   DEFAULT_SALARIED,
   DEFAULT_SUBCONTRACTORS,
   DEFAULT_WAGE_RATES,
+  sortWageRates,
   type DirectoryStoreStatus,
   type SettingsStoreStatus,
 } from '../lib/settings';
 import type {
   AppSettings,
   ConditionalRateRule,
+  CrewLeadAlias,
   EntityCode,
   JobRateRule,
   LegendEntry,
@@ -41,6 +45,16 @@ import type {
  * Round 10 — one grid template for the wage-rate header and its input rows:
  * name | PS | hrly | comm | wg2 | delete.
  */
+/**
+ * Round 11 — alphabetical, with rows still being filled in kept at the bottom
+ * so a freshly added blank row does not jump to the top of the list.
+ */
+function sortWagesKeepingBlanks(list: readonly WageRateEntry[]): WageRateEntry[] {
+  const named = list.filter((w) => w.name.trim() !== '');
+  const blank = list.filter((w) => w.name.trim() === '');
+  return [...sortWageRates(named), ...blank];
+}
+
 const WAGE_GRID = 'grid grid-cols-[minmax(0,1fr)_4rem_4rem_4rem_4rem_1.25rem] items-center gap-1.5';
 
 interface SettingsModalProps {
@@ -135,6 +149,10 @@ export function SettingsModal({
   const [fullMatLeads, setFullMatLeads] = useState<string[]>([...(settings.fullMaterialsLeads ?? [])]);
   /** Round 9 §27 — people exempt from NV daily overtime. */
   const [dailyOtExempt, setDailyOtExempt] = useState<string[]>([...(settings.dailyOtExemptNames ?? [])]);
+  /** Round 11 — calendar-title nicknames for crew leads. */
+  const [aliases, setAliases] = useState<CrewLeadAlias[]>((settings.crewLeadAliases ?? []).map((a) => ({ ...a })));
+  /** Round 11 — who gets a NEST [IRA] column on the Payroll Preview. */
+  const [nestNames, setNestNames] = useState<string[]>([...(settings.nestNames ?? [])]);
   const [defaultWage, setDefaultWage] = useState(String(settings.defaultWageRate));
   const [nvOtRate, setNvOtRate] = useState(String(settings.nvDailyOtRateThreshold));
   const [otHours, setOtHours] = useState(String(settings.dailyOtHoursThreshold));
@@ -230,7 +248,7 @@ export function SettingsModal({
       pivotColumnOrder: cleanedPivot,
       profitShare: ps.filter((e) => e.lead.trim() !== ''),
       defaultProfitSharePct: defaultPsNum > 1 ? defaultPsNum / 100 : defaultPsNum,
-      wageRates: wages.filter((e) => e.name.trim() !== ''),
+      wageRates: sortWageRates(wages.filter((e) => e.name.trim() !== '')),
       defaultWageRate: defaultWageNum,
       nvDailyOtRateThreshold: nvOtRateNum,
       dailyOtHoursThreshold: otHoursNum,
@@ -268,6 +286,10 @@ export function SettingsModal({
         .filter((r) => r.person !== '' && r.label !== ''),
       fullMaterialsLeads: fullMatLeads.map((n) => n.trim()).filter(Boolean),
       dailyOtExemptNames: dailyOtExempt.map((n) => n.trim()).filter(Boolean),
+      crewLeadAliases: aliases
+        .map((a) => ({ alias: a.alias.trim().replace(/^\(|\)$/g, ''), lead: a.lead.trim() }))
+        .filter((a) => a.alias !== '' && a.lead !== ''),
+      nestNames: nestNames.map((n) => n.trim()).filter(Boolean),
       appliedMigrations: [...settings.appliedMigrations],
     });
   };
@@ -422,6 +444,10 @@ export function SettingsModal({
                     onChange={(ev) =>
                       setWages((prev) => prev.map((x, j) => (j === i ? { ...x, name: ev.target.value } : x)))
                     }
+                    // Round 11 — the list stays alphabetical. Re-sorting on
+                    // blur, not per keystroke, keeps the row under the cursor
+                    // while a name is being typed.
+                    onBlur={() => setWages((prev) => sortWagesKeepingBlanks(prev))}
                   />
                   <input
                     className="w-full rounded border border-neutral-300 px-1.5 py-1 text-right text-xs"
@@ -581,6 +607,55 @@ export function SettingsModal({
           <div className="mt-2 flex gap-2">
             <button type="button" className="btn text-xs" onClick={() => setFullMatLeads((prev) => [...prev, ''])}>+ Add lead</button>
             <button type="button" className="btn text-xs" onClick={() => setFullMatLeads([...DEFAULT_FULL_MATERIALS_LEADS])}>Reset</button>
+          </div>
+
+          <SectionTitle sub="Nicknames used for crew leads in calendar event titles. &quot;(Welder)&quot; in a title is read as the lead on the right. Capitalization does not matter, and parentheses are optional here.">
+            Crew lead nicknames
+          </SectionTitle>
+          <div className="flex flex-col gap-1">
+            {aliases.map((a, i) => (
+              <div key={i} className="flex items-center gap-1.5">
+                <input
+                  className="w-32 rounded border border-neutral-300 px-1.5 py-1 text-xs"
+                  value={a.alias}
+                  placeholder="In title, e.g. Welder"
+                  onChange={(ev) => setAliases((prev) => prev.map((x, j) => (j === i ? { ...x, alias: ev.target.value } : x)))}
+                />
+                <span className="text-xs text-neutral-400">=</span>
+                <input
+                  className="flex-1 rounded border border-neutral-300 px-1.5 py-1 text-xs"
+                  value={a.lead}
+                  placeholder="Crew lead, e.g. Color Enterprises LLC"
+                  onChange={(ev) => setAliases((prev) => prev.map((x, j) => (j === i ? { ...x, lead: ev.target.value } : x)))}
+                />
+                <button type="button" className="text-neutral-400 hover:text-red-600" onClick={() => setAliases((prev) => prev.filter((_, j) => j !== i))} aria-label="Remove">🗑</button>
+              </div>
+            ))}
+          </div>
+          <div className="mt-2 flex gap-2">
+            <button type="button" className="btn text-xs" onClick={() => setAliases((prev) => [...prev, { alias: '', lead: '' }])}>+ Add nickname</button>
+            <button type="button" className="btn text-xs" onClick={() => setAliases(DEFAULT_CREW_LEAD_ALIASES.map((a) => ({ ...a })))}>Reset</button>
+          </div>
+
+          <SectionTitle sub="Only these people get a NEST [IRA] column on the Payroll Preview; everyone else's block omits it. Names match on their words, so &quot;Carlos Ruiz&quot; covers Carlos Ruiz Cruz.">
+            NEST [IRA] participants
+          </SectionTitle>
+          <div className="flex flex-col gap-1">
+            {nestNames.map((n, i) => (
+              <div key={i} className="flex items-center gap-1.5">
+                <input
+                  className="flex-1 rounded border border-neutral-300 px-1.5 py-1 text-xs"
+                  value={n}
+                  placeholder="Name"
+                  onChange={(ev) => setNestNames((prev) => prev.map((x, j) => (j === i ? ev.target.value : x)))}
+                />
+                <button type="button" className="text-neutral-400 hover:text-red-600" onClick={() => setNestNames((prev) => prev.filter((_, j) => j !== i))} aria-label="Remove">🗑</button>
+              </div>
+            ))}
+          </div>
+          <div className="mt-2 flex gap-2">
+            <button type="button" className="btn text-xs" onClick={() => setNestNames((prev) => [...prev, ''])}>+ Add person</button>
+            <button type="button" className="btn text-xs" onClick={() => setNestNames([...DEFAULT_NEST_NAMES])}>Reset</button>
           </div>
 
           <SectionTitle sub="A person's rate while working a job led by someone specific. Note: the crew lead for a job comes from the Pivot by Job Crew Lead column and from who clocked the &quot;Crew Lead - Hourly Wage&quot; pay type — use these rules only for genuinely negotiated rates.">

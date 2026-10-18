@@ -6,6 +6,7 @@
  */
 import { timesheetApKey } from './apkey';
 import { buildCustomerByApResolver } from './customerByAp';
+import { lastPaidMapFromPivot } from './timenavi';
 import { dateToIso, fmtDate, round2 } from './format';
 import {
   carryDisplayMap,
@@ -133,6 +134,53 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
     if (r.apKey && !eventByApKey.has(r.apKey)) eventByApKey.set(r.apKey, { row: r, sheetRow: i + 2 });
   });
 
+  /**
+   * Round 11 — the `*PAID XX% LAST WK*` note. On the calendar, it is that
+   * job's `Last % Paid` from the TimeNavi Export (which already applied the
+   * input-#8-first rule and leaves a job that started this week blank). Off
+   * the calendar there is no TimeNavi row, so input #8's `% of Completion`
+   * for the AP# says what was paid.
+   */
+  const lastPaidFromInput8 = lastPaidMapFromPivot(input.lastWeekPbj);
+  const lastPaidFor = (apKey: string | null): number | null => {
+    if (!apKey) return null;
+    const ev = eventByApKey.get(apKey);
+    if (ev) return typeof ev.row.lastPaid === 'number' ? ev.row.lastPaid : null;
+    return lastPaidFromInput8.get(apKey) ?? null;
+  };
+  const paidNote = (apKey: string | null): string => {
+    const p = lastPaidFor(apKey);
+    return p === null ? '' : `*PAID ${round2(p * 100)}% LAST WK*`;
+  };
+
+  /** Job Total $ for an AP# — the base a suggested WO% turns into dollars. */
+  const jobTotalFor = (apKey: string | null): number | null => {
+    if (!apKey) return null;
+    return input.nvTotals?.get(apKey) ?? input.utTotals?.get(apKey) ?? null;
+  };
+
+  /**
+   * Round 11 — a calendar event whose title names no crew lead means nobody
+   * leads it, so the job defaults to HOURLY.
+   *
+   * Two cases deliberately stay blank instead:
+   *  - a parenthetical that is there but does not resolve, so the "no match"
+   *    exception stays visible rather than being papered over;
+   *  - a job with NO calendar event at all. There is no title to read, and
+   *    defaulting those to HOURLY would both pay off-calendar hours by the
+   *    hour without anyone looking and silence the "hours on a job not on the
+   *    calendar" red flag, which only checks piece-rate jobs.
+   */
+  const leadFromTitle = (
+    event: string | null,
+  ): { display: string; resolution: ReturnType<typeof resolveCrewLead> | null } => {
+    if (event === null) return { display: '', resolution: null };
+    const raw = extractLeadParenthetical(event, knownEstimators);
+    if (!raw) return { display: 'HOURLY', resolution: null };
+    const resolution = resolveCrewLead(raw, leadCtx);
+    return { display: resolution.display, resolution };
+  };
+
   const nameSources: JobDisplaySources = {
     timesheetByAp: timesheetDisplayMap(enriched),
     carryByAp: carryDisplayMap(input.lastWeekPbj),
@@ -228,20 +276,25 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
           // An edited AP# re-resolves the estimator from the matched event
           // (acceptance §10.3); otherwise the enriched-timesheet value rules.
           const baseEstimator = job.rows[0]?.estimator ?? '#N/A';
-          const estimator = isOffice
-            ? 'ND'
-            : edit.apKey !== undefined && match
-              ? match.row.estimator || baseEstimator
-              : baseEstimator;
+          // Round 11 — a typed estimator wins, OFFICE rows included.
+          const estimator =
+            edit.estimator !== undefined
+              ? edit.estimator
+              : isOffice
+                ? 'ND'
+                : edit.apKey !== undefined && match
+                  ? match.row.estimator || baseEstimator
+                  : baseEstimator;
           // Round 8 §3.1 — the cell is a live reference to THIS week's TimeNavi
           // `% Completion` for the same AP#; a manual pivot edit overrides it.
           // Slot A seeds only fill in when the grid has no row (payroll-only).
           const livePercent: PercentValue = isOffice ? null : match ? match.row.percent : null;
-          const percentOverride = !isOffice && edit.percent !== undefined;
-          const percent: PercentValue = isOffice
-            ? null
-            : percentOverride
-              ? (edit.percent as PercentValue)
+          // Round 11 — OFFICE rows accept a typed value (usually text) too.
+          const percentOverride = edit.percent !== undefined;
+          const percent: PercentValue = percentOverride
+            ? (edit.percent as PercentValue)
+            : isOffice
+              ? null
               : match
                 ? livePercent
                 : (edit.percentSeed ?? null);
@@ -255,12 +308,12 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
                   ? edit.percentSeed
                   : percent;
 
-          // Crew lead — from the matched event title (§3.2); OFFICE → HOURLY.
-          const resolution = match
-            ? resolveCrewLead(extractLeadParenthetical(match.row.event, knownEstimators), leadCtx)
-            : null;
+          // Crew lead — from the matched event title (§3.2); OFFICE → HOURLY;
+          // Round 11 — no lead in the title (or no event at all) → HOURLY.
+          const titleLead = leadFromTitle(match?.row.event ?? null);
+          const resolution = titleLead.resolution;
           const crewLead =
-            edit.crewLead !== undefined ? edit.crewLead : isOffice ? 'HOURLY' : (resolution?.display ?? '');
+            edit.crewLead !== undefined ? edit.crewLead : isOffice ? 'HOURLY' : titleLead.display;
 
           const jobText = `${job.jobcode2} ${match?.row.event ?? ''}`;
           // Payroll job type follows Slot A / a typed Pivot % (HOURLY vs a
@@ -271,11 +324,28 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
           // are suggestions only (tooltips / click-to-accept). Slot A seeds via edits.
           const pctSrc = match ? extractWoPct(match.row.description) : null;
           const woSrc = match ? extractWoOverride(match.row.description) : null;
-          const woPct = hourly ? null : edit.woPct !== undefined ? edit.woPct : null;
-          const woOverride = hourly ? null : edit.woOverride !== undefined ? edit.woOverride : null;
+          // Round 11 — typed WO values are kept on HOURLY jobs as well. A job
+          // can switch between hourly and profit share week to week, and
+          // locking the columns threw the typed numbers away.
+          const woPct = edit.woPct !== undefined ? edit.woPct : null;
+          const woOverride = edit.woOverride !== undefined ? edit.woOverride : null;
 
-          // Round 7 — notes stay blank unless the user edited; do not carry last-week / *PAID* text.
-          const notes = edit.notes !== undefined ? edit.notes : '';
+          /**
+           * Round 11 — every job gets a WO Override suggestion when there is
+           * one to make: the description's explicit work-order dollars first,
+           * else the suggested WO% applied to the Job Total $.
+           */
+          const jobTotal = jobTotalFor(apKey);
+          const pctDollars = pctSrc && jobTotal !== null ? round2(jobTotal * pctSrc.pct) : null;
+          const woOverrideSuggestion = woSrc?.amount ?? pctDollars;
+          const woOverrideSuggestionSource =
+            woSrc?.line ??
+            (pctDollars !== null && pctSrc
+              ? `Job Total $${jobTotal} \u00d7 suggested ${round2(pctSrc.pct * 100)}% — ${pctSrc.line}`
+              : null);
+
+          // Round 11 — "*PAID XX% LAST WK*" by default; a typed note wins.
+          const notes = edit.notes !== undefined ? edit.notes : isOffice ? '' : paidNote(apKey);
 
           // Round 6 §7.1 — DB chip + optional force-non-DB override.
           const dbPatternMatch = isPrevailingWageJob(jobText, settings.prevailingWagePatterns);
@@ -289,11 +359,11 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
             crewLead,
             crewLeadResolution: resolution,
             woOverride,
-            woOverrideSuggestion: hourly ? null : (woSrc?.amount ?? null),
-            woOverrideSuggestionSource: hourly ? null : (woSrc?.line ?? null),
+            woOverrideSuggestion,
+            woOverrideSuggestionSource,
             woPct,
-            woPctSuggestion: hourly ? null : (pctSrc?.pct ?? null),
-            woPctSuggestionSource: hourly ? null : (pctSrc?.line ?? null),
+            woPctSuggestion: pctSrc?.pct ?? null,
+            woPctSuggestionSource: pctSrc?.line ?? null,
             percent,
             livePercent,
             percentOverride,
@@ -377,6 +447,12 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
     return fallback;
   };
 
+  /** Round 11 — the same `On Calendar?` reference the main pivot shows. */
+  const onCalendarFor = (apKey: string | null): string => {
+    const hit = apKey ? eventByApKey.get(apKey) : undefined;
+    return hit ? formatTimeNaviRow(hit.sheetRow) : 'NOT ON CALENDAR';
+  };
+
   /** §3.1/§3.3 — this week's TimeNavi `% Completion` for an AP#, if any. */
   const liveLink = (apKey: string | null): { linked: boolean; percent: PercentValue } => {
     const hit = apKey ? eventByApKey.get(apKey) : undefined;
@@ -397,22 +473,31 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
     // §4.2 — RF (Reno, NV) carried jobs go to NV BALANCES, never UT PAYROLL.
     const section = carriedSectionFor(row.section === 'ut' ? 'ut' : 'balances', row.estimator);
     if (seenBalancesAp.has(row.apKey) || seenUtAp.has(row.apKey)) continue;
-    if (row.section !== 'ut') {
-      // NV pivot/balances rows: carry when paid < 100% and no hours this week.
+    // Hours this week put the job in the main pivot; it is not carried.
+    if (timesheetApKeys.has(row.apKey)) continue;
+    const onCalendar = eventByApKey.has(row.apKey);
+    /**
+     * Round 11 — a job input #8 shows at 100% is finished. It comes back only
+     * if it is on this week's calendar (timesheet hours already put it in the
+     * main pivot, above). Every section, UT included.
+     */
+    if (row.percent === 1 && !onCalendar) continue;
+    if (row.section !== 'ut' && row.percent !== 1) {
+      // NV pivot/balances rows below 100%: pivot rows carry only when partially
+      // paid; a balances row carries unless it is finished.
       const partial = typeof row.percent === 'number' && row.percent < 1;
-      const open = row.section === 'balances' ? row.percent !== 1 : partial;
-      if (!open || timesheetApKeys.has(row.apKey)) continue;
+      if (row.section !== 'balances' && !partial) continue;
     }
-    // Round 7 — no carried notes / *PAID* text in BALANCES/UT.
     pushSeed(
       section,
       manualRowFromCarry({
         section,
         row,
-        notes: '',
+        notes: paidNote(row.apKey),
         colorByEstimator,
         live: liveLink(row.apKey),
         customer: resolveCarriedCustomer(row.apKey, section, row.customer),
+        onCalendar: onCalendarFor(row.apKey),
       }),
     );
   }
@@ -423,7 +508,7 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
     const apKey = r.apKey;
     if (!apKey || seenUtAp.has(apKey) || seenBalancesAp.has(apKey)) continue;
     const section = carriedSectionFor('ut', r.estimator);
-    const resolution = resolveCrewLead(extractLeadParenthetical(r.event, knownEstimators), leadCtx);
+    const lead = leadFromTitle(r.event);
     // Round 6 §5.3 — blank WO defaults (suggestions live on calendar-matched NV jobs only).
     const names = jobDisplayPair(apKey, { ...nameSources, eventTitle: r.event });
     pushSeed(section, {
@@ -432,15 +517,16 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
       job: names.poLabel,
       apKey,
       estimator: r.estimator,
-      crewLead: resolution.display,
+      crewLead: lead.display,
       woOverride: null,
       woPct: null,
       percent: r.percent,
       livePercent: r.percent,
       percentOverride: false,
       excludedFromPayroll: false,
-      notes: '',
+      notes: paidNote(apKey),
       colorHex: colorByEstimator.get(r.estimator) ?? null,
+      onCalendar: onCalendarFor(apKey),
     });
   }
 
@@ -478,8 +564,9 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
       livePercent: r.percent,
       percentOverride: false,
       excludedFromPayroll: false,
-      notes: '',
+      notes: paidNote(apKey),
       colorHex: colorByEstimator.get(r.estimator) ?? null,
+      onCalendar: onCalendarFor(apKey),
     });
   }
 
@@ -490,9 +577,7 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
     if (!apKey || apKey === 'OFFICE' || seenUtAp.has(apKey) || seenBalancesAp.has(apKey)) continue;
     seenUtAp.add(apKey);
     const match = eventByApKey.get(apKey);
-    const resolution = match
-      ? resolveCrewLead(extractLeadParenthetical(match.row.event, knownEstimators), leadCtx)
-      : null;
+    const lead = leadFromTitle(match?.row.event ?? null);
     const names = jobDisplayPair(apKey, {
       ...nameSources,
       eventTitle: match?.row.event ?? null,
@@ -507,20 +592,21 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
       job: names.poLabel || r.jobcode2,
       apKey,
       estimator: r.estimator,
-      crewLead: resolution?.display ?? '',
+      crewLead: lead.display,
       woOverride: null,
       woPct: null,
       percent: live.percent,
       livePercent: live.percent,
       percentOverride: false,
       excludedFromPayroll: false,
-      notes: '',
+      notes: paidNote(apKey),
       colorHex: colorByEstimator.get(r.estimator) ?? null,
+      onCalendar: onCalendarFor(apKey),
     });
   }
 
-  const balances = applyManualState(balancesSeeds, input.balancesState);
-  const utPayroll = applyManualState(utSeeds, input.utState);
+  const balances = orderManualSection(applyManualState(balancesSeeds, input.balancesState));
+  const utPayroll = orderManualSection(applyManualState(utSeeds, input.utState));
 
   const grandByDate: Record<string, number> = {};
   for (const iso of dateIsos) {
@@ -550,8 +636,10 @@ function manualRowFromCarry(args: {
   live: { linked: boolean; percent: PercentValue };
   /** Customer resolved by AP key (§4.3); falls back to the carried text. */
   customer: string;
+  /** Round 11 — `TimeNavi row N` / `NOT ON CALENDAR`. */
+  onCalendar: string;
 }): ManualSectionRow {
-  const { section, row, notes, colorByEstimator, live, customer } = args;
+  const { section, row, notes, colorByEstimator, live, customer, onCalendar } = args;
   return {
     id: `${section}:${row.apKey}`,
     customer,
@@ -568,7 +656,23 @@ function manualRowFromCarry(args: {
     excludedFromPayroll: row.excludedFromPayroll,
     notes,
     colorHex: colorByEstimator.get(row.estimator) ?? null,
+    onCalendar,
   };
+}
+
+/**
+ * Round 11 — a bottom section reads alphabetically by customer (then job),
+ * with gray "keep off payroll" rows gathered at the very bottom, themselves
+ * alphabetical. A freshly added row whose customer and job are still blank
+ * stays at the end of its group, where the user just clicked "+ Add row".
+ */
+export function orderManualSection(rows: readonly ManualSectionRow[]): ManualSectionRow[] {
+  const blank = (r: ManualSectionRow): boolean => r.customer.trim() === '' && r.job.trim() === '';
+  const cmp = (a: ManualSectionRow, b: ManualSectionRow): number =>
+    Number(blank(a)) - Number(blank(b)) || byText(a.customer, b.customer) || byText(a.job, b.job);
+  const live = rows.filter((r) => !r.excludedFromPayroll).sort(cmp);
+  const gray = rows.filter((r) => r.excludedFromPayroll).sort(cmp);
+  return [...live, ...gray];
 }
 
 /**

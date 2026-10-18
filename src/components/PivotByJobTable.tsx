@@ -17,6 +17,14 @@ const BLACK: CSSProperties = { backgroundColor: '#000', color: '#fff' };
 const GRAY: CSSProperties = { backgroundColor: '#808080', color: '#fff' };
 /** Round 8 §4.1 — the "excluded from payroll" swatch, on screen and on export. */
 const EXCLUSION_GRAY: CSSProperties = { backgroundColor: '#A6A6A6', color: '#000' };
+/**
+ * Round 11 — `% of Completion` is black on every row. On a dark estimator band
+ * (ND's blue) the cell used to inherit the band's white text.
+ */
+const PCT_TEXT: CSSProperties = { color: '#000' };
+
+/** The analysis block: AP# · On Calendar? · Estimator · Crew Lead · WO Override · WO% · % · Notes. */
+const ANALYSIS_COLS = 8;
 
 /** Tooltip for a % cell that mirrors this week's TimeNavi value (§3.1). */
 function percentLinkTitle(live: PercentValue, override: boolean): string {
@@ -44,13 +52,6 @@ function OverrideBadge({ live, onRelink }: { live: PercentValue; onRelink: () =>
   );
 }
 
-/** Thin top+bottom borders spanning A through the QB-Hrs column (§3.5). */
-function hoursBorderStyle(dateCount: number): CSSProperties {
-  // A + dates + Total hrs + QB Hrs = 1 + dateCount + 2 columns.
-  void dateCount;
-  return { borderTop: '1px solid #000', borderBottom: '1px solid #000' };
-}
-
 function bandStyle(hex: string | null): CSSProperties | undefined {
   if (!hex) return undefined;
   return { backgroundColor: `#${hex}`, color: isDarkColor(hex) ? '#fff' : '#000' };
@@ -75,47 +76,45 @@ function Toggle({ open, onClick, label }: { open: boolean; onClick: () => void; 
 }
 
 /** Editable text cell that commits on blur/Enter (Round 8 §12.2 — see CellInput). */
-function EditCell({
-  value,
-  onCommit,
-  className,
-  title,
-  placeholder,
-}: {
+function EditCell(props: {
   value: string;
   onCommit: (text: string) => void;
   className?: string;
   title?: string;
   placeholder?: string;
+  style?: CSSProperties;
 }): JSX.Element {
-  return (
-    <CellInput
-      value={value}
-      onCommit={onCommit}
-      className={className}
-      title={title}
-      placeholder={placeholder}
-    />
-  );
+  return <CellInput {...props} />;
+}
+
+const money = (v: number | null): string => (v !== null ? `$${fmtAccounting(v)}` : '');
+const pctText = (v: number | null): string => (v !== null ? `${Math.round(v * 100)}%` : '');
+
+/**
+ * Round 11 — the WO Override placeholder. A suggested WO% is turned into
+ * dollars against the Job Total $ by the model, so the cell reads
+ * "suggest $1,234.56" whichever way the calendar phrased it.
+ */
+function woOverridePlaceholder(suggestion: number | null, hourly: boolean): string {
+  if (suggestion !== null) return `suggest $${fmtAccounting(suggestion)}`;
+  return hourly ? '-' : '—';
 }
 
 export function PivotByJobTable(props: PivotByJobTableProps): JSX.Element {
   const { model, onEditJob, onEditQbHours } = props;
   const dateCount = model.dateIsos.length;
+  /**
+   * Round 11 — every section lives in ONE table, so every column lines up
+   * across the pivot, BALANCES and UT PAYROLL. They used to be three tables,
+   * each sizing its own columns, so the bottom sections never aligned.
+   */
+  const totalCols = 1 + dateCount + 2 + ANALYSIS_COLS + 1;
   // Round 5 §3.3 — view-only collapse state (never affects totals/exports).
   const [collapsedCust, setCollapsedCust] = useState<ReadonlySet<string>>(new Set());
   const [collapsedJob, setCollapsedJob] = useState<ReadonlySet<string>>(new Set());
 
-  const toggleCust = (key: string): void => {
-    setCollapsedCust((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  };
-  const toggleJob = (key: string): void => {
-    setCollapsedJob((prev) => {
+  const toggle = (setter: typeof setCollapsedCust, key: string): void => {
+    setter((prev) => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key);
       else next.add(key);
@@ -123,34 +122,47 @@ export function PivotByJobTable(props: PivotByJobTableProps): JSX.Element {
     });
   };
 
-  const hourCells = (byDate: Record<string, number>, cls = 'xcell', border?: CSSProperties): JSX.Element[] =>
+  const hourCells = (byDate: Record<string, number>, border?: CSSProperties): JSX.Element[] =>
     model.dateIsos.map((iso) => (
-      <td key={iso || 'blank'} className={`${cls} text-right`} style={border}>
+      <td key={iso || 'blank'} className="xcell text-right" style={border}>
         {byDate[iso] !== undefined ? fmtHoursFixed(byDate[iso]) : ''}
       </td>
     ));
 
-  const emptyAnalysis = <>{Array.from({ length: 8 }, (_, i) => <td key={i} className="xcell" />)}</>;
-  const hb = hoursBorderStyle(dateCount);
+  const hb: CSSProperties = { borderTop: '1px solid #000', borderBottom: '1px solid #000' };
 
-  /** Shared analysis-header cells for row 1 and BALANCES/UT section headers. */
-  const analysisHeaders = (sticky = false): JSX.Element => {
+  /** Row-1 cells shared by the top header and each bottom section's header. */
+  const headerRow = (title: string, sticky: boolean): JSX.Element => {
     const stickyCls = sticky ? 'sticky top-0 z-10' : '';
     return (
-      <>
+      <tr>
+        <th className={`xcell2 ${stickyCls} min-w-[260px] text-left text-base font-bold`} style={BLACK}>
+          {title}
+        </th>
+        {model.dates.map((d) => (
+          <th key={d.getTime()} className={`xcell2 ${stickyCls} min-w-[72px] text-center font-bold`} style={BLACK}>
+            {fmtMonthDay(d)}
+          </th>
+        ))}
+        {model.dateIsos.length > model.dates.length && <th className={`xcell2 ${stickyCls}`} style={BLACK} />}
+        <th className={`xcell2 ${stickyCls} min-w-[70px] text-center font-bold`} style={BLACK}>
+          Total hrs
+        </th>
+        <th className={`xcell2 ${stickyCls} min-w-[56px]`} style={BLACK} title="QB Hrs override (optional)" />
         <th className={`xcell2 ${stickyCls} min-w-[76px] text-center`} style={BLACK}>AP#</th>
         <th className={`xcell2 ${stickyCls} min-w-[136px] text-center`} style={BLACK}>On Calendar?</th>
         <th className={`xcell2 ${stickyCls} min-w-[64px] text-center`} style={BLACK}>Estimator</th>
         <th className={`xcell2 ${stickyCls} min-w-[220px] text-center`} style={BLACK}>Crew Lead</th>
-        <th className={`xcell2 ${stickyCls} min-w-[110px] text-center`} style={BLACK}>WO Override</th>
+        <th className={`xcell2 ${stickyCls} min-w-[130px] text-center`} style={BLACK}>WO Override</th>
         <th className={`xcell2 ${stickyCls} min-w-[64px] text-center`} style={BLACK}>WO%</th>
         <th className={`xcell2 ${stickyCls} min-w-[126px] text-center`} style={{ ...BLACK, color: '#FF0000' }}>
           % of Completion
         </th>
-        <th className={`xcell2 ${stickyCls} min-w-[160px] text-left`} style={{ ...BLACK, color: '#C00000' }}>
+        <th className={`xcell2 ${stickyCls} min-w-[180px] text-left`} style={{ ...BLACK, color: '#C00000' }}>
           Notes
         </th>
-      </>
+        <th className={`xcell2 ${stickyCls}`} style={BLACK} />
+      </tr>
     );
   };
 
@@ -158,25 +170,7 @@ export function PivotByJobTable(props: PivotByJobTableProps): JSX.Element {
     <div className="p-2">
       <table className="w-max min-w-full border-collapse bg-white text-xs">
         <thead>
-          {/* Round 5 §3.1 / Round 6 — row 1: title, short m/d dates, Total hrs, analysis. */}
-          <tr>
-            <th className="xcell2 sticky top-0 z-10 min-w-[260px] text-left text-base font-bold" style={BLACK}>
-              {model.title}
-            </th>
-            {model.dates.map((d) => (
-              <th key={d.getTime()} className="xcell2 sticky top-0 z-10 min-w-[72px] text-center font-bold" style={BLACK}>
-                {fmtMonthDay(d)}
-              </th>
-            ))}
-            {model.dateIsos.length > model.dates.length && (
-              <th className="xcell2 sticky top-0 z-10" style={BLACK} />
-            )}
-            <th className="xcell2 sticky top-0 z-10 min-w-[70px] text-center font-bold" style={BLACK}>
-              Total hrs
-            </th>
-            <th className="xcell2 sticky top-0 z-10 min-w-[56px]" style={BLACK} title="QB Hrs override (optional)" />
-            {analysisHeaders(true)}
-          </tr>
+          {headerRow(model.title, true)}
           {/* Row 2 — computed weekday names (all 7 days, including Sun). */}
           <tr>
             <th className="xcell2" style={BLACK} />
@@ -190,7 +184,7 @@ export function PivotByJobTable(props: PivotByJobTableProps): JSX.Element {
                 (blank)
               </th>
             )}
-            <th className="xcell2" style={BLACK} colSpan={10} />
+            <th className="xcell2" style={BLACK} colSpan={2 + ANALYSIS_COLS + 1} />
           </tr>
         </thead>
         <tbody>
@@ -202,11 +196,10 @@ export function PivotByJobTable(props: PivotByJobTableProps): JSX.Element {
                 key={cust.customer}
                 cust={cust}
                 custOpen={custOpen}
-                onToggleCust={() => toggleCust(cust.customer)}
+                onToggleCust={() => toggle(setCollapsedCust, cust.customer)}
                 collapsedJob={collapsedJob}
-                onToggleJob={toggleJob}
+                onToggleJob={(id) => toggle(setCollapsedJob, id)}
                 hourCells={hourCells}
-                emptyAnalysis={emptyAnalysis}
                 onEditJob={onEditJob}
                 onEditQbHours={onEditQbHours}
                 dateIsos={model.dateIsos}
@@ -227,31 +220,33 @@ export function PivotByJobTable(props: PivotByJobTableProps): JSX.Element {
             <td className="xcell text-right font-bold" style={GRAY}>
               {fmtHoursFixed(model.grandTotal)}
             </td>
-            <td className="xcell" style={GRAY} colSpan={9} />
+            <td className="xcell" style={GRAY} colSpan={1 + ANALYSIS_COLS + 1} />
           </tr>
         </tbody>
-      </table>
 
-      <ManualSection
-        section="balances"
-        title={model.title.replace('NV PAYROLL:', 'NV PAYROLL (BALANCES):')}
-        rows={model.balances}
-        model={model}
-        analysisHeaders={analysisHeaders}
-        onManualEdit={props.onManualEdit}
-        onManualAdd={props.onManualAdd}
-        onManualDelete={props.onManualDelete}
-      />
-      <ManualSection
-        section="ut"
-        title={model.title.replace('NV PAYROLL:', 'UT PAYROLL:')}
-        rows={model.utPayroll}
-        model={model}
-        analysisHeaders={analysisHeaders}
-        onManualEdit={props.onManualEdit}
-        onManualAdd={props.onManualAdd}
-        onManualDelete={props.onManualDelete}
-      />
+        <ManualSection
+          section="balances"
+          title={model.title.replace('NV PAYROLL:', 'NV PAYROLL (BALANCES):')}
+          rows={model.balances}
+          dateCount={dateCount}
+          totalCols={totalCols}
+          headerRow={headerRow}
+          onManualEdit={props.onManualEdit}
+          onManualAdd={props.onManualAdd}
+          onManualDelete={props.onManualDelete}
+        />
+        <ManualSection
+          section="ut"
+          title={model.title.replace('NV PAYROLL:', 'UT PAYROLL:')}
+          rows={model.utPayroll}
+          dateCount={dateCount}
+          totalCols={totalCols}
+          headerRow={headerRow}
+          onManualEdit={props.onManualEdit}
+          onManualAdd={props.onManualAdd}
+          onManualDelete={props.onManualDelete}
+        />
+      </table>
       <p className="mt-2 text-[11px] italic text-neutral-500">
         Balances &amp; UT sections auto-position below the pivot — the Excel move-refresh-move workaround is gone.
       </p>
@@ -266,7 +261,6 @@ function CustomerBlock({
   collapsedJob,
   onToggleJob,
   hourCells,
-  emptyAnalysis,
   onEditJob,
   onEditQbHours,
   dateIsos,
@@ -278,8 +272,7 @@ function CustomerBlock({
   onToggleCust: () => void;
   collapsedJob: ReadonlySet<string>;
   onToggleJob: (id: string) => void;
-  hourCells: (byDate: Record<string, number>, cls?: string, border?: CSSProperties) => JSX.Element[];
-  emptyAnalysis: JSX.Element;
+  hourCells: (byDate: Record<string, number>, border?: CSSProperties) => JSX.Element[];
   onEditJob: PivotByJobTableProps['onEditJob'];
   onEditQbHours: PivotByJobTableProps['onEditQbHours'];
   dateIsos: string[];
@@ -295,34 +288,26 @@ function CustomerBlock({
             {cust.customer}
           </span>
         </td>
-        {hourCells(cust.byDate, 'xcell', hb)}
+        {hourCells(cust.byDate, hb)}
         <td className="xcell text-right font-bold" style={hb}>
           {fmtHoursFixed(cust.total)}
         </td>
-        <td className="xcell" style={hb} />
-        {emptyAnalysis}
+        <td className="xcell" style={hb} colSpan={1 + ANALYSIS_COLS + 1} />
       </tr>
       {custOpen &&
-        cust.jobs.map((job) => {
-          const jobOpen = !collapsedJob.has(job.id);
-          const style = bandStyle(job.colorHex);
-          const a = job.analysis;
-          return (
-            <JobBlock
-              key={job.id}
-              job={job}
-              jobOpen={jobOpen}
-              onToggleJob={() => onToggleJob(job.id)}
-              style={style}
-              a={a}
-              hourCells={hourCells}
-              onEditJob={onEditJob}
-              onEditQbHours={onEditQbHours}
-              dateIsos={dateIsos}
-              hb={hb}
-            />
-          );
-        })}
+        cust.jobs.map((job) => (
+          <JobBlock
+            key={job.id}
+            job={job}
+            jobOpen={!collapsedJob.has(job.id)}
+            onToggleJob={() => onToggleJob(job.id)}
+            hourCells={hourCells}
+            onEditJob={onEditJob}
+            onEditQbHours={onEditQbHours}
+            dateIsos={dateIsos}
+            hb={hb}
+          />
+        ))}
     </>
   );
 }
@@ -331,8 +316,6 @@ function JobBlock({
   job,
   jobOpen,
   onToggleJob,
-  style,
-  a,
   hourCells,
   onEditJob,
   onEditQbHours,
@@ -342,15 +325,16 @@ function JobBlock({
   job: PivotByJobModel['customers'][number]['jobs'][number];
   jobOpen: boolean;
   onToggleJob: () => void;
-  style: CSSProperties | undefined;
-  a: PivotByJobModel['customers'][number]['jobs'][number]['analysis'];
-  hourCells: (byDate: Record<string, number>, cls?: string, border?: CSSProperties) => JSX.Element[];
+  hourCells: (byDate: Record<string, number>, border?: CSSProperties) => JSX.Element[];
   onEditJob: PivotByJobTableProps['onEditJob'];
   onEditQbHours: PivotByJobTableProps['onEditQbHours'];
   dateIsos: string[];
   hb: CSSProperties;
 }): JSX.Element {
+  const a = job.analysis;
+  const style = bandStyle(job.colorHex);
   const rowStyle = { ...style, ...hb };
+  const edit = (patch: PbjJobEdit): void => onEditJob(job.id, patch);
   return (
     <>
       <tr id={`pbj-${job.id}`} style={rowStyle}>
@@ -373,7 +357,7 @@ function JobBlock({
                 }
                 onClick={(e) => {
                   e.stopPropagation();
-                  onEditJob(job.id, { dbOverride: !a.dbOverride });
+                  edit({ dbOverride: !a.dbOverride });
                 }}
               >
                 DB
@@ -381,7 +365,7 @@ function JobBlock({
             )}
           </span>
         </td>
-        {hourCells(job.byDate, 'xcell', hb)}
+        {hourCells(job.byDate, hb)}
         <td className="xcell text-right font-bold" style={hb}>
           {fmtHoursFixed(job.total)}
         </td>
@@ -389,41 +373,37 @@ function JobBlock({
         <td className="xcell text-center font-bold">
           <EditCell
             value={a.apKey ?? ''}
-            onCommit={(t) => onEditJob(job.id, { apKey: t.trim() === '' ? null : t.trim().toUpperCase() })}
+            onCommit={(t) => edit({ apKey: t.trim() === '' ? null : t.trim().toUpperCase() })}
             className="text-center"
           />
         </td>
         <td className={`xcell text-center font-bold ${a.onCalendar === 'NOT ON CALENDAR' ? 'text-red-700' : ''}`}>
           {a.onCalendar}
         </td>
-        <td className="xcell text-center font-bold">{a.estimator}</td>
-        <td className="xcell text-center font-bold" title={a.crewLeadResolution?.raw ? `From "(${a.crewLeadResolution.raw})"` : undefined}>
-          <EditCell value={a.crewLead} onCommit={(t) => onEditJob(job.id, { crewLead: t })} className="text-center" placeholder="—" />
+        {/* Round 11 — Estimator is editable on every row. */}
+        <td className="xcell text-center font-bold">
+          <EditCell value={a.estimator} onCommit={(t) => edit({ estimator: t.trim().toUpperCase() })} className="text-center" />
         </td>
+        <td className="xcell text-center font-bold" title={a.crewLeadResolution?.raw ? `From "(${a.crewLeadResolution.raw})"` : undefined}>
+          <EditCell value={a.crewLead} onCommit={(t) => edit({ crewLead: t })} className="text-center" placeholder="—" />
+        </td>
+        {/* Round 11 — WO Override / WO% stay editable on HOURLY jobs. */}
         <td
           className="xcell text-center font-bold"
           title={
             a.woOverrideSuggestion !== null
-              ? `Calendar suggests $${fmtAccounting(a.woOverrideSuggestion)}${
+              ? `Suggested $${fmtAccounting(a.woOverrideSuggestion)}${
                   a.woOverrideSuggestionSource ? ` — ${a.woOverrideSuggestionSource}` : ''
                 }`
               : undefined
           }
         >
-          {a.hourly ? (
-            '-'
-          ) : (
-            <EditCell
-              value={a.woOverride !== null ? `$${fmtAccounting(a.woOverride)}` : ''}
-              onCommit={(t) => onEditJob(job.id, { woOverride: t.trim() === '' ? null : parseMoneyInput(t) })}
-              className="text-center"
-              placeholder={
-                a.woOverrideSuggestion !== null
-                  ? `suggest $${fmtAccounting(a.woOverrideSuggestion)}`
-                  : '—'
-              }
-            />
-          )}
+          <EditCell
+            value={money(a.woOverride)}
+            onCommit={(t) => edit({ woOverride: t.trim() === '' || t.trim() === '-' ? null : parseMoneyInput(t) })}
+            className="text-center"
+            placeholder={woOverridePlaceholder(a.woOverrideSuggestion, a.hourly)}
+          />
         </td>
         <td
           className="xcell text-center font-bold"
@@ -435,43 +415,34 @@ function JobBlock({
               : undefined
           }
         >
-          {a.hourly ? (
-            '-'
-          ) : (
-            <EditCell
-              value={a.woPct !== null ? `${Math.round(a.woPct * 100)}%` : ''}
-              onCommit={(t) => {
-                const p = parsePercentInput(t);
-                onEditJob(job.id, { woPct: typeof p === 'number' ? p : null });
-              }}
-              className="text-center"
-              placeholder={
-                a.woPctSuggestion !== null ? `suggest ${Math.round(a.woPctSuggestion * 100)}%` : '—'
-              }
-            />
-          )}
+          <EditCell
+            value={pctText(a.woPct)}
+            onCommit={(t) => {
+              const p = parsePercentInput(t);
+              edit({ woPct: typeof p === 'number' ? p : null });
+            }}
+            className="text-center"
+            placeholder={
+              a.woPctSuggestion !== null ? `suggest ${Math.round(a.woPctSuggestion * 100)}%` : a.hourly ? '-' : '—'
+            }
+          />
         </td>
-        <td className="xcell text-center font-bold" title={percentLinkTitle(a.livePercent, a.percentOverride)}>
+        <td className="xcell text-center font-bold" style={PCT_TEXT} title={percentLinkTitle(a.livePercent, a.percentOverride)}>
           <span className="inline-flex w-full items-center justify-center">
             <EditCell
               value={fmtPercent(a.percent)}
-              onCommit={(t) =>
-                onEditJob(job.id, { percent: t.trim() === '' ? undefined : parsePercentInput(t) })
-              }
+              onCommit={(t) => edit({ percent: t.trim() === '' ? undefined : parsePercentInput(t) })}
               className="text-center"
+              style={PCT_TEXT}
               placeholder="—"
             />
-            {a.percentOverride && (
-              <OverrideBadge
-                live={a.livePercent}
-                onRelink={() => onEditJob(job.id, { percent: undefined })}
-              />
-            )}
+            {a.percentOverride && <OverrideBadge live={a.livePercent} onRelink={() => edit({ percent: undefined })} />}
           </span>
         </td>
         <td className="xcell font-bold" style={{ color: style && isDarkColor(job.colorHex ?? 'FFFFFF') ? '#FFC7C7' : '#C00000' }}>
-          <EditCell value={a.notes} onCommit={(t) => onEditJob(job.id, { notes: t })} />
+          <EditCell value={a.notes} onCommit={(t) => edit({ notes: t })} />
         </td>
+        <td className="xcell" />
       </tr>
       {jobOpen &&
         job.employees.map((emp) => (
@@ -493,7 +464,7 @@ function JobBlock({
                 className="text-right font-semibold"
               />
             </td>
-            <td className="xcell" colSpan={8} />
+            <td className="xcell" colSpan={ANALYSIS_COLS + 1} />
           </tr>
         ))}
     </>
@@ -502,14 +473,16 @@ function JobBlock({
 
 /**
  * Round 5 §3.2 — one black header row (mirrors row 1), then customer+job pairs.
- * No day-name / Sum of hours / Row Labels artifact rows.
+ * Round 11 — a <tbody> of the main table rather than a table of its own, so its
+ * columns line up with the pivot above.
  */
 function ManualSection({
   section,
   title,
   rows,
-  model,
-  analysisHeaders,
+  dateCount,
+  totalCols,
+  headerRow,
   onManualEdit,
   onManualAdd,
   onManualDelete,
@@ -517,65 +490,46 @@ function ManualSection({
   section: 'balances' | 'ut';
   title: string;
   rows: ManualSectionRow[];
-  model: PivotByJobModel;
-  analysisHeaders: (sticky?: boolean) => JSX.Element;
+  dateCount: number;
+  totalCols: number;
+  headerRow: (title: string, sticky: boolean) => JSX.Element;
 } & Pick<PivotByJobTableProps, 'onManualEdit' | 'onManualAdd' | 'onManualDelete'>): JSX.Element {
-  const dateCount = model.dateIsos.length;
   return (
-    <table className="mt-4 w-max min-w-full border-collapse bg-white text-xs">
-      <thead>
+    <tbody>
+      {/* Visual gap between sections, inside the same column grid. */}
+      <tr aria-hidden="true">
+        <td colSpan={totalCols} className="h-4 border-0 bg-transparent" />
+      </tr>
+      {headerRow(title, false)}
+      {rows.length === 0 && (
         <tr>
-          <th className="xcell2 text-left text-base font-bold" style={BLACK}>
-            {title}
-          </th>
-          {model.dates.map((d) => (
-            <th key={d.getTime()} className="xcell2 text-center font-bold" style={BLACK}>
-              {fmtMonthDay(d)}
-            </th>
-          ))}
-          {model.dateIsos.length > model.dates.length && <th className="xcell2" style={BLACK} />}
-          <th className="xcell2 text-center font-bold" style={BLACK}>
-            Total hrs
-          </th>
-          <th className="xcell2" style={BLACK} />
-          {analysisHeaders()}
-          <th className="xcell2" style={BLACK} />
-        </tr>
-      </thead>
-      <tbody>
-        {rows.length === 0 && (
-          <tr>
-            <td className="xcell text-neutral-400" colSpan={1 + dateCount + 2 + 8 + 1}>
-              No rows.{' '}
-              {section === 'balances'
-                ? 'Partially-paid NV jobs from last week (slot 7) seed here.'
-                : 'Utah-calendar events and last week\u2019s open UT rows seed here.'}
-            </td>
-          </tr>
-        )}
-        {rows.map((r) => {
-          const style = r.excludedFromPayroll ? EXCLUSION_GRAY : bandStyle(r.colorHex);
-          return (
-            <ManualPair
-              key={r.id}
-              section={section}
-              r={r}
-              style={style}
-              dateCount={dateCount}
-              onManualEdit={onManualEdit}
-              onManualDelete={onManualDelete}
-            />
-          );
-        })}
-        <tr>
-          <td className="xcell" colSpan={1 + dateCount + 2 + 8 + 1}>
-            <button type="button" className="btn text-xs" onClick={() => onManualAdd(section)}>
-              + Add row
-            </button>
+          <td className="xcell text-neutral-400" colSpan={totalCols}>
+            No rows.{' '}
+            {section === 'balances'
+              ? 'Partially-paid NV jobs from last week (slot 8) seed here.'
+              : 'Utah-calendar events and last week’s open UT rows seed here.'}
           </td>
         </tr>
-      </tbody>
-    </table>
+      )}
+      {rows.map((r) => (
+        <ManualPair
+          key={r.id}
+          section={section}
+          r={r}
+          style={r.excludedFromPayroll ? EXCLUSION_GRAY : bandStyle(r.colorHex)}
+          dateCount={dateCount}
+          onManualEdit={onManualEdit}
+          onManualDelete={onManualDelete}
+        />
+      ))}
+      <tr>
+        <td className="xcell" colSpan={totalCols}>
+          <button type="button" className="btn text-xs" onClick={() => onManualAdd(section)}>
+            + Add row
+          </button>
+        </td>
+      </tr>
+    </tbody>
   );
 }
 
@@ -594,74 +548,77 @@ function ManualPair({
   onManualEdit: PivotByJobTableProps['onManualEdit'];
   onManualDelete: PivotByJobTableProps['onManualDelete'];
 }): JSX.Element {
-  const blankHours = Array.from({ length: dateCount + 2 }, (_, i) => <td key={i} className="xcell" />);
+  const edit = (patch: Partial<ManualSectionRow>): void => onManualEdit(section, r.id, patch);
   return (
     <>
       <tr style={style}>
         <td className="xcell font-bold">
-          <EditCell value={r.customer} onCommit={(t) => onManualEdit(section, r.id, { customer: t })} />
+          <EditCell value={r.customer} onCommit={(t) => edit({ customer: t })} />
         </td>
-        {blankHours}
-        <td className="xcell" colSpan={8} />
-        <td className="xcell" />
+        <td className="xcell" colSpan={dateCount + 2 + ANALYSIS_COLS + 1} />
       </tr>
       <tr style={style}>
         <td className="xcell pl-4 font-bold">
-          <EditCell value={r.job} onCommit={(t) => onManualEdit(section, r.id, { job: t })} />
+          <EditCell value={r.job} onCommit={(t) => edit({ job: t })} />
         </td>
-        {blankHours}
-        <td className="xcell text-center">
+        {/*
+          Round 11 — a no-hours job has nothing under its dates, so the date
+          columns and Total hrs are one merged, centered cell the user can type
+          in. It exports merged the same way.
+        */}
+        <td className="xcell text-center" colSpan={dateCount + 1}>
           <EditCell
-            value={r.apKey ?? ''}
-            onCommit={(t) => onManualEdit(section, r.id, { apKey: t.trim() || null })}
+            value={r.hoursNote ?? ''}
+            onCommit={(t) => edit({ hoursNote: t })}
             className="text-center"
+            placeholder="—"
           />
         </td>
-        <td className="xcell text-center" />
+        <td className="xcell" />
         <td className="xcell text-center">
-          <EditCell value={r.estimator} onCommit={(t) => onManualEdit(section, r.id, { estimator: t })} className="text-center" />
+          <EditCell value={r.apKey ?? ''} onCommit={(t) => edit({ apKey: t.trim() || null })} className="text-center" />
+        </td>
+        <td className={`xcell text-center ${r.onCalendar === 'NOT ON CALENDAR' ? 'text-red-700' : ''}`}>
+          {r.onCalendar ?? ''}
         </td>
         <td className="xcell text-center">
-          <EditCell value={r.crewLead} onCommit={(t) => onManualEdit(section, r.id, { crewLead: t })} className="text-center" />
+          <EditCell value={r.estimator} onCommit={(t) => edit({ estimator: t.trim().toUpperCase() })} className="text-center" />
+        </td>
+        <td className="xcell text-center">
+          <EditCell value={r.crewLead} onCommit={(t) => edit({ crewLead: t })} className="text-center" />
         </td>
         <td className="xcell text-center">
           <EditCell
-            value={r.woOverride !== null ? `$${fmtAccounting(r.woOverride)}` : ''}
-            onCommit={(t) => onManualEdit(section, r.id, { woOverride: parseMoneyInput(t) })}
+            value={money(r.woOverride)}
+            onCommit={(t) => edit({ woOverride: t.trim() === '' ? null : parseMoneyInput(t) })}
             className="text-center"
+            placeholder="—"
           />
         </td>
         <td className="xcell text-center">
           <EditCell
-            value={r.woPct !== null ? `${Math.round(r.woPct * 100)}%` : ''}
+            value={pctText(r.woPct)}
             onCommit={(t) => {
               const p = parsePercentInput(t);
-              onManualEdit(section, r.id, { woPct: typeof p === 'number' ? p : null });
+              edit({ woPct: typeof p === 'number' ? p : null });
             }}
             className="text-center"
+            placeholder="—"
           />
         </td>
-        <td className="xcell text-center" title={percentLinkTitle(r.livePercent, r.percentOverride)}>
+        <td className="xcell text-center" style={PCT_TEXT} title={percentLinkTitle(r.livePercent, r.percentOverride)}>
           <span className="inline-flex w-full items-center justify-center">
             <EditCell
               value={fmtPercent(r.percent)}
-              onCommit={(t) =>
-                onManualEdit(section, r.id, {
-                  percent: t.trim() === '' ? undefined : parsePercentInput(t),
-                })
-              }
+              onCommit={(t) => edit({ percent: t.trim() === '' ? undefined : parsePercentInput(t) })}
               className="text-center"
+              style={PCT_TEXT}
             />
-            {r.percentOverride && (
-              <OverrideBadge
-                live={r.livePercent}
-                onRelink={() => onManualEdit(section, r.id, { percent: undefined })}
-              />
-            )}
+            {r.percentOverride && <OverrideBadge live={r.livePercent} onRelink={() => edit({ percent: undefined })} />}
           </span>
         </td>
         <td className="xcell" style={{ color: '#C00000' }}>
-          <EditCell value={r.notes} onCommit={(t) => onManualEdit(section, r.id, { notes: t })} />
+          <EditCell value={r.notes} onCommit={(t) => edit({ notes: t })} />
         </td>
         <td className="xcell text-center">
           <span className="inline-flex items-center gap-1">
@@ -678,9 +635,7 @@ function ManualPair({
                   : 'Click to exclude this job from payroll (paints A6A6A6 here and on export)'
               }
               aria-pressed={r.excludedFromPayroll}
-              onClick={() =>
-                onManualEdit(section, r.id, { excludedFromPayroll: !r.excludedFromPayroll })
-              }
+              onClick={() => edit({ excludedFromPayroll: !r.excludedFromPayroll })}
             >
               EX
             </button>

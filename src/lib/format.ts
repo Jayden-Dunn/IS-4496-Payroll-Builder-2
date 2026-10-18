@@ -35,6 +35,16 @@ export function fmtAccounting(v: number | null | undefined): string {
   return v < 0 ? `(${s})` : s;
 }
 
+/**
+ * Round 11 — taxes / NEST / net read "-1,234.56": a leading minus sign, not
+ * the parentheses the rest of the money cells use.
+ */
+export function fmtSigned(v: number | null | undefined): string {
+  if (v === null || v === undefined) return '';
+  const s = Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return v < 0 ? `-${s}` : s;
+}
+
 /** Job Total $ — `#N/A` when unmatched, else accounting style. */
 export function fmtJobTotal(v: JobTotalValue): string {
   if (v === '#N/A') return '#N/A';

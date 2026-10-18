@@ -1,6 +1,7 @@
 import type {
   AppSettings,
   ConditionalRateRule,
+  CrewLeadAlias,
   DirectoryEmployee,
   EntityCode,
   JobRateRule,
@@ -31,6 +32,8 @@ export const DEFAULT_LEGEND: LegendEntry[] = [
   { estimator: 'XC', color: '95B3D7' },
   { estimator: 'ND', color: '4472C4' },
   { estimator: 'RF', color: 'C4A484' },
+  // Round 11 — JT's jobs.
+  { estimator: 'JT', color: 'DDD9C4' },
 ];
 
 /** Round 8 §5 — the RF fill this seed replaced; migrated once on load. */
@@ -48,7 +51,7 @@ export const DEFAULT_PROFIT_SHARE: ProfitShareEntry[] = [
   { lead: 'Calixto Efrain Climaco', pct: 0.36 },
   { lead: 'Jesus Perez', pct: 0.36 },
   { lead: 'Carlos Ruiz Cruz', pct: 0.38 },
-  { lead: 'Damian Vasquez', pct: 0.38 },
+  { lead: 'Damian Vazquez', pct: 0.38 },
   { lead: 'Daniel Gonzales Bonilla', pct: 0.38 },
   { lead: 'Henry Limay Flores', pct: 0.38 },
   { lead: 'Rafael Aguilar', pct: 0.38 },
@@ -59,6 +62,8 @@ export const DEFAULT_PROFIT_SHARE: ProfitShareEntry[] = [
   { lead: 'Color Enterprises LLC', pct: 0.53 },
   { lead: 'Merino Custom Painting', pct: 0.5 },
   { lead: 'Alvaro Reyes', pct: 0.4 },
+  // Round 11 — new crew lead, at the default profit-share %.
+  { lead: 'Andrew Mazzeo', pct: 0.38 },
 ];
 
 export const DEFAULT_PROFIT_SHARE_PCT = 0.38;
@@ -72,7 +77,7 @@ const BASE_WAGE_RATES: WageRateEntry[] = [
   { name: 'Calixto Efrain Climaco', rate: 19.18 },
   { name: 'Jesus Perez', rate: 19.18 },
   { name: 'Carlos Ruiz Cruz', rate: 18, hourlyRate: 25 },
-  { name: 'Damian Vasquez', rate: 18 },
+  { name: 'Damian Vazquez', rate: 18 },
   { name: 'Daniel Gonzales Bonilla', rate: 18 },
   { name: 'Gertrudis Campoverde Anguiano', rate: 20 },
   { name: 'Henry Limay Flores', rate: 18 },
@@ -106,7 +111,7 @@ export const ROUND8_WAGE_SEEDS: WageRateEntry[] = [
   { name: 'Adriana Lopez Barajas', rate: 25, hourlyRate: 20 },
   { name: 'Antonio Zuniga', rate: 18, hourlyRate: 25 },
   { name: 'Carlos Ruiz Cruz', rate: 18, hourlyRate: 25 },
-  { name: 'Damian Vasquez', rate: 18, hourlyRate: 18 },
+  { name: 'Damian Vazquez', rate: 18, hourlyRate: 18 },
   { name: 'Daniel Gonzales Bonilla', rate: 18, hourlyRate: 20 },
   { name: 'Henry Limay Flores', rate: 18 },
   { name: 'Jose Santos Hernandez Favela', rate: 18, hourlyRate: 20 },
@@ -163,6 +168,41 @@ export const ROUND10_WAGE_SEEDS: WageRateEntry[] = [
   { name: 'Rocio Sanchez', rate: 15, hourlyRate: 15 },
 ];
 
+/**
+ * Round 11 — corrected rates. `rate` is the profit-share / work-order rate,
+ * `hourlyRate` the T&M rate. "All jobs" / "across the board" sets both, plus
+ * the Commercial Hourly and Wages 2 slots where the person had one, so no pay
+ * item can quietly pay an old figure. SEEDS ONLY — editable in Settings.
+ *
+ * Names follow Settings, not the request's spelling: "Miguel Revelar" is
+ * Miguel Rebollar Bocanegra, "Arlette Zunigo" is Arlette Zuniga Lopez, "Anna
+ * Bedoya Melgar" is Ana Bedoya Melgar.
+ */
+export const ROUND11_WAGE_SEEDS: WageRateEntry[] = [
+  { name: 'Emily Trujillo', rate: 16, hourlyRate: 16 },
+  { name: 'Arlette Zuniga Lopez', rate: 13, hourlyRate: 13 },
+  // $20 on hourly jobs, $18 on profit-share jobs.
+  { name: 'Miguel Martin', rate: 18, hourlyRate: 20 },
+  { name: 'Miguel Borquez Gil', rate: 20, hourlyRate: 20 },
+  { name: 'Miguel Rebollar Bocanegra', rate: 23, hourlyRate: 23 },
+  { name: 'Samuel Martin', rate: 20, hourlyRate: 20 },
+  { name: 'Ted Frank', rate: 21, hourlyRate: 21 },
+  { name: 'Thomas Slater', rate: 35, hourlyRate: 35 },
+  { name: 'Ana Bedoya Melgar', rate: 20, hourlyRate: 20 },
+  { name: 'Manuel Aguilar Campoverde', rate: 22, hourlyRate: 22 },
+  { name: 'Damian Vazquez', rate: 18, hourlyRate: 18 },
+  // New crew lead at the default rate.
+  { name: 'Andrew Mazzeo', rate: 18 },
+];
+
+/**
+ * Round 11 — the wage list is always alphabetical by name, however a row got
+ * there (seed, migration, a hand-added row in Settings).
+ */
+export function sortWageRates(list: readonly WageRateEntry[]): WageRateEntry[] {
+  return [...list].sort((a, b) => a.name.trim().localeCompare(b.name.trim(), 'en', { sensitivity: 'base' }));
+}
+
 /** Name key for wage-map merges (case/whitespace-insensitive). */
 function wageKey(name: string): string {
   return name.trim().toLowerCase().replace(/\s+/g, ' ');
@@ -205,10 +245,97 @@ export function mergeWageRateSeeds(
   return out;
 }
 
-export const DEFAULT_WAGE_RATES: WageRateEntry[] = mergeWageRateSeeds(
-  mergeWageRateSeeds(mergeWageRateSeeds(BASE_WAGE_RATES, ROUND8_WAGE_SEEDS), ROUND9_WAGE_SEEDS),
-  ROUND10_WAGE_SEEDS,
+export const DEFAULT_WAGE_RATES: WageRateEntry[] = sortWageRates(
+  mergeWageRateSeeds(
+    mergeWageRateSeeds(
+      mergeWageRateSeeds(mergeWageRateSeeds(BASE_WAGE_RATES, ROUND8_WAGE_SEEDS), ROUND9_WAGE_SEEDS),
+      ROUND10_WAGE_SEEDS,
+    ),
+    ROUND11_WAGE_SEEDS,
+  ),
 );
+
+/**
+ * Round 11 — calendar-title nicknames for crew leads. Matched without regard
+ * to case, so "(welder)" and "(WELDER)" both resolve. SEED DATA — editable in
+ * Settings.
+ */
+export const DEFAULT_CREW_LEAD_ALIASES: CrewLeadAlias[] = [
+  { alias: 'Pepe', lead: "Pepe's Painting LLC" },
+  { alias: 'Welder', lead: 'Color Enterprises LLC' },
+  { alias: 'Carlito', lead: 'Carlos Ruiz' },
+  { alias: 'Santos', lead: 'Jose Santos Hernandez' },
+  { alias: 'Miguel', lead: 'Miguel Martin' },
+  { alias: 'Andy', lead: 'Andrew Mazzeo' },
+];
+
+/**
+ * Round 11 — the only people whose Payroll Preview block shows a
+ * `NEST [IRA]` column. Token-matched, so "Carlos Ruiz" covers "Carlos Ruiz
+ * Cruz". SEED DATA — editable in Settings.
+ */
+export const DEFAULT_NEST_NAMES: string[] = [
+  'Ana Bedoya Melgar',
+  'Carlos Ruiz',
+  'Manuel Aguilar',
+  'Rafael Aguilar',
+  'Sergio Viera',
+  'Emily Trujillo',
+  'Paul Good',
+  'Mike Holden',
+  'Ryan Frey',
+];
+
+/**
+ * Round 11 — known misspellings in the source exports, fixed where names
+ * enter the app (`parseTimesheet`, `parseEmployeeList`), so every tab, every
+ * rate lookup and every export sees one spelling. Each pair must have the same
+ * number of name tokens; matching is case-insensitive.
+ */
+export const NAME_SPELLING_FIXES: { from: string; to: string }[] = [
+  { from: 'Damian Vasquez', to: 'Damian Vazquez' },
+];
+
+/**
+ * Apply `NAME_SPELLING_FIXES` to a name split across first/last fields. A fix
+ * applies when every token of its `from` appears in the name; each of those
+ * tokens is swapped for its counterpart, wherever it sits.
+ */
+export function fixNameSpelling(first: string, last: string): { first: string; last: string } {
+  let f = first;
+  let l = last;
+  for (const fix of NAME_SPELLING_FIXES) {
+    const fromToks = fix.from.toLowerCase().split(/\s+/);
+    const toToks = fix.to.split(/\s+/);
+    if (fromToks.length !== toToks.length) continue;
+    const have = `${f} ${l}`.toLowerCase().split(/\s+/).filter(Boolean);
+    if (!fromToks.every((t) => have.includes(t))) continue;
+    const swap = (part: string): string =>
+      part
+        .split(/(\s+)/)
+        .map((tok) => {
+          const at = fromToks.indexOf(tok.toLowerCase());
+          return at === -1 ? tok : toToks[at];
+        })
+        .join('');
+    f = swap(f);
+    l = swap(l);
+  }
+  return { first: f, last: l };
+}
+
+/** Same fix inside free text such as a crew group label ("Damian Vasquez's Crew"). */
+export function fixNameSpellingInText(text: string): string {
+  let out = text;
+  for (const fix of NAME_SPELLING_FIXES) {
+    const pattern = fix.from
+      .split(/\s+/)
+      .map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+      .join('\\s+');
+    out = out.replace(new RegExp(`\\b${pattern}\\b`, 'gi'), fix.to);
+  }
+  return out;
+}
 
 export const DEFAULT_WAGE_RATE = 18;
 
@@ -348,7 +475,7 @@ const RAW_SALARIED: SalariedEntry[] = [
     role: 'Manager Salary',
     amount: 865,
     entity: 'NV',
-    reimbursementsLabel: 'Reimbursements',
+    reimbursementsLabel: 'Reimbursements/additional pay',
   },
   { name: 'Jason Thompson', section: 'ESTIMATORS', role: 'Salary', amount: 1200, entity: 'NV' },
   { name: 'Paul Good', section: 'ESTIMATORS', role: 'Commissions', amount: 1600, entity: 'NV' },
@@ -422,7 +549,8 @@ export const DEFAULT_PAYROLL_LINE_ITEMS: PayrollLineItem[] = [
     person: 'Charles Mike Holden',
     label: 'Health Insurance',
     amount: 689.8,
-    kind: 'deduction',
+    // Round 11 — paid TO him, not withheld.
+    kind: 'reimbursement',
     frequency: 'firstPayDateOfMonth',
   },
   // §29/§34 — a blank "Reimbursements" row in addition to mileage reimb.
@@ -440,7 +568,18 @@ export const DEFAULT_PAYROLL_LINE_ITEMS: PayrollLineItem[] = [
     (person): PayrollLineItem => ({
       id: `li-${person.toLowerCase().replace(/\s+/g, '-')}-reimb`,
       person,
-      label: 'Reimbursements',
+      label: 'Reimbursements/additional pay',
+      amount: null,
+      kind: 'reimbursement',
+      frequency: 'weekly',
+    }),
+  ),
+  // Round 11 — a "Holiday pay" row in the office section, blank until typed.
+  ...['Emily Trujillo', 'Sandra Hermosillo'].map(
+    (person): PayrollLineItem => ({
+      id: `li-${person.toLowerCase().replace(/\s+/g, '-')}-holiday`,
+      person,
+      label: 'Holiday pay',
       amount: null,
       kind: 'reimbursement',
       frequency: 'weekly',
@@ -526,6 +665,12 @@ export const MIGRATION_R10_PL_MAPPING = 'r10-pl-mapping';
  * row, so re-seed any default person the stored roster is missing.
  */
 export const MIGRATION_R10_ROSTER_SUBS = 'r10-roster-subs';
+/**
+ * Round 11 — rates, the Damian Vazquez spelling, Andrew Mazzeo, Color
+ * Enterprises at 53%, the JT color, crew-lead aliases, the NEST list, Mike
+ * Holden's health insurance as a reimbursement and the holiday pay rows.
+ */
+export const MIGRATION_R11 = 'r11-settings';
 export const ALL_MIGRATIONS: string[] = [
   MIGRATION_RF_COLOR,
   MIGRATION_DB_PATTERN,
@@ -539,6 +684,7 @@ export const ALL_MIGRATIONS: string[] = [
   MIGRATION_R10_ROSTER,
   MIGRATION_R10_PL_MAPPING,
   MIGRATION_R10_ROSTER_SUBS,
+  MIGRATION_R11,
 ];
 
 // v4: Round 3 payroll settings added. v3 legend/pivot values are migrated;
@@ -625,6 +771,8 @@ export function defaultSettings(): AppSettings {
     payrollLineItems: DEFAULT_PAYROLL_LINE_ITEMS.map((e) => ({ ...e })),
     fullMaterialsLeads: [...DEFAULT_FULL_MATERIALS_LEADS],
     dailyOtExemptNames: [...DEFAULT_DAILY_OT_EXEMPT],
+    crewLeadAliases: DEFAULT_CREW_LEAD_ALIASES.map((a) => ({ ...a })),
+    nestNames: [...DEFAULT_NEST_NAMES],
     // Fresh settings already carry every Round 8 seed.
     appliedMigrations: [...ALL_MIGRATIONS],
   };
@@ -710,7 +858,7 @@ function parsePayroll(raw: unknown): Partial<AppSettings> {
         });
       }
     }
-    if (list.length > 0) out.wageRates = list;
+    if (list.length > 0) out.wageRates = sortWageRates(list);
   }
   if (typeof r.defaultWageRate === 'number' && Number.isFinite(r.defaultWageRate)) {
     out.defaultWageRate = r.defaultWageRate;
@@ -870,6 +1018,19 @@ function parsePayroll(raw: unknown): Partial<AppSettings> {
     out.dailyOtExemptNames = r.dailyOtExemptNames.filter(
       (n): n is string => typeof n === 'string' && n.trim() !== '',
     );
+  }
+  if (Array.isArray(r.crewLeadAliases)) {
+    const list: CrewLeadAlias[] = [];
+    for (const e of r.crewLeadAliases) {
+      const x = e as Record<string, unknown>;
+      if (typeof x.alias === 'string' && typeof x.lead === 'string' && x.alias.trim() && x.lead.trim()) {
+        list.push({ alias: x.alias.trim(), lead: x.lead.trim() });
+      }
+    }
+    out.crewLeadAliases = list;
+  }
+  if (Array.isArray(r.nestNames)) {
+    out.nestNames = r.nestNames.filter((n): n is string => typeof n === 'string' && n.trim() !== '');
   }
   if (Array.isArray(r.appliedMigrations)) {
     out.appliedMigrations = r.appliedMigrations.filter((s): s is string => typeof s === 'string');
@@ -1135,6 +1296,85 @@ export function applySettingsMigrations(settings: AppSettings): AppSettings {
     });
     done.add(MIGRATION_CARLOS_HOURLY);
   }
+
+  /**
+   * Round 11. These are explicit corrections, so they overwrite what is saved
+   * (`seedWins`) rather than only filling gaps — a stale shared-store value
+   * would otherwise keep paying the old rate.
+   */
+  if (!done.has(MIGRATION_R11)) {
+    const key = (n: string): string => n.trim().toLowerCase().replace(/\s+/g, ' ');
+    const respell = (n: string): string => fixNameSpellingInText(n);
+
+    const wageRates = sortWageRates(
+      mergeWageRateSeeds(
+        // Rename first, so the seed for "Damian Vazquez" patches his row
+        // instead of appending a duplicate.
+        next.wageRates.map((w) => ({ ...w, name: respell(w.name) })),
+        ROUND11_WAGE_SEEDS,
+        'seedWins',
+      ),
+    );
+
+    let profitShare = next.profitShare.map((p) => ({ ...p, lead: respell(p.lead) }));
+    profitShare = profitShare.map((p) => (key(p.lead) === 'color enterprises llc' ? { ...p, pct: 0.53 } : p));
+    if (!profitShare.some((p) => key(p.lead) === 'andrew mazzeo')) {
+      profitShare.push({ lead: 'Andrew Mazzeo', pct: next.defaultProfitSharePct });
+    }
+
+    const legend = next.legend.some((l) => l.estimator === 'JT')
+      ? next.legend.map((l) => (l.estimator === 'JT' ? { ...l, color: 'DDD9C4' } : l))
+      : [...next.legend, { estimator: 'JT', color: 'DDD9C4' }];
+
+    const haveItems = new Set(next.payrollLineItems.map((i) => i.id));
+    const payrollLineItems = [
+      ...next.payrollLineItems.map((i) => ({
+        ...i,
+        person: respell(i.person),
+        // Paid TO Mike Holden, not withheld.
+        ...(i.id === 'li-mike-holden-health' ? { kind: 'reimbursement' as const } : {}),
+        // The row covers additional pay as well.
+        ...(i.label.trim() === 'Reimbursements' ? { label: 'Reimbursements/additional pay' } : {}),
+      })),
+      ...DEFAULT_PAYROLL_LINE_ITEMS.filter((i) => !haveItems.has(i.id)).map((i) => ({ ...i })),
+    ];
+
+    const haveAliases = new Set((next.crewLeadAliases ?? []).map((a) => key(a.alias)));
+    const crewLeadAliases = [
+      ...(next.crewLeadAliases ?? []),
+      ...DEFAULT_CREW_LEAD_ALIASES.filter((a) => !haveAliases.has(key(a.alias))).map((a) => ({ ...a })),
+    ];
+
+    patch({
+      wageRates,
+      profitShare,
+      legend,
+      payrollLineItems,
+      crewLeadAliases,
+      nestNames: next.nestNames && next.nestNames.length > 0 ? next.nestNames : [...DEFAULT_NEST_NAMES],
+      painterRoster: next.painterRoster.map((r) => ({ ...r, name: respell(r.name) })),
+      salariedRoster: next.salariedRoster.map((r) => ({
+        ...r,
+        name: respell(r.name),
+        ...(r.reimbursementsLabel?.trim() === 'Reimbursements'
+          ? { reimbursementsLabel: 'Reimbursements/additional pay' }
+          : {}),
+      })),
+      conditionalRateRules: next.conditionalRateRules.map((r) => ({
+        ...r,
+        person: respell(r.person),
+        condition: { ...r.condition, leadName: respell(r.condition.leadName) },
+      })),
+      perJobRateOverrides: next.perJobRateOverrides.map((r) => ({ ...r, person: respell(r.person) })),
+      subcontractors: next.subcontractors.map(respell),
+      fullMaterialsLeads: next.fullMaterialsLeads.map(respell),
+      dailyOtExemptNames: next.dailyOtExemptNames.map(respell),
+    });
+    done.add(MIGRATION_R11);
+  }
+
+  // Whatever path a row took in, the list stays alphabetical.
+  next = { ...next, wageRates: sortWageRates(next.wageRates) };
 
   return { ...next, appliedMigrations: [...done] };
 }

@@ -51,6 +51,8 @@ import type {
 const BLACK = 'FF000000';
 const WHITE = 'FFFFFFFF';
 const HEADER_GRAY = 'FF808080';
+/** Round 11 — taxes / NEST / net: a leading minus sign, red, no parentheses. */
+const SIGNED_FMT = '#,##0.00;[Red]-#,##0.00';
 const GRAND_TOTAL_GRAY = 'FFD9D9D9';
 
 // Round 4 §1.1 — Excel's classic "bad" style for the pink review flags.
@@ -92,6 +94,16 @@ const FONT = 'Calibri';
 
 function solidFill(argb: string): ExcelJS.Fill {
   return { type: 'pattern', pattern: 'solid', fgColor: { argb } };
+}
+
+/**
+ * The fill for a CONDITIONAL format. Excel reads a conditional solid fill from
+ * `bgColor`, not `fgColor` — the opposite of a cell fill — so `solidFill` here
+ * produced the rule's red text with no pink behind it. Both are set so any
+ * reader that does look at `fgColor` agrees.
+ */
+function cfFill(argb: string): ExcelJS.Fill {
+  return { type: 'pattern', pattern: 'solid', fgColor: { argb }, bgColor: { argb } };
 }
 
 // Round 8 §4.1 — carried jobs painted this gray must not flow to payroll.
@@ -659,7 +671,7 @@ function buildTimeNaviSheet(wb: ExcelJS.Workbook, input: ExportInput, palette: R
             `AND($${col}2<>"",OR($${col}2="NotClockedIn",COUNTIF($${col}$2:$${col}$${lastRow},$${col}2)>1))`,
           ],
           style: {
-            fill: solidFill(PINK_FILL),
+            fill: cfFill(PINK_FILL),
             font: { name: FONT, size: 10, color: { argb: PINK_TEXT } },
           },
         },
@@ -794,6 +806,11 @@ function buildPivotSheet(wb: ExcelJS.Workbook, pivot: PivotModel, palette: Reado
     const crewRow = ws.addRow([crew.crew]);
     blackBand(crewRow);
     crewRow.outlineLevel = 0;
+    // Round 11 — a rule above and below the crew-lead row, A through the
+    // estimator helper column (E–K used to have no bottom edge).
+    for (let c = 1; c <= estHelperCol; c++) {
+      crewRow.getCell(c).border = { top: { style: 'thin' }, bottom: { style: 'thin' } };
+    }
 
     for (const emp of crew.employees) {
       // Painter email row = level 1; jobs + "… Total" nest under it at level 2.
@@ -833,8 +850,9 @@ function buildPivotSheet(wb: ExcelJS.Workbook, pivot: PivotModel, palette: Reado
     }
   }
 
-  // Grand Total row: bold, gray/white on column A and every value column; B:D plain.
-  // Estimator helper left blank (Round 7 §7).
+  // Grand Total row. Round 11 — #808080 with white bold text across the WHOLE
+  // row (B:D and the estimator helper used to be left white), and one double
+  // rule along its top edge only.
   const grandRow = ws.addRow([
     'Grand Total',
     '',
@@ -844,15 +862,13 @@ function buildPivotSheet(wb: ExcelJS.Workbook, pivot: PivotModel, palette: Reado
     '',
   ]);
   grandRow.outlineLevel = 0;
-  paint(grandRow.getCell(1), { fill: HEADER_GRAY, color: WHITE, bold: true });
-  for (let c = 2; c <= 4; c++) paint(grandRow.getCell(c), {});
-  for (let c = 5; c <= gtCol; c++) {
+  for (let c = 1; c <= estHelperCol; c++) {
     const cell = grandRow.getCell(c);
     paint(cell, { fill: HEADER_GRAY, color: WHITE, bold: true });
+    cell.border = { top: { style: 'double' } };
     if (typeof cell.value === 'number') cell.numFmt = HOURS_FMT;
-    if (c < gtCol) cell.alignment = { horizontal: 'center' };
+    if (c >= 5 && c < gtCol) cell.alignment = { horizontal: 'center' };
   }
-  paint(grandRow.getCell(estHelperCol), {});
 }
 
 // ---------------------------------------------------------------------------
@@ -866,7 +882,8 @@ const MONEY_FMT = CURRENCY_FMT;
 
 function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): void {
   const ws = wb.addWorksheet('Pivot by Job', {
-    views: [{ state: 'frozen', ySplit: 2 }], // Round 5 §3.1 — freeze at A3
+    // Round 5 §3.1 — freeze at A3. Round 11 — opens at 94% zoom.
+    views: [{ state: 'frozen', ySplit: 2, zoomScale: 94, zoomScaleNormal: 94 }],
     properties: { outlineProperties: { summaryBelow: false, summaryRight: true } },
   });
   const dateCount = model.dateIsos.length;
@@ -891,8 +908,8 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
     { width: 18.5 },
   ];
 
-  // Round 10 — every value on this sheet is 8pt (was 12pt, with a 17pt title).
-  const baseFont = { name: FONT, size: 8 };
+  // Round 11 — every value on this sheet is 9pt (Round 10 had 8pt).
+  const baseFont = { name: FONT, size: 9 };
   const paint = (
     cell: ExcelJS.Cell,
     opts: { fill?: string; color?: string; bold?: boolean; size?: number },
@@ -1040,10 +1057,14 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
         a.onCalendar,
         a.estimator,
         a.crewLead,
-        a.hourly ? '-' : (a.woOverride ?? ''),
-        a.hourly ? '-' : (a.woPct ?? ''),
+        // Round 11 — a typed WO value survives on an HOURLY job; '-' only
+        // marks an hourly job where nothing was typed.
+        a.woOverride ?? (a.hourly ? '-' : ''),
+        a.woPct ?? (a.hourly ? '-' : ''),
         percentExcelValue(a.percent),
-        '', // Round 7 — Notes data cleared; keep centered "Notes" header only
+        // Round 11 — Notes were written as '' here, which threw away every
+        // note typed on screen the moment the workbook was downloaded.
+        a.notes,
       ]);
       jRow.outlineLevel = 1;
       fillRow(jRow, job.colorHex);
@@ -1056,9 +1077,13 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
             ? job.colorHex && isDarkColor(job.colorHex)
               ? 'FFFFC7C7'
               : DARK_RED
-            : job.colorHex
-              ? textOn(job.colorHex)
-              : BLACK;
+            : // Round 11 — % of Completion is black on every row; on a dark
+              // estimator band it used to inherit white text.
+              c === pctComplCol
+              ? BLACK
+              : job.colorHex
+                ? textOn(job.colorHex)
+                : BLACK;
         paint(cell, { ...(job.colorHex ? { fill: 'FF' + job.colorHex } : {}), color, bold: true });
       }
       analysisFormats(jRow);
@@ -1112,13 +1137,15 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
       jRow.outlineLevel = 1;
       const cells: (string | number)[] = [
         r.apKey ?? '',
-        '',
+        // Round 11 — same `TimeNavi row N` / `NOT ON CALENDAR` as the pivot.
+        r.onCalendar ?? '',
         r.estimator,
         r.crewLead,
         r.woOverride ?? '',
         r.woPct ?? '',
         percentExcelValue(r.percent),
-        '', // Round 7 — clear BALANCES/UT Notes data; keep header label
+        // Round 11 — typed notes are written, not cleared.
+        r.notes,
       ];
       cells.forEach((v, i) => {
         jRow.getCell(analysisStart + i).value = v;
@@ -1132,8 +1159,17 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
       });
       analysisFormats(jRow);
       writePercentCell(jRow, { apKey: r.apKey, percent: r.percent, override: r.percentOverride });
+      paint(jRow.getCell(pctComplCol), { ...(rowHex ? { fill: 'FF' + rowHex } : {}), color: BLACK, bold: true });
       textApCell(jRow);
       centerAnalysis(jRow);
+      /**
+       * Round 11 — a no-hours job has nothing under its dates, so the date
+       * columns and Total hrs merge into one centered, typeable cell. Written
+       * after the fills: a merged range takes the first cell's style.
+       */
+      jRow.getCell(2).value = r.hoursNote ?? '';
+      jRow.getCell(2).alignment = { horizontal: 'center', vertical: 'middle' };
+      ws.mergeCells(jRow.number, 2, jRow.number, totalCol);
       for (let c = 1; c <= lastCol; c++) {
         cRow.getCell(c).border = {
           top: { style: 'thin' },
@@ -1268,7 +1304,8 @@ function buildPayrollPreviewSheet(
       // Round 6 §6.1 — bold `(-) taxes` / `NEST [IRA]` / `net` labels on the LAST job line.
       if (isLast) {
         r.getCell(6).value = '(-) taxes';
-        r.getCell(7).value = 'NEST [IRA]';
+        // Round 11 — only people on the NEST list get the NEST [IRA] column.
+        r.getCell(7).value = block.showNest ? 'NEST [IRA]' : '';
         r.getCell(8).value = 'net';
         for (const c of [6, 7, 8]) {
           r.getCell(c).font = { ...baseFont, bold: true };
@@ -1291,12 +1328,26 @@ function buildPayrollPreviewSheet(
     const sums = ws.addRow(['', '']);
     sums.getCell(3).value = { formula: `SUM(C${firstLineRow}:C${lastLineRow})` };
     sums.getCell(5).value = { formula: `SUM(E${firstLineRow}:E${lastLineRow})` };
-    // Round 6 §6.1 — taxes / NEST / net blank by default (independent manual cells).
-    sums.getCell(6).value = block.taxes ?? '';
-    sums.getCell(7).value = block.nest ?? '';
+    /**
+     * Round 11 — total + taxes + NEST = net, live in the workbook. Net (H) and
+     * NEST (G) are values; taxes (F) is a formula off them, so typing a net in
+     * Excel back-fills the taxes just as it does on screen. The cached result
+     * is written too, so the cell shows a number before Excel recalculates.
+     */
+    const sn = sums.number;
+    sums.getCell(6).value = {
+      formula: `IF(H${sn}="","",H${sn}-E${sn}-N(G${sn}))`,
+      result: block.taxes ?? '',
+    };
+    sums.getCell(7).value = block.showNest ? (block.nest ?? '') : '';
     sums.getCell(8).value = block.net ?? '';
-    for (const c of [3, 5, 6, 7, 8]) {
+    for (const c of [3, 5]) {
       sums.getCell(c).numFmt = HOURS_FMT;
+      sums.getCell(c).alignment = center;
+    }
+    for (const c of [6, 7, 8]) {
+      // Negatives read "-1,234.56" (red), not "(1,234.56)".
+      sums.getCell(c).numFmt = SIGNED_FMT;
       sums.getCell(c).alignment = center;
     }
     sums.font = { ...baseFont, bold: true };
@@ -1318,7 +1369,8 @@ function buildPayrollPreviewSheet(
     if (block.extras.length > 0) {
       const extraRows = block.extras.map((x) => ({
         extra: x,
-        row: ws.addRow([x.label, '', '', '', x.amount ?? '']).number,
+        // Round 11 — the note sits in F, immediately right of the amount.
+        row: ws.addRow([x.label, '', '', '', x.amount ?? '', x.memo]).number,
       }));
       for (const r of extraRows) {
         ws.getCell(`E${r.row}`).numFmt = ACCOUNTING_FMT;
@@ -1417,19 +1469,18 @@ function buildPayrollPreviewSheet(
     ws.addRow([]);
     const totalRow = ws.addRow(['Total']).number;
     // Round 10 — one column per job, like every other chain row.
-    const mileNewRow = ws.addRow([
-      'Mileage - New',
-      block.mileageNew,
-      ...block.jobs.slice(1).map(() => ''),
-    ]).number;
+    // Round 11 — every single-value row carries its note in column C, the
+    // cell immediately right of the value, as on screen.
+    const mileNewRow = ws.addRow(['Mileage - New', block.mileageNew, block.mileageNewMemo]).number;
     const hourlyPayRow = ws.addRow(['Hourly Pay']).number;
-    const reimbRow = ws.addRow(['Reimbursements', block.reimbursements, block.reimbMemo]).number;
+    ws.getCell(`C${hourlyPayRow}`).value = block.hourlyPayMemo;
+    const reimbRow = ws.addRow(['Reimbursements/additional pay', block.reimbursements, block.reimbMemo]).number;
     const deductRow = ws.addRow(['Deductions/Sundries']).number;
     // Round 9 §19/§23 — configured extra rows sit directly above Total Pay so
     // the formula below can pick them up.
     const extraRows = block.extras.map((x) => ({
       extra: x,
-      row: ws.addRow([x.label, x.amount ?? '']).number,
+      row: ws.addRow([x.label, x.amount ?? '', x.memo]).number,
     }));
     const totalPayRow = ws.addRow(['Total Pay']).number;
     const inputRef = inputRefsByLeadKey?.get(block.key);
@@ -1586,22 +1637,23 @@ function buildPayrollPreviewSheet(
       BLACK,
     );
     // §5.4 — the date-range cell renders 9pt like the office PO cells.
-    const r1 = ws.addRow([model.weekRange ? `(${model.weekRange})` : '', block.role, block.amount]);
+    // Round 11 — each value row's note sits in D, immediately right of it.
+    const r1 = ws.addRow([model.weekRange ? `(${model.weekRange})` : '', block.role, block.amount, block.amountMemo]);
     r1.getCell(1).font = { ...baseFont, size: 9 };
     r1.getCell(3).numFmt = ACCOUNTING_FMT;
     // Round 9 §28 — a flat labeled reimbursements row replaces mileage reimb
     // for the people configured that way (Jodi Dunn).
     // Round 10 — some people carry no mileage row at all.
     const r2 = block.reimbursementsLabel
-      ? ws.addRow([block.reimbursementsLabel, '', block.reimbursements])
+      ? ws.addRow([block.reimbursementsLabel, '', block.reimbursements, block.reimbMemo])
       : block.noMileageRow
         ? null
-        : ws.addRow([`mileage reimb: ${block.name} - ${block.miles} miles`, '', block.mileageReimb]);
+        : ws.addRow([`mileage reimb: ${block.name} - ${block.miles} miles`, '', block.mileageReimb, block.mileageMemo]);
     if (r2) r2.getCell(3).numFmt = ACCOUNTING_FMT;
     // Round 9 §19/§23/§24/§29 — configured extra rows.
     const extraRows = block.extras.map((x) => ({
       extra: x,
-      row: ws.addRow([x.label, '', x.amount ?? '']).number,
+      row: ws.addRow([x.label, '', x.amount ?? '', x.memo]).number,
     }));
     for (const r of extraRows) {
       ws.getCell(`C${r.row}`).numFmt = ACCOUNTING_FMT;

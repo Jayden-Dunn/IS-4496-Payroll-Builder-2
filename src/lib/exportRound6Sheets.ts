@@ -7,12 +7,16 @@ import type { CellValue, Fill, Workbook, Worksheet } from 'exceljs';
 import { extractApKey } from './apkey';
 import { formatCrewLeadWoNote, isDarkColor } from './format';
 import type { JobsByCrewModel } from './jobsByCrew';
-import type {
-  SalesByCustMirrorRow,
-  SalesByRepMirrorRow,
-  TimesheetMirrorRow,
+import {
+  pxToExcelWidth,
+  SALES_BY_REP_ACCOUNTING_COLS,
+  SALES_BY_REP_WIDTHS_PX,
+  TIMESHEET_COLLAPSED_HEADERS,
+  type SalesByCustMirrorRow,
+  type SalesByRepMirrorRow,
+  type TimesheetMirrorRow,
 } from './mirrorTabs';
-import { hourSplitRows } from './payroll';
+import { hourSplitRows, profitshareOutputLeads } from './payroll';
 import { buildPrFinalCheckRows } from './prFinalCheck';
 import type {
   HourlyBlock,
@@ -135,7 +139,11 @@ export function buildSalesByRepMirrorSheet(
   const headers = data?.headers?.length
     ? ['AP#', ...data.headers.slice(0, 12), 'Date', 'QBO Job Name']
     : ['AP#', 'Date', 'Customer', 'Name 1', 'Name 2', 'Transaction Type', 'Num', 'Product/Service', 'Memo/Description', 'Sales Price', 'Amount', 'Balance', 'Sales Rep', 'Date', 'QBO Job Name'];
-  ws.columns = headers.map((h, i) => ({ width: salesByRepColWidth(h, i) }));
+  // Round 11 — A–M at the specified pixel widths; the trailing helper
+  // columns keep their content-based widths.
+  ws.columns = headers.map((h, i) => ({
+    width: i < SALES_BY_REP_WIDTHS_PX.length ? pxToExcelWidth(SALES_BY_REP_WIDTHS_PX[i]) : salesByRepColWidth(h, i),
+  }));
   const headerRow = ws.addRow(headers);
   for (let c = 1; c <= headers.length; c++) {
     headerRow.getCell(c).font = { name: MIRROR_ARIAL, bold: true, size: isUt ? 9 : 8 };
@@ -148,6 +156,8 @@ export function buildSalesByRepMirrorSheet(
       row.getCell(c).font = { name: MIRROR_ARIAL, size: 8 };
       const v = row.getCell(c).value;
       if (v instanceof Date) row.getCell(c).numFmt = DATE_FMT;
+      // Round 11 — J, K, L show thousands separators: Excel's Accounting format.
+      else if (typeof v === 'number' && SALES_BY_REP_ACCOUNTING_COLS.has(c - 1)) row.getCell(c).numFmt = ACCOUNTING_FMT;
       else if (typeof v === 'number') row.getCell(c).numFmt = HOURS_FMT;
     }
   }
@@ -243,6 +253,10 @@ export function buildTimesheetMirrorSheet(
     width: h === 'jobcode_2' || h === 'QBO Job Name' ? 36 : h === 'hours' ? 8 : 12,
   }));
   boldHeader(ws, TIMESHEET_HEADERS);
+  // Round 11 — collapsed: hidden in Excel, one right-click "Unhide" away.
+  TIMESHEET_HEADERS.forEach((h, i) => {
+    if (TIMESHEET_COLLAPSED_HEADERS.has(h)) ws.getColumn(i + 1).hidden = true;
+  });
   for (const r of rows ?? []) {
     const raw = r.raw.slice(0, 24);
     while (raw.length < 24) raw.push(null);
@@ -647,7 +661,7 @@ function writePsChainValues(
     },
     { label: 'Hourly Pay', value: block.hourlyPay, highlight: true, formula: opts.hourlyPayRef },
     {
-      label: 'Reimbursements',
+      label: 'Reimbursements/additional pay',
       value: block.reimbursements,
       memo: block.reimbMemo,
       color: REIMB_BLUE,
@@ -810,14 +824,18 @@ export function buildProfitshareOutputSheet(
 ): void {
   const ws = wb.addWorksheet('Profitshare Output');
   // 8-col bands: 7 data + 1 spacer → A, I, Q, Y…
-  const leads = model?.leads ?? [];
+  const allLeads = model?.leads ?? [];
+  // Round 11 — hourly-only leads are left off; refs still index the Input #'s
+  // tab, which lists every lead.
+  const leads = profitshareOutputLeads(allLeads);
+  const inputRefs = inputNumbersCellRefs(allLeads.length);
   ws.columns = Array.from({ length: Math.max(8, leads.length * 8) }, (_, i) => ({
     width: i % 8 === 7 ? 3 : 14,
   }));
   let maxEndRow = 1;
-  leads.forEach((block, bi) => {
+  leads.forEach(({ block, inputIndex }, bi) => {
     const startCol = 1 + bi * 8;
-    const refs = inputNumbersCellRefs(leads.length)[bi];
+    const refs = inputRefs[inputIndex];
     const end = writePsChainValues(ws, block, startCol, {
       defaultPsPct,
       startRow: 1,
@@ -970,7 +988,7 @@ export function buildInputNumbersSheet(
     row++; // blank reported-materials entry row
 
     const reimb = ws.getRow(row);
-    reimb.getCell(2).value = 'Reimbursements';
+    reimb.getCell(2).value = 'Reimbursements/additional pay';
     reimb.getCell(3).value = block.reimbursements;
     reimb.getCell(3).numFmt = ACCOUNTING_FMT;
     reimb.getCell(4).value = block.reimbMemo;
