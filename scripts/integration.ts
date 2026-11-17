@@ -12,6 +12,7 @@ import ExcelJS from 'exceljs';
 import * as XLSX from 'xlsx';
 import { timesheetApKey } from '../src/lib/apkey';
 import { buildPercentsWorkbookBuffer, buildPayrollWorkbookBuffer } from '../src/lib/exportXlsx';
+import { parseCompletedPercentsWorkbook } from '../src/lib/completedPercents';
 import { defaultSettings, DEFAULT_LEGEND, DEFAULT_PIVOT_COLUMNS } from '../src/lib/settings';
 import { buildExceptions } from '../src/lib/exceptions';
 import { enrichTimesheet } from '../src/lib/joins';
@@ -34,7 +35,13 @@ import {
 import { buildPayrollExceptions } from '../src/lib/payrollExceptions';
 import { buildPayrollPreview } from '../src/lib/payrollPreview';
 import { buildPivot } from '../src/lib/pivot';
-import { buildPivotByJob, EMPTY_MANUAL_STATE } from '../src/lib/pivotByJob';
+import {
+  buildPivotByJob,
+  EMPTY_MANUAL_STATE,
+  PBJ_GRAND_ROW_ID,
+  pbjCustomerRowId,
+  pbjEmployeeRowId,
+} from '../src/lib/pivotByJob';
 import { round2 } from '../src/lib/format';
 import { buildReportRows, lastPaidMapFromPivot, sortReportRows } from '../src/lib/timenavi';
 import type { CellValue, EnrichedTimesheetRow } from '../src/lib/types';
@@ -1620,8 +1627,205 @@ async function testEditRoundTrip(): Promise<void> {
   );
 }
 
+/**
+ * Round 12 — Utah timesheet hours (input #2) reach the Pivot by Job, every
+ * On Calendar? / Notes cell takes typed text, and the workbook reads back with
+ * each job under its own customer.
+ */
+async function testRound12(): Promise<void> {
+  console.log('Utah hours + editable columns…');
+
+  // Last % Paid: input #8 at 0% is a no-pay week, so the calendar answers.
+  const zeroRows = buildReportRows(
+    events,
+    {},
+    { ...deps, lastWeekMap: lastPaidMapFromPivot([{ apKey: '24314', percent: 0 }]) },
+    payDate,
+  );
+  const withMap = buildReportRows(events, {}, deps, payDate);
+  const lp = (list: typeof rows, ap: string): unknown => list.find((r) => r.apKey === ap)?.lastPaid;
+  const noMap = buildReportRows(events, {}, { ...deps, lastWeekMap: null }, payDate);
+  check(
+    'R12: input #8 showing 0% falls through to the calendar\'s last real %',
+    [lp(withMap, '24314'), lp(zeroRows, '24314')],
+    [1, lp(noMap, '24314')],
+  );
+
+  const utTimesheet = parseTimesheet(
+    wb([
+      ['Sheet1', [
+        TS_HEADERS,
+        tsRow('ute1@x.com', 'Ute', 'One', 'Utah Crew', '6/30/2026', 6, 'SNRHA', 'AP24222 Ext'),
+        tsRow('ute2@x.com', 'Ute', 'Two', 'Utah Crew', '7/1/2026', 3.5, 'SNRHA', 'AP24222 Ext'),
+        tsRow('ute1@x.com', 'Ute', 'One', 'Utah Crew', '7/2/2026', 4, 'Brand New Utah Co', 'AP27000 Lehi Int'),
+      ]],
+    ]),
+    'UT',
+  );
+  const utEnriched = enrichTimesheet(
+    [...timesheet.rows, ...utTimesheet.rows],
+    nvSales,
+    utSales,
+    includedApKeys,
+    estimatorByApKey,
+  );
+  const base = buildPivotByJob({
+    enriched: utEnriched, reportRows: rows, settings, leadCtx, knownEstimators, payDate,
+    edits: {}, qbHours: {}, lastWeekPbj,
+    balancesState: EMPTY_MANUAL_STATE, utState: EMPTY_MANUAL_STATE,
+    pl: null, nvTotals, utTotals, nvSales, utSales,
+  });
+  const nvOnly = buildPivotByJob({
+    enriched, reportRows: rows, settings, leadCtx, knownEstimators, payDate,
+    edits: {}, qbHours: {}, lastWeekPbj,
+    balancesState: EMPTY_MANUAL_STATE, utState: EMPTY_MANUAL_STATE,
+    pl: null, nvTotals, utTotals, nvSales, utSales,
+  });
+  const ut24222 = base.utPayroll.find((r) => r.apKey === '24222');
+  const ut27000 = base.utPayroll.find((r) => r.apKey === '27000');
+  check(
+    'R12 UT: Utah timesheet hours land on the UT PAYROLL rows (existing row + a new job)',
+    [ut24222?.total, (ut24222?.employees ?? []).map((e) => [e.username, e.total]), ut27000?.total, ut27000?.customer],
+    [9.5, [['ute1@x.com', 6], ['ute2@x.com', 3.5]], 4, 'Brand New Utah Co'],
+  );
+  check(
+    'R12 UT: the NV tree and Grand Total are unchanged by the Utah timesheet',
+    [base.customers.map((c) => c.customer), base.grandTotal, base.utPayroll.filter((r) => r.apKey === '24222').length],
+    [nvOnly.customers.map((c) => c.customer), nvOnly.grandTotal, 1],
+  );
+
+  const j24314Id = base.customers.flatMap((c) => c.jobs).find((j) => j.analysis.apKey === '24314')!.id;
+  const edited = buildPivotByJob({
+    enriched: utEnriched, reportRows: rows, settings, leadCtx, knownEstimators, payDate,
+    edits: {
+      [j24314Id]: { onCalendar: 'moved to next week' },
+      [pbjCustomerRowId('Aaron Ward')]: { notes: 'customer-row note', onCalendar: 'cust cal' },
+      [pbjEmployeeRowId(j24314Id, 'leo@x.com')]: { notes: 'employee-row note' },
+      [pbjEmployeeRowId('ut:24222', 'ute2@x.com')]: { notes: 'utah employee note' },
+      [PBJ_GRAND_ROW_ID]: { notes: 'grand total note' },
+    },
+    qbHours: { 'ut:24222\u0000ute1@x.com': 5.5 },
+    lastWeekPbj,
+    balancesState: EMPTY_MANUAL_STATE,
+    utState: {
+      added: [],
+      deleted: [],
+      edits: { 'ut:24222': { onCalendar: 'typed on calendar', customerNotes: 'ut customer note' } },
+    },
+    pl: null, nvTotals, utTotals, nvSales, utSales,
+  });
+  const buf = await buildPercentsWorkbookBuffer({
+    rows, pivot, legend: DEFAULT_LEGEND, payDate,
+    pivotByJob: edited,
+    percentExceptions: groups,
+    salesByRep: buildSalesByRepMirrorFromParsed(nvSales),
+    salesByCust: [],
+    utSalesByRep: buildSalesByRepMirrorFromParsed(utSales),
+    utSalesByCust: [],
+    timesheetMirror: buildTimesheetMirror(utEnriched, new Map()),
+    jobsByCrew: buildJobsByCrew(utEnriched),
+  });
+  const book = new ExcelJS.Workbook();
+  await book.xlsx.load(buf);
+  const ws = book.getWorksheet('Pivot by Job') as ExcelJS.Worksheet;
+  const dates = edited.dateIsos.length;
+  const totalCol = 1 + dates + 1;
+  const qbCol = totalCol + 1;
+  const analysisStart = qbCol + 1;
+  const onCalCol = analysisStart + 1;
+  const notesCol = analysisStart + 7;
+  const text = (r: ExcelJS.Row | null, c: number): string => String(r?.getCell(c).value ?? '');
+  const find = (pred: (r: ExcelJS.Row) => boolean): ExcelJS.Row | null => {
+    let hit: ExcelJS.Row | null = null;
+    ws.eachRow((r) => {
+      if (!hit && pred(r)) hit = r;
+    });
+    return hit;
+  };
+  const colA = (label: string) => (r: ExcelJS.Row): boolean => String(r.getCell(1).value ?? '') === label;
+
+  const job24314 = find((r) => text(r, analysisStart) === '24314');
+  check(
+    'R12 export: typed On Calendar? on a job, and text on customer / employee / Grand Total rows',
+    [
+      text(job24314, onCalCol),
+      text(find(colA('Aaron Ward')), notesCol),
+      text(find(colA('Aaron Ward')), onCalCol),
+      text(find(colA('leo@x.com')), notesCol),
+      text(find(colA('Grand Total')), notesCol),
+    ],
+    ['moved to next week', 'customer-row note', 'cust cal', 'employee-row note', 'grand total note'],
+  );
+
+  const utJob = find((r) => text(r, analysisStart) === '24222');
+  const utCust = utJob ? ws.getRow(utJob.number - 1) : null;
+  const utEmp1 = utJob ? ws.getRow(utJob.number + 1) : null;
+  const utEmp2 = utJob ? ws.getRow(utJob.number + 2) : null;
+  check(
+    'R12 export: the Utah job row carries hours (not a merged blank), then one row per employee',
+    [
+      utJob?.getCell(totalCol).value,
+      utJob?.getCell(2).isMerged,
+      utCust?.getCell(totalCol).value,
+      text(utJob, onCalCol),
+      text(utCust, notesCol),
+      [text(utEmp1, 1), utEmp1?.getCell(totalCol).value, utEmp1?.getCell(qbCol).value, utEmp1?.outlineLevel],
+      [text(utEmp2, 1), utEmp2?.getCell(totalCol).value, text(utEmp2, notesCol), utEmp2?.outlineLevel],
+    ],
+    [
+      9.5,
+      false,
+      9.5,
+      'typed on calendar',
+      'ut customer note',
+      ['ute1@x.com', 6, 5.5, 2],
+      ['ute2@x.com', 3.5, 'utah employee note', 2],
+    ],
+  );
+
+  // Read the same file back the way the payroll side (Slot A) reads it.
+  const asInput = readWorkbook(buf);
+  const completed = parseCompletedPercentsWorkbook(asInput);
+  if ('error' in completed) {
+    check('R12 read-back: the exported workbook parses as Slot A', completed.error, 'no error');
+    return;
+  }
+  const job = (ap: string) => completed.jobs.find((j) => j.apKey === ap);
+  check(
+    'R12 read-back: each job keeps its OWN customer (was: every job under the first customer)',
+    ['24314', '24403', '24450', '24500'].map((ap) => job(ap)?.customer),
+    ['Aaron Ward', 'CCSD', 'Southpoint', 'Roof Co'],
+  );
+  check(
+    'R12 read-back: no customer row is swallowed as a phantom employee',
+    ['24314', '24403'].map((ap) => (job(ap)?.employees ?? []).map((e) => e.username)),
+    [['leo@x.com'], ['juan@x.com']],
+  );
+  check(
+    'R12 read-back: the Utah job comes back in the UT section with its hours and people',
+    [
+      job('24222')?.section,
+      job('24222')?.total,
+      (job('24222')?.employees ?? []).map((e) => [e.username, e.total, e.qbHours]),
+      job('27000')?.customer,
+    ],
+    ['ut', 9.5, [['ute1@x.com', 6, 5.5], ['ute2@x.com', 3.5, null]], 'Brand New Utah Co'],
+  );
+  const bottomCustomers = completed.jobs.filter((j) => j.section !== 'nv').map((j) => j.customer);
+  check('R12 read-back: every bottom-section job has a customer', bottomCustomers.every((c) => c !== ''), true);
+
+  // …and the way next week's %'s report (input #8) reads it.
+  const asLastWeek = parseLastWeekPivotByJob(asInput);
+  check(
+    'R12 read-back as input #8: customers come from customer rows, never an employee row',
+    ['24314', '24403', '24222'].map((ap) => asLastWeek.find((r) => r.apKey === ap)?.customer),
+    ['Aaron Ward', 'CCSD', job('24222')?.customer],
+  );
+}
+
 testExport()
   .then(() => testEditRoundTrip())
+  .then(() => testRound12())
   .catch((err: unknown) => {
     failures++;
     console.error('  FAIL  export threw:', err);

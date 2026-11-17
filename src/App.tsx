@@ -2538,9 +2538,15 @@ function manualToCompleted(
     notes: row.notes,
     hourly: row.percent === 'HOURLY' || /^hourly$/i.test(row.crewLead),
     excludedFromPayroll: row.excludedFromPayroll,
-    byDate: {},
-    total: 0,
-    employees: [],
+    // Round 12 — a Utah job with timesheet hours carries them, as the file does.
+    byDate: row.byDate ?? {},
+    total: row.total ?? 0,
+    employees: (row.employees ?? []).map((e) => ({
+      username: e.username,
+      byDate: e.byDate,
+      total: e.total,
+      qbHours: e.qbHours,
+    })),
   };
 }
 

@@ -1,6 +1,12 @@
 import { useState, type CSSProperties } from 'react';
 import { fmtAccounting, fmtHoursFixed, fmtPercent, isDarkColor, parseMoneyInput, parsePercentInput } from '../lib/format';
-import { fmtMonthDay, weekdayShort } from '../lib/pivotByJob';
+import {
+  fmtMonthDay,
+  PBJ_GRAND_ROW_ID,
+  pbjCustomerRowId,
+  pbjEmployeeRowId,
+  weekdayShort,
+} from '../lib/pivotByJob';
 import type { ManualSectionRow, PbjJobEdit, PercentValue, PivotByJobModel } from '../lib/types';
 import { CellInput } from './CellInput';
 
@@ -86,6 +92,59 @@ function EditCell(props: {
 }): JSX.Element {
   return <CellInput {...props} />;
 }
+
+/**
+ * Round 12 — the analysis block of a row that is not a job (customer,
+ * employee, Grand Total). Every cell of `On Calendar?` and `Notes` is
+ * editable, so these rows get the two inputs in their own columns instead of
+ * one blank merged cell. `leading` is the QB Hrs cell when the row has one.
+ */
+function RowNoteCells({
+  onCalendar,
+  notes,
+  onEdit,
+  cellStyle,
+  notesColor,
+  leading,
+  bold,
+}: {
+  onCalendar: string;
+  notes: string;
+  onEdit: (patch: { onCalendar?: string; notes?: string }) => void;
+  cellStyle?: CSSProperties;
+  notesColor: string;
+  leading?: JSX.Element;
+  bold?: boolean;
+}): JSX.Element {
+  const weight = bold ? 'font-bold' : '';
+  return (
+    <>
+      {leading ?? <td className="xcell" style={cellStyle} />}
+      <td className="xcell" style={cellStyle} />
+      <td className={`xcell text-center ${weight}`} style={cellStyle}>
+        <EditCell
+          value={onCalendar}
+          onCommit={(t) => onEdit({ onCalendar: t.trim() })}
+          className="text-center focus:text-black"
+          title="On Calendar? — type to add text on this row"
+        />
+      </td>
+      <td className="xcell" style={cellStyle} colSpan={ANALYSIS_COLS - 3} />
+      <td className={`xcell ${weight}`} style={{ ...cellStyle, color: notesColor }}>
+        <EditCell
+          value={notes}
+          onCommit={(t) => onEdit({ notes: t })}
+          className="focus:text-[#C00000]"
+          title="Notes — type to add a note on this row"
+        />
+      </td>
+      <td className="xcell" style={cellStyle} />
+    </>
+  );
+}
+
+/** Notes text: dark red, lightened on a dark estimator band so it stays readable. */
+const notesColorOn = (hex: string | null): string => (hex && isDarkColor(hex) ? '#FFC7C7' : '#C00000');
 
 const money = (v: number | null): string => (v !== null ? `$${fmtAccounting(v)}` : '');
 const pctText = (v: number | null): string => (v !== null ? `${Math.round(v * 100)}%` : '');
@@ -220,7 +279,14 @@ export function PivotByJobTable(props: PivotByJobTableProps): JSX.Element {
             <td className="xcell text-right font-bold" style={GRAY}>
               {fmtHoursFixed(model.grandTotal)}
             </td>
-            <td className="xcell" style={GRAY} colSpan={1 + ANALYSIS_COLS + 1} />
+            <RowNoteCells
+              onCalendar={model.grandOnCalendar ?? ''}
+              notes={model.grandNotes ?? ''}
+              onEdit={(patch) => onEditJob(PBJ_GRAND_ROW_ID, patch)}
+              cellStyle={GRAY}
+              notesColor="#fff"
+              bold
+            />
           </tr>
         </tbody>
 
@@ -229,8 +295,11 @@ export function PivotByJobTable(props: PivotByJobTableProps): JSX.Element {
           title={model.title.replace('NV PAYROLL:', 'NV PAYROLL (BALANCES):')}
           rows={model.balances}
           dateCount={dateCount}
+          dateIsos={model.dateIsos}
           totalCols={totalCols}
           headerRow={headerRow}
+          onEditJob={onEditJob}
+          onEditQbHours={onEditQbHours}
           onManualEdit={props.onManualEdit}
           onManualAdd={props.onManualAdd}
           onManualDelete={props.onManualDelete}
@@ -240,8 +309,11 @@ export function PivotByJobTable(props: PivotByJobTableProps): JSX.Element {
           title={model.title.replace('NV PAYROLL:', 'UT PAYROLL:')}
           rows={model.utPayroll}
           dateCount={dateCount}
+          dateIsos={model.dateIsos}
           totalCols={totalCols}
           headerRow={headerRow}
+          onEditJob={onEditJob}
+          onEditQbHours={onEditQbHours}
           onManualEdit={props.onManualEdit}
           onManualAdd={props.onManualAdd}
           onManualDelete={props.onManualDelete}
@@ -292,7 +364,14 @@ function CustomerBlock({
         <td className="xcell text-right font-bold" style={hb}>
           {fmtHoursFixed(cust.total)}
         </td>
-        <td className="xcell" style={hb} colSpan={1 + ANALYSIS_COLS + 1} />
+        <RowNoteCells
+          onCalendar={cust.onCalendar ?? ''}
+          notes={cust.notes ?? ''}
+          onEdit={(patch) => onEditJob(pbjCustomerRowId(cust.customer), patch)}
+          cellStyle={hb}
+          notesColor={notesColorOn(cust.colorHex)}
+          bold
+        />
       </tr>
       {custOpen &&
         cust.jobs.map((job) => (
@@ -377,8 +456,14 @@ function JobBlock({
             className="text-center"
           />
         </td>
+        {/* Round 12 — On Calendar? is editable; clearing it brings the computed value back. */}
         <td className={`xcell text-center font-bold ${a.onCalendar === 'NOT ON CALENDAR' ? 'text-red-700' : ''}`}>
-          {a.onCalendar}
+          <EditCell
+            value={a.onCalendar}
+            onCommit={(t) => edit({ onCalendar: t.trim() === '' ? undefined : t.trim() })}
+            className="text-center"
+            title="Type to override; clear the cell to go back to the calendar lookup"
+          />
         </td>
         {/* Round 11 — Estimator is editable on every row. */}
         <td className="xcell text-center font-bold">
@@ -439,8 +524,8 @@ function JobBlock({
             {a.percentOverride && <OverrideBadge live={a.livePercent} onRelink={() => edit({ percent: undefined })} />}
           </span>
         </td>
-        <td className="xcell font-bold" style={{ color: style && isDarkColor(job.colorHex ?? 'FFFFFF') ? '#FFC7C7' : '#C00000' }}>
-          <EditCell value={a.notes} onCommit={(t) => edit({ notes: t })} />
+        <td className="xcell font-bold" style={{ color: notesColorOn(job.colorHex) }}>
+          <EditCell value={a.notes} onCommit={(t) => edit({ notes: t })} className="focus:text-[#C00000]" title="Notes" />
         </td>
         <td className="xcell" />
       </tr>
@@ -454,17 +539,24 @@ function JobBlock({
               </td>
             ))}
             <td className="xcell text-right">{fmtHoursFixed(emp.total)}</td>
-            <td className="xcell text-right" title="QB Hrs override — used downstream instead of the computed hours">
-              <EditCell
-                value={emp.qbHours !== null ? String(emp.qbHours) : ''}
-                onCommit={(t) => {
-                  const n = Number(t.trim());
-                  onEditQbHours(job.id, emp.username, t.trim() === '' || !Number.isFinite(n) ? null : n);
-                }}
-                className="text-right font-semibold"
-              />
-            </td>
-            <td className="xcell" colSpan={ANALYSIS_COLS + 1} />
+            <RowNoteCells
+              onCalendar={emp.onCalendar ?? ''}
+              notes={emp.notes ?? ''}
+              onEdit={(patch) => onEditJob(pbjEmployeeRowId(job.id, emp.username), patch)}
+              notesColor={notesColorOn(job.colorHex)}
+              leading={
+                <td className="xcell text-right" title="QB Hrs override — used downstream instead of the computed hours">
+                  <EditCell
+                    value={emp.qbHours !== null ? String(emp.qbHours) : ''}
+                    onCommit={(t) => {
+                      const n = Number(t.trim());
+                      onEditQbHours(job.id, emp.username, t.trim() === '' || !Number.isFinite(n) ? null : n);
+                    }}
+                    className="text-right font-semibold"
+                  />
+                </td>
+              }
+            />
           </tr>
         ))}
     </>
@@ -481,8 +573,11 @@ function ManualSection({
   title,
   rows,
   dateCount,
+  dateIsos,
   totalCols,
   headerRow,
+  onEditJob,
+  onEditQbHours,
   onManualEdit,
   onManualAdd,
   onManualDelete,
@@ -491,9 +586,13 @@ function ManualSection({
   title: string;
   rows: ManualSectionRow[];
   dateCount: number;
+  dateIsos: string[];
   totalCols: number;
   headerRow: (title: string, sticky: boolean) => JSX.Element;
-} & Pick<PivotByJobTableProps, 'onManualEdit' | 'onManualAdd' | 'onManualDelete'>): JSX.Element {
+} & Pick<
+  PivotByJobTableProps,
+  'onEditJob' | 'onEditQbHours' | 'onManualEdit' | 'onManualAdd' | 'onManualDelete'
+>): JSX.Element {
   return (
     <tbody>
       {/* Visual gap between sections, inside the same column grid. */}
@@ -507,7 +606,7 @@ function ManualSection({
             No rows.{' '}
             {section === 'balances'
               ? 'Partially-paid NV jobs from last week (slot 8) seed here.'
-              : 'Utah-calendar events and last week’s open UT rows seed here.'}
+              : 'Utah timesheet jobs (slot 2), Utah-calendar events and last week’s open UT rows seed here.'}
           </td>
         </tr>
       )}
@@ -518,6 +617,9 @@ function ManualSection({
           r={r}
           style={r.excludedFromPayroll ? EXCLUSION_GRAY : bandStyle(r.colorHex)}
           dateCount={dateCount}
+          dateIsos={dateIsos}
+          onEditJob={onEditJob}
+          onEditQbHours={onEditQbHours}
           onManualEdit={onManualEdit}
           onManualDelete={onManualDelete}
         />
@@ -538,6 +640,9 @@ function ManualPair({
   r,
   style,
   dateCount,
+  dateIsos,
+  onEditJob,
+  onEditQbHours,
   onManualEdit,
   onManualDelete,
 }: {
@@ -545,17 +650,51 @@ function ManualPair({
   r: ManualSectionRow;
   style: CSSProperties | undefined;
   dateCount: number;
+  dateIsos: string[];
+  onEditJob: PivotByJobTableProps['onEditJob'];
+  onEditQbHours: PivotByJobTableProps['onEditQbHours'];
   onManualEdit: PivotByJobTableProps['onManualEdit'];
   onManualDelete: PivotByJobTableProps['onManualDelete'];
 }): JSX.Element {
   const edit = (patch: Partial<ManualSectionRow>): void => onManualEdit(section, r.id, patch);
+  /**
+   * Round 12 — a Utah job with timesheet hours shows them the way the pivot
+   * above does: hours by day on the customer and job rows, then one row per
+   * employee. A no-hours job keeps the merged free-text cell.
+   */
+  const hours = r.byDate && r.total !== undefined ? { byDate: r.byDate, total: r.total } : null;
+  const hourCells = (byDate: Record<string, number>, bold: boolean): JSX.Element[] =>
+    dateIsos.map((iso) => (
+      <td key={iso || 'blank'} className={`xcell text-right ${bold ? 'font-bold' : ''}`}>
+        {byDate[iso] !== undefined ? fmtHoursFixed(byDate[iso]) : ''}
+      </td>
+    ));
   return (
     <>
       <tr style={style}>
         <td className="xcell font-bold">
           <EditCell value={r.customer} onCommit={(t) => edit({ customer: t })} />
         </td>
-        <td className="xcell" colSpan={dateCount + 2 + ANALYSIS_COLS + 1} />
+        {hours ? (
+          <>
+            {hourCells(hours.byDate, true)}
+            <td className="xcell text-right font-bold">{fmtHoursFixed(hours.total)}</td>
+          </>
+        ) : (
+          <td className="xcell" colSpan={dateCount + 1} />
+        )}
+        <RowNoteCells
+          onCalendar={r.customerOnCalendar ?? ''}
+          notes={r.customerNotes ?? ''}
+          onEdit={(patch) =>
+            edit({
+              ...(patch.onCalendar !== undefined ? { customerOnCalendar: patch.onCalendar } : {}),
+              ...(patch.notes !== undefined ? { customerNotes: patch.notes } : {}),
+            })
+          }
+          notesColor={r.excludedFromPayroll ? '#C00000' : notesColorOn(r.colorHex)}
+          bold
+        />
       </tr>
       <tr style={style}>
         <td className="xcell pl-4 font-bold">
@@ -566,20 +705,32 @@ function ManualPair({
           columns and Total hrs are one merged, centered cell the user can type
           in. It exports merged the same way.
         */}
-        <td className="xcell text-center" colSpan={dateCount + 1}>
-          <EditCell
-            value={r.hoursNote ?? ''}
-            onCommit={(t) => edit({ hoursNote: t })}
-            className="text-center"
-            placeholder="—"
-          />
-        </td>
+        {hours ? (
+          <>
+            {hourCells(hours.byDate, true)}
+            <td className="xcell text-right font-bold">{fmtHoursFixed(hours.total)}</td>
+          </>
+        ) : (
+          <td className="xcell text-center" colSpan={dateCount + 1}>
+            <EditCell
+              value={r.hoursNote ?? ''}
+              onCommit={(t) => edit({ hoursNote: t })}
+              className="text-center"
+              placeholder="—"
+            />
+          </td>
+        )}
         <td className="xcell" />
         <td className="xcell text-center">
           <EditCell value={r.apKey ?? ''} onCommit={(t) => edit({ apKey: t.trim() || null })} className="text-center" />
         </td>
         <td className={`xcell text-center ${r.onCalendar === 'NOT ON CALENDAR' ? 'text-red-700' : ''}`}>
-          {r.onCalendar ?? ''}
+          <EditCell
+            value={r.onCalendar ?? ''}
+            onCommit={(t) => edit({ onCalendar: t.trim() === '' ? undefined : t.trim() })}
+            className="text-center"
+            title="Type to override; clear the cell to go back to the calendar lookup"
+          />
         </td>
         <td className="xcell text-center">
           <EditCell value={r.estimator} onCommit={(t) => edit({ estimator: t.trim().toUpperCase() })} className="text-center" />
@@ -617,8 +768,8 @@ function ManualPair({
             {r.percentOverride && <OverrideBadge live={r.livePercent} onRelink={() => edit({ percent: undefined })} />}
           </span>
         </td>
-        <td className="xcell" style={{ color: '#C00000' }}>
-          <EditCell value={r.notes} onCommit={(t) => edit({ notes: t })} />
+        <td className="xcell" style={{ color: r.excludedFromPayroll ? '#C00000' : notesColorOn(r.colorHex) }}>
+          <EditCell value={r.notes} onCommit={(t) => edit({ notes: t })} className="focus:text-[#C00000]" title="Notes" />
         </td>
         <td className="xcell text-center">
           <span className="inline-flex items-center gap-1">
@@ -650,6 +801,31 @@ function ManualPair({
           </span>
         </td>
       </tr>
+      {(r.employees ?? []).map((emp) => (
+        <tr key={emp.username} style={style}>
+          <td className="xcell pl-8">{emp.username}</td>
+          {hourCells(emp.byDate, false)}
+          <td className="xcell text-right">{fmtHoursFixed(emp.total)}</td>
+          <RowNoteCells
+            onCalendar={emp.onCalendar ?? ''}
+            notes={emp.notes ?? ''}
+            onEdit={(patch) => onEditJob(pbjEmployeeRowId(r.id, emp.username), patch)}
+            notesColor={r.excludedFromPayroll ? '#C00000' : notesColorOn(r.colorHex)}
+            leading={
+              <td className="xcell text-right" title="QB Hrs override — used downstream instead of the computed hours">
+                <EditCell
+                  value={emp.qbHours !== null ? String(emp.qbHours) : ''}
+                  onCommit={(t) => {
+                    const n = Number(t.trim());
+                    onEditQbHours(r.id, emp.username, t.trim() === '' || !Number.isFinite(n) ? null : n);
+                  }}
+                  className="text-right font-semibold"
+                />
+              </td>
+            }
+          />
+        </tr>
+      ))}
     </>
   );
 }

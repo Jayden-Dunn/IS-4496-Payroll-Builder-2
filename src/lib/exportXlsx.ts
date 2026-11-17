@@ -1040,10 +1040,40 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
     }
   };
 
+  /**
+   * Round 12 — `On Calendar?` / `Notes` text typed on a row that is not a job
+   * (customer, employee, Grand Total). Written only when there is something
+   * to write, so an untouched row keeps the styling `fillRow` gave it.
+   */
+  const writeRowNotes = (
+    row: ExcelJS.Row,
+    text: { onCalendar?: string; notes?: string },
+    hex: string | null,
+    opts: { notesColor?: string } = {},
+  ): void => {
+    const fill = hex ? { fill: 'FF' + hex } : {};
+    if (text.onCalendar) {
+      const cell = row.getCell(analysisStart + 1);
+      cell.value = text.onCalendar;
+      paint(cell, { ...fill, color: hex ? textOn(hex) : BLACK, bold: true });
+      cell.alignment = { horizontal: 'center', vertical: 'middle' };
+    }
+    if (text.notes) {
+      const cell = row.getCell(lastCol);
+      cell.value = text.notes;
+      paint(cell, {
+        ...fill,
+        color: opts.notesColor ?? (hex && isDarkColor(hex) ? 'FFFFC7C7' : DARK_RED),
+        bold: true,
+      });
+    }
+  };
+
   for (const cust of model.customers) {
     const cRow = ws.addRow([cust.customer, ...hourVals(cust.byDate), cust.total]);
     cRow.outlineLevel = 0;
     fillRow(cRow, cust.colorHex, true);
+    writeRowNotes(cRow, cust, cust.colorHex);
     // Round 10 — one line above the customer's first job block.
     edgeBorder(cRow, 'top');
     for (const job of cust.jobs) {
@@ -1096,6 +1126,7 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
         const eRow = ws.addRow([emp.username, ...hourVals(emp.byDate), emp.total, emp.qbHours ?? '']);
         eRow.outlineLevel = 2;
         fillRow(eRow, job.colorHex);
+        writeRowNotes(eRow, emp, job.colorHex);
         const qb = eRow.getCell(qbCol);
         if (typeof qb.value === 'number') {
           qb.numFmt = HOURS_FMT;
@@ -1121,6 +1152,15 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
     if (typeof cell.value === 'number') cell.numFmt = HOURS_FMT;
     cell.border = { top: { style: 'double' } };
   }
+  {
+    // Round 12 — typed Grand Total text, white on the gray band like the label.
+    const onCal = gRow.getCell(analysisStart + 1);
+    if (model.grandOnCalendar) {
+      onCal.value = model.grandOnCalendar;
+      onCal.alignment = { horizontal: 'center', vertical: 'middle' };
+    }
+    if (model.grandNotes) gRow.getCell(lastCol).value = model.grandNotes;
+  }
 
   // Round 5 §3.2 — single black header row per manual section; pair box-borders kept.
   const manualSection = (title: string, rows: ManualSectionRow[]): void => {
@@ -1133,7 +1173,18 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
       const cRow = ws.addRow([r.customer]);
       cRow.outlineLevel = 0;
       fillRow(cRow, rowHex, true);
-      const jRow = ws.addRow([r.job]);
+      // Round 12 — a Utah job with timesheet hours carries them on both rows
+      // of the pair, like a customer/job in the pivot above.
+      const hours = r.byDate && r.total !== undefined ? { byDate: r.byDate, total: r.total } : null;
+      if (hours) {
+        hourVals(hours.byDate).forEach((v, i) => {
+          cRow.getCell(2 + i).value = v;
+        });
+        cRow.getCell(totalCol).value = hours.total;
+        fillRow(cRow, rowHex, true);
+      }
+      writeRowNotes(cRow, { onCalendar: r.customerOnCalendar, notes: r.customerNotes }, rowHex);
+      const jRow = ws.addRow(hours ? [r.job, ...hourVals(hours.byDate), hours.total] : [r.job]);
       jRow.outlineLevel = 1;
       const cells: (string | number)[] = [
         r.apKey ?? '',
@@ -1167,21 +1218,37 @@ function buildPivotByJobSheet(wb: ExcelJS.Workbook, model: PivotByJobModel): voi
        * columns and Total hrs merge into one centered, typeable cell. Written
        * after the fills: a merged range takes the first cell's style.
        */
-      jRow.getCell(2).value = r.hoursNote ?? '';
-      jRow.getCell(2).alignment = { horizontal: 'center', vertical: 'middle' };
-      ws.mergeCells(jRow.number, 2, jRow.number, totalCol);
-      for (let c = 1; c <= lastCol; c++) {
-        cRow.getCell(c).border = {
-          top: { style: 'thin' },
-          ...(c === 1 ? { left: { style: 'thin' } } : {}),
-          ...(c === lastCol ? { right: { style: 'thin' } } : {}),
-        };
-        jRow.getCell(c).border = {
-          bottom: { style: 'thin' },
-          ...(c === 1 ? { left: { style: 'thin' } } : {}),
-          ...(c === lastCol ? { right: { style: 'thin' } } : {}),
-        };
+      if (!hours) {
+        jRow.getCell(2).value = r.hoursNote ?? '';
+        jRow.getCell(2).alignment = { horizontal: 'center', vertical: 'middle' };
+        ws.mergeCells(jRow.number, 2, jRow.number, totalCol);
       }
+      // Round 12 — the people who clocked the hours, one row each.
+      const blockRows: ExcelJS.Row[] = [cRow, jRow];
+      for (const emp of r.employees ?? []) {
+        const eRow = ws.addRow([emp.username, ...hourVals(emp.byDate), emp.total, emp.qbHours ?? '']);
+        eRow.outlineLevel = 2;
+        fillRow(eRow, rowHex);
+        writeRowNotes(eRow, emp, rowHex);
+        const qb = eRow.getCell(qbCol);
+        if (typeof qb.value === 'number') {
+          qb.numFmt = HOURS_FMT;
+          qb.font = { ...baseFont, color: { argb: DARK_RED } };
+        }
+        blockRows.push(eRow);
+      }
+      // One box around the whole block: top on the customer row, bottom on the
+      // last row, sides all the way down.
+      blockRows.forEach((row, ri) => {
+        for (let c = 1; c <= lastCol; c++) {
+          row.getCell(c).border = {
+            ...(ri === 0 ? { top: { style: 'thin' } } : {}),
+            ...(ri === blockRows.length - 1 ? { bottom: { style: 'thin' } } : {}),
+            ...(c === 1 ? { left: { style: 'thin' } } : {}),
+            ...(c === lastCol ? { right: { style: 'thin' } } : {}),
+          };
+        }
+      });
     }
   };
   manualSection(model.title.replace('NV PAYROLL:', 'NV PAYROLL (BALANCES):'), model.balances);

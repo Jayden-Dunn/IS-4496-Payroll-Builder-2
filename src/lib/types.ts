@@ -27,6 +27,12 @@ export interface SheetData {
    * styles and the sheet actually had any.
    */
   fills?: (CellFill | null)[][];
+  /**
+   * Round 12 — Excel outline (grouping) level per row, aligned to `rows`;
+   * only present when the sheet has grouped rows. On a `Pivot by Job` sheet
+   * the level IS the row's kind: 0 customer, 1 job, 2 employee.
+   */
+  rowLevels?: number[];
 }
 
 export interface WorkbookData {
@@ -600,6 +606,9 @@ export interface PbjEmployeeRow {
   byDate: Record<string, number>; // ISO date → hours
   total: number;
   qbHours: number | null; // column K override (editable)
+  /** Round 12 — free text typed in this row's On Calendar? / Notes cells. */
+  onCalendar?: string;
+  notes?: string;
 }
 
 export interface PbjJobRow {
@@ -619,6 +628,9 @@ export interface PbjCustomerBlock {
   total: number;
   jobs: PbjJobRow[];
   colorHex: string | null; // first job's color
+  /** Round 12 — free text typed in this row's On Calendar? / Notes cells. */
+  onCalendar?: string;
+  notes?: string;
 }
 
 /** Manual BALANCES / UT PAYROLL section row (§4.6). */
@@ -650,6 +662,17 @@ export interface ManualSectionRow {
    * `TimeNavi row N`, or `NOT ON CALENDAR`.
    */
   onCalendar?: string;
+  /** Round 12 — free text on the CUSTOMER row of the pair (On Calendar? / Notes). */
+  customerOnCalendar?: string;
+  customerNotes?: string;
+  /**
+   * Round 12 — a Utah job with timesheet hours this week (input #2): its
+   * hours by date, the total, and the people who clocked them. Absent on a
+   * no-hours row, which keeps the merged `hoursNote` cell instead.
+   */
+  byDate?: Record<string, number>;
+  total?: number;
+  employees?: PbjEmployeeRow[];
   /**
    * Round 11 — a no-hours job has nothing under its date columns, so those
    * cells (dates + Total hrs) merge into one free-text cell. Editable, and
@@ -667,6 +690,9 @@ export interface PivotByJobModel {
   grandTotal: number;
   balances: ManualSectionRow[];
   utPayroll: ManualSectionRow[];
+  /** Round 12 — free text typed on the Grand Total row (On Calendar? / Notes). */
+  grandOnCalendar?: string;
+  grandNotes?: string;
   /**
    * Round 8 §4.3 — carried AP#s whose customer resolved from neither the Sales
    * by Customer Summary uploads nor the P&L header structure.
@@ -693,6 +719,11 @@ export interface PbjJobEdit {
    */
   percentSeed?: PercentValue;
   notes?: string;
+  /**
+   * Round 12 — typed `On Calendar?` text. Wins over the computed
+   * `TimeNavi row N` / `NOT ON CALENDAR`; `undefined` relinks the cell.
+   */
+  onCalendar?: string;
   /** Round 6 §7.1 — when true, force non–Davis-Bacon even if the job text matches a pattern. */
   dbOverride?: boolean;
 }
