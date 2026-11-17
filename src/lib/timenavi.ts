@@ -28,9 +28,42 @@ import type {
  * `% Completion` above a newer HOURLY entry.
  */
 const STATUS_DATE_RE = /^\s*[♦◆•*>\-–—]*\s*(\d{1,2})\/(\d{1,2})\/(\d{2,4})\b/;
+/**
+ * Round 12 — the same opening with the year left off ("9/04/HOURLY - JT",
+ * "10/9 50% COMPLETE"). Only trusted when the line also states a status, so a
+ * plain dated note ("10/9 STILL HAVE 2 MORE RMS TO GO") never becomes a week.
+ */
+const STATUS_DATE_NO_YEAR_RE = /^\s*[♦◆•*>\-–—]*\s*(\d{1,2})\/(\d{1,2})(?![\d])/;
 const PCT_RE = /(\d{1,3}(?:\.\d+)?)\s*%/;
 /** "no pay", "no-pay", "nopay" — a week the job was not paid; never a "last paid". */
 const NO_PAY_RE = /\bno[\s-]*pay\b/i;
+/**
+ * Round 12 — two entries run together on one line
+ * ("11/06/26 HOURLY -SH10/09/26 No Pay -SH"). A date in the middle of a line
+ * starts a new entry only when a status follows it, so a date mentioned in
+ * passing ("touch-ups due 7/10/26") stays part of its own line.
+ */
+const INLINE_ENTRY_RE =
+  /(^|[^\d/])(\d{1,2}\/\d{1,2}\/\d{2,4}\s*[-–—:]?\s*(?:\d{1,3}(?:\.\d+)?\s*%|hourly|no[\s-]*pay|subbed|set\s*rate))/gi;
+
+/** Cut one text line into its entries; almost always just the line itself. */
+function splitInlineEntries(raw: string): string[] {
+  const cuts: number[] = [];
+  INLINE_ENTRY_RE.lastIndex = 0;
+  for (let m = INLINE_ENTRY_RE.exec(raw); m; m = INLINE_ENTRY_RE.exec(raw)) {
+    const at = m.index + m[1].length;
+    if (at > 0) cuts.push(at);
+  }
+  if (cuts.length === 0) return [raw];
+  const out: string[] = [];
+  let from = 0;
+  for (const at of cuts) {
+    out.push(raw.slice(from, at));
+    from = at;
+  }
+  out.push(raw.slice(from));
+  return out;
+}
 
 interface StatusLine {
   date: Date;
@@ -45,14 +78,30 @@ function statusLineDate(month: string, day: string, year: string): Date {
   return new Date(y, Number(month) - 1, Number(day));
 }
 
-function extractStatusLines(description: string): StatusLine[] {
+function extractStatusLines(description: string, payDate: Date): StatusLine[] {
   const out: StatusLine[] = [];
   for (const raw of description.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (!line) continue;
-    const m = STATUS_DATE_RE.exec(line);
-    if (!m) continue;
-    out.push({ date: statusLineDate(m[1], m[2], m[3]), line, order: out.length });
+    // The first piece keeps whatever leads the line; later pieces each open
+    // with their own date.
+    for (const piece of splitInlineEntries(raw)) {
+      const line = piece.trim();
+      if (!line) continue;
+      const m = STATUS_DATE_RE.exec(line);
+      if (m) {
+        out.push({ date: statusLineDate(m[1], m[2], m[3]), line, order: out.length });
+        continue;
+      }
+      const short = STATUS_DATE_NO_YEAR_RE.exec(line);
+      if (!short) continue;
+      if (readStatusValue(line.slice(short[0].length)) === null && !NO_PAY_RE.test(line)) continue;
+      // No year written: the latest such date that is not after the pay date.
+      const payYear = payDate.getFullYear();
+      let date = statusLineDate(short[1], short[2], String(payYear));
+      if (dateOnly(date).getTime() > dateOnly(payDate).getTime()) {
+        date = statusLineDate(short[1], short[2], String(payYear - 1));
+      }
+      out.push({ date, line, order: out.length });
+    }
   }
   return out;
 }
@@ -92,11 +141,14 @@ export interface DescriptionPercents {
   current: { value: PercentValue; line: string | null };
   /**
    * The most recent ACTUAL percentage below this week's line, skipping "no
-   * pay" weeks and any line that is not a percentage (HOURLY, subbed, set
+   * pay" weeks, 0% and any line that is not a percentage (HOURLY, subbed, set
    * rate). Not necessarily last week: a job unpaid for three weeks still
    * reports the last % it was actually paid at.
+   *
+   * Round 12 — when no earlier line carries a percentage but one says HOURLY,
+   * the job was last paid by the hour, and this reads `'HOURLY'`.
    */
-  previous: { value: number; line: string } | null;
+  previous: { value: PrevPercent; line: string } | null;
   /**
    * True when this week's line is the only dated line on or before the pay
    * date. That means the job started this pay week, so there IS no last paid
@@ -113,7 +165,7 @@ export interface DescriptionPercents {
 export function readDescriptionPercents(description: string, payDate: Date | null): DescriptionPercents {
   const none: DescriptionPercents = { current: { value: null, line: null }, previous: null, onlyCurrent: false };
   if (!payDate) return none;
-  const lines = extractStatusLines(description);
+  const lines = extractStatusLines(description, payDate);
   if (lines.length === 0) return none;
 
   const currentLine = selectCurrentLine(lines, payDate);
@@ -130,14 +182,19 @@ export function readDescriptionPercents(description: string, payDate: Date | nul
     .sort((a, b) => dateOnly(b.date).getTime() - dateOnly(a.date).getTime() || a.order - b.order);
 
   let previous: DescriptionPercents['previous'] = null;
+  let lastHourly: StatusLine | null = null;
   for (const s of older) {
     if (NO_PAY_RE.test(s.line)) continue;
     const v = readStatusValue(s.line);
-    if (typeof v === 'number') {
+    // 0% paid nothing, so it is not a "last paid" either.
+    if (typeof v === 'number' && v > 0) {
       previous = { value: v, line: s.line };
       break;
     }
+    if (v === 'HOURLY' && !lastHourly) lastHourly = s;
   }
+  // Nothing but hourly weeks behind this one: last paid by the hour.
+  if (!previous && lastHourly) previous = { value: 'HOURLY', line: lastHourly.line };
   return { current, previous, onlyCurrent: others.length === 0 };
 }
 
@@ -164,7 +221,8 @@ export function lastPaidMapFromPivot(
   const m = new Map<string, number>();
   for (const r of rows ?? []) {
     const key = normalizeApInput(r.apKey);
-    if (!key || typeof r.percent !== 'number') continue;
+    // Round 12 — 0% is a week nothing was paid, not a percentage paid.
+    if (!key || typeof r.percent !== 'number' || r.percent <= 0) continue;
     // The last row for an AP# wins: the sheet is in row order, so a later row
     // is the more recent statement of what that job was paid to.
     m.set(key, r.percent);

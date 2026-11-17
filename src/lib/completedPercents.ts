@@ -483,8 +483,39 @@ function parsePivotByJobSheet(
       continue;
     }
 
-    // Non-AP row: employee under current job, or a new customer label.
-    if (collectingEmployees && currentJob && a) {
+    /**
+     * Non-AP row: an employee under the current job, or a new customer label.
+     *
+     * Round 12 — the two used to be told apart by position alone ("anything
+     * after a job is an employee"), so the NEXT customer's row was swallowed
+     * as a phantom employee of the previous job and every later job kept the
+     * first customer's name. The sheet's outline level settles it when the
+     * file has one (the %'s export always does): 0 customer, 1 job, 2
+     * employee. A file with no grouping falls back to looking ahead — a
+     * customer row is always followed directly by its first job.
+     */
+    const level = sheet.rowLevels?.[i];
+    let isEmployeeRow: boolean;
+    if (level !== undefined) {
+      isEmployeeRow = level >= 2;
+      if (level === 1) {
+        // A job row with no AP#: nothing to key it by, and its employee rows
+        // must not attach to the job above.
+        collectingEmployees = false;
+        currentJob = null;
+        continue;
+      }
+    } else {
+      let next = i + 1;
+      while (next < sheet.rows.length && (!sheet.rows[next] || isEmptyRow(sheet.rows[next]))) next++;
+      const nextAp = next < sheet.rows.length ? cellAt(sheet.rows[next], layout.apCol) : null;
+      const nextIsJob =
+        nextAp != null && nextAp !== '' && String(nextAp).trim().toLowerCase() !== 'ap#';
+      // An e-mail style username is never a customer, whatever follows it.
+      isEmployeeRow = collectingEmployees && !(nextIsJob && !a.includes('@'));
+    }
+    if (isEmployeeRow) {
+      if (!currentJob || !a) continue;
       const hours = hoursFromRow(row, layout);
       const qb =
         layout.qbCol !== undefined ? parseNumberLoose(cellAt(row, layout.qbCol)) : null;

@@ -67,6 +67,9 @@ import {
   EMPTY_MANUAL_STATE,
   formatTimeNaviRow,
   parseTimeNaviRowRef,
+  PBJ_GRAND_ROW_ID,
+  pbjCustomerRowId,
+  pbjEmployeeRowId,
   pbjJobId,
   type PivotByJobInput,
 } from './pivotByJob';
@@ -190,6 +193,64 @@ export function runSelfTests(): boolean {
     const r = readDescriptionPercents('9/11/26 20% next week\n9/04/26 70%\n8/28/26 50%', day(9, 4, 2026));
     check('R11 %: next week\'s note is neither current nor previous', [r.current.value, r.previous?.value], [0.7, 0.5]);
   }
+  // --- Round 12: the five calendar descriptions the office sent --------------
+  {
+    const nov6 = day(11, 6, 2026);
+    const read = (text: string): unknown[] => {
+      const r = readDescriptionPercents(text, nov6);
+      return [r.current.value, r.previous?.value ?? null];
+    };
+    check(
+      'R12 %: two entries run together on one line, then no-pay → HOURLY now, 50% last paid',
+      read(
+        '11/06/26 HOURLY -SH10/09/26 No Pay -SH\n10/02/26 50% COMPLETE\n9/04/26 33% COMPLETE - JT\n10/9 STILL HAVE 2 MORE RMS TO GO *',
+      ),
+      ['HOURLY', 0.5],
+    );
+    check(
+      'R12 %: no-pay weeks skipped → 50% now, 20% last paid',
+      read('11/06/26 50% COMPLETE -SH\n10/02/26 NO PAY - JD\n9/04/26 No pay - JT\n10/9/26 20% COMPLETE - JT'),
+      [0.5, 0.2],
+    );
+    check(
+      'R12 %: HOURLY now, HOURLY before, then a % → last paid is that %',
+      read('11/06/26 HOURLY -SH\n10/02/26 HOURLY\n9/04/26 20% COMPLETE - JT'),
+      ['HOURLY', 0.2],
+    );
+    check(
+      'R12 %: a % now, hourly weeks between, an older % → last paid is the older %',
+      read('11/06/26 50% COMPLETE -SH\n10/02/26 HOURLY\n9/04/26 30% COMPLETE - JT'),
+      [0.5, 0.3],
+    );
+    check(
+      'R12 %: nothing but hourly weeks behind (one with no year) → last paid HOURLY',
+      read('11/06/26 50% COMPLETE -SH\n10/02/26 HOURLY\n9/04/HOURLY - JT'),
+      [0.5, 'HOURLY'],
+    );
+    check(
+      'R12 %: a dated note with no status is not a week ("10/9 STILL HAVE 2 MORE RMS")',
+      read('11/06/26 40% COMPLETE\n10/9 STILL HAVE 2 MORE RMS TO GO'),
+      [0.4, null],
+    );
+    check(
+      'R12 %: a 0% week paid nothing, so it is skipped like a no-pay week',
+      read('11/06/26 60%\n10/30/26 0%\n10/23/26 25% COMPLETE'),
+      [0.6, 0.25],
+    );
+    check(
+      'R12 %: a date mentioned in passing does not split the line',
+      read('11/06/26 70% COMPLETE, touch-ups due 11/13/26\n10/30/26 45%'),
+      [0.7, 0.45],
+    );
+  }
+  check(
+    'R12 %: input #8 at 0% is not a percentage paid',
+    [...lastPaidMapFromPivot([
+      { apKey: '24314', percent: 0 },
+      { apKey: '24403', percent: 0.5 },
+    ]).entries()],
+    [['24403', 0.5]],
+  );
   check(
     'R11 %: input #8 map keeps only real percentages',
     [...lastPaidMapFromPivot([
@@ -2282,6 +2343,153 @@ export function runSelfTests(): boolean {
     [hourlyWo.hourly, hourlyWo.woOverride, hourlyWo.woPct, hourlyWo.estimator, hourlyWo.notes],
     [true, 1200, 0.4, 'PG', 'call first'],
   );
+
+  // --- Round 12: Utah timesheet hours, editable cells, auto color ------------
+  {
+    const utRow = (over: Partial<EnrichedTimesheetRow>): EnrichedTimesheetRow => ({
+      ...ownerEnriched[0],
+      sourceEntity: 'UT',
+      username: 'ut1@x.com',
+      fname: 'Ute',
+      lname: 'One',
+      jobcode1: 'Provo Cust',
+      jobcode2: 'AP26000 Ext',
+      apKey: '26000',
+      estimator: 'RF',
+      hours: 6,
+      ...over,
+    });
+    const withUt = buildPivotByJob(
+      pbjInput({
+        enriched: [
+          ...ownerEnriched,
+          utRow({}),
+          utRow({ username: 'ut2@x.com', hours: 3 }),
+          utRow({ hours: 2, jobcode2: 'Shop time', apKey: null, jobcode1: 'Utah Shop' }),
+        ],
+        reportRows: [tnRow('26000', 0.4, { event: 'AP26000 Ext', calendar: 'Utah' })],
+        qbHours: { 'ut:26000\u0000ut2@x.com': 2.5 },
+        edits: { [pbjEmployeeRowId('ut:26000', 'ut1@x.com')]: { notes: 'left early Tue' } },
+      }),
+    );
+    const ut26000 = [...withUt.utPayroll, ...withUt.balances].find((r) => r.apKey === '26000');
+    check(
+      'R12 UT: a Utah timesheet job shows its hours and employees under the bottom sections',
+      ut26000
+        ? [ut26000.total, ut26000.byDate, (ut26000.employees ?? []).map((e) => [e.username, e.total, e.qbHours, e.notes])]
+        : 'row not found',
+      [
+        9,
+        { '2026-06-30': 9 },
+        [
+          ['ut1@x.com', 6, null, 'left early Tue'],
+          ['ut2@x.com', 3, 2.5, ''],
+        ],
+      ],
+    );
+    check(
+      'R12 UT: one row per Utah job even when it is also on the Utah calendar',
+      [...withUt.utPayroll, ...withUt.balances].filter((r) => r.apKey === '26000').length,
+      1,
+    );
+    check(
+      'R12 UT: a Utah job with no AP# still gets a row with its hours',
+      withUt.utPayroll.filter((r) => r.apKey === null).map((r) => [r.customer, r.job, r.total]),
+      [['Utah Shop', 'Shop time', 2]],
+    );
+    check(
+      'R12 UT: Utah hours stay out of the NV tree and its Grand Total',
+      [withUt.customers.map((c) => c.customer), withUt.grandTotal],
+      [['Cust'], 8],
+    );
+    const carriedDone = buildPivotByJob(
+      pbjInput({
+        enriched: [utRow({})],
+        lastWeekPbj: [carryRow({ section: 'ut', apKey: '26000', job: 'AP26000 Ext', percent: 1, estimator: 'MH' })],
+      }),
+    );
+    check(
+      'R12 UT: a 100% job from input #8 comes back when Utah clocked hours on it',
+      carriedDone.utPayroll.map((r) => [r.apKey, r.total]),
+      [['26000', 6]],
+    );
+  }
+  {
+    const mhHex = pbjSettings.legend.find((l) => l.estimator === 'MH')?.color ?? null;
+    const added: ManualSectionRow = {
+      id: 'manual:balances:1',
+      customer: 'New Cust',
+      job: 'New Job',
+      apKey: null,
+      estimator: '',
+      crewLead: '',
+      woOverride: null,
+      woPct: null,
+      percent: null,
+      livePercent: null,
+      percentOverride: false,
+      excludedFromPayroll: false,
+      notes: '',
+      colorHex: null,
+    };
+    const build = (edit: Partial<ManualSectionRow>): ManualSectionRow =>
+      buildPivotByJob(
+        pbjInput({
+          reportRows: [tnRow('25000', 0.5)],
+          balancesState: { added: [added], deleted: [], edits: { [added.id]: edit } },
+        }),
+      ).balances[0];
+    check('R12: a hand-added row has no color until an estimator is typed', build({}).colorHex, null);
+    check(
+      'R12: typing an estimator colors a hand-added row',
+      [mhHex !== null, build({ estimator: 'MH' }).colorHex === mhHex, build({ estimator: 'mh' }).colorHex === mhHex],
+      [true, true, true],
+    );
+    check(
+      'R12: a hand-added row looks its typed AP# up on the calendar; a typed On Calendar? wins',
+      [
+        build({ apKey: 'AP25000' }).onCalendar,
+        build({ apKey: '99998' }).onCalendar,
+        build({ apKey: 'AP25000', onCalendar: 'starts Monday' }).onCalendar,
+        build({ customerNotes: 'call the GC', customerOnCalendar: 'see job' }).customerNotes,
+      ],
+      ['TimeNavi row 2', 'NOT ON CALENDAR', 'starts Monday', 'call the GC'],
+    );
+  }
+  {
+    const m = buildPivotByJob(
+      pbjInput({
+        enriched: ownerEnriched,
+        reportRows: [tnRow('25000', 0.5)],
+        edits: {
+          [liveJobId]: { onCalendar: 'moved to next week' },
+          [pbjCustomerRowId('Cust')]: { notes: 'customer note', onCalendar: 'cust cal' },
+          [pbjEmployeeRowId(liveJobId, 'antonio@x.com')]: { notes: 'employee note' },
+          [PBJ_GRAND_ROW_ID]: { notes: 'grand note' },
+        },
+      }),
+    );
+    check(
+      'R12: On Calendar? and Notes take typed text on job, customer, employee and Grand Total rows',
+      [
+        m.customers[0].jobs[0].analysis.onCalendar,
+        m.customers[0].notes,
+        m.customers[0].onCalendar,
+        m.customers[0].jobs[0].employees[0].notes,
+        m.grandNotes,
+        m.customers.length,
+      ],
+      ['moved to next week', 'customer note', 'cust cal', 'employee note', 'grand note', 1],
+    );
+    const relinked = buildPivotByJob(
+      pbjInput({
+        enriched: ownerEnriched,
+        reportRows: [tnRow('25000', 0.5)],
+        edits: { [liveJobId]: { onCalendar: undefined } },
+      }),
+    ).customers[0].jobs[0].analysis.onCalendar;
+    check('R12: clearing a typed On Calendar? brings the calendar lookup back', relinked, 'TimeNavi row 2');
+  }
 
   // §3.2 — the export writes a real cross-sheet formula.
   check(

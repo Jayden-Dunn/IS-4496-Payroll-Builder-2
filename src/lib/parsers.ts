@@ -36,6 +36,7 @@ export function readWorkbook(buffer: ArrayBuffer): WorkbookData {
       name,
       rows: raw.map((r) => r.map(toCellValue)),
       fills: ws ? readSheetFills(ws) : undefined,
+      rowLevels: ws ? readRowLevels(ws) : undefined,
     };
   });
   if (sheets.length === 0) throw new Error('The file contains no sheets.');
@@ -86,6 +87,25 @@ function readSheetFills(ws: XLSX.WorkSheet): (CellFill | null)[][] | undefined {
     grid.push(row);
   }
   return found ? grid : undefined;
+}
+
+/**
+ * Round 12 — row outline levels aligned to the `sheet_to_json` grid, or
+ * undefined when no row is grouped (CSV, or a sheet nobody outlined).
+ */
+function readRowLevels(ws: XLSX.WorkSheet): number[] | undefined {
+  const ref = ws['!ref'];
+  const info = ws['!rows'];
+  if (!ref || !info) return undefined;
+  const range = XLSX.utils.decode_range(ref);
+  const levels: number[] = [];
+  let found = false;
+  for (let r = range.s.r; r <= range.e.r; r++) {
+    const level = Number(info[r]?.level ?? 0) || 0;
+    if (level > 0) found = true;
+    levels.push(level);
+  }
+  return found ? levels : undefined;
 }
 
 /** True when any of the given columns on this row carries the A6A6A6 gray. */
@@ -638,7 +658,12 @@ export function parseLastWeekPivotByJob(wbd: WorkbookData): LastWeekPbjRow[] {
     if (typeof apRaw === 'string' && apRaw.trim().toLowerCase() === 'ap#') continue; // repeated header rows
     const apKey = apRaw == null || apRaw === '' ? null : normalizeApInput(String(apRaw));
     if (!apKey) {
-      if (a && !/^(row labels|grand total|sum of hours|nv payroll)/i.test(a)) {
+      // Round 12 — on a grouped sheet only an outline-level-0 row is a
+      // customer. Without this, the last EMPLOYEE row above a customer's
+      // second job was taken for that job's customer.
+      const level = sheet.rowLevels?.[i];
+      const isCustomerRow = level === undefined || level === 0;
+      if (isCustomerRow && a && !/^(row labels|grand total|sum of hours|nv payroll)/i.test(a)) {
         prevNonApText = a;
         prevNonApRow = i;
       }

@@ -4,7 +4,7 @@
  * auto-position below the pivot (obsoleting the Excel move-refresh-move
  * workaround).
  */
-import { timesheetApKey } from './apkey';
+import { normalizeApInput, timesheetApKey } from './apkey';
 import { buildCustomerByApResolver } from './customerByAp';
 import { lastPaidMapFromPivot } from './timenavi';
 import { dateToIso, fmtDate, round2 } from './format';
@@ -109,6 +109,21 @@ export function carriedSectionFor(
 export function pbjJobId(customer: string, jobcode2: string): string {
   return `${customer}\u0000${jobcode2}`;
 }
+
+/**
+ * Round 12 — edit keys for the rows that are not jobs. Every cell of the
+ * `On Calendar?` and `Notes` columns is editable, so the customer rows, the
+ * employee rows and the Grand Total row each need somewhere to keep what was
+ * typed. They live in the same edits map as the jobs; the \u0001 prefix keeps
+ * them clear of any job id (`customer\u0000job`).
+ */
+export function pbjCustomerRowId(customer: string): string {
+  return `\u0001cust\u0000${customer}`;
+}
+export function pbjEmployeeRowId(jobId: string, username: string): string {
+  return `\u0001emp\u0000${jobId}\u0000${username}`;
+}
+export const PBJ_GRAND_ROW_ID = '\u0001grand';
 
 /** A job is hourly when its % says HOURLY, its lead is HOURLY, or it's tagged T&M/[hrly]. */
 export function isHourlyJob(percent: JobAnalysis['percent'], crewLead: string, jobText: string): boolean {
@@ -215,21 +230,19 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
     rows: EnrichedTimesheetRow[];
   }
   const custs = new Map<string, Map<string, JobAcc>>();
-  enriched.forEach((r, idx) => {
-    if (r.hours === 0) return;
-    // Round 6 — UT timesheet hours belong under UT PAYROLL, not the NV pivot tree.
-    if (r.sourceEntity === 'UT') return;
-    const customer = r.jobcode1 || '(blank)';
-    let jobs = custs.get(customer);
-    if (!jobs) {
-      jobs = new Map();
-      custs.set(customer, jobs);
-    }
-    let job = jobs.get(r.jobcode2);
-    if (!job) {
-      job = { jobcode2: r.jobcode2, byDate: new Map(), total: 0, employees: new Map(), rows: [] };
-      jobs.set(r.jobcode2, job);
-    }
+  /**
+   * Round 12 — Utah timesheet hours (input #2), one entry per job. They stay
+   * out of the NV tree (Utah is paid from the UT PAYROLL section), but they are
+   * no longer thrown away: each Utah job with hours shows its daily hours and
+   * its employees under UT PAYROLL, the way an NV job does in the pivot above.
+   */
+  interface UtJobAcc extends JobAcc {
+    customer: string;
+    apKey: string | null;
+    estimator: string;
+  }
+  const utJobAccs = new Map<string, UtJobAcc>();
+  const addHours = (job: JobAcc, r: EnrichedTimesheetRow, idx: number): void => {
     const iso = r.localDate ? dateToIso(r.localDate) : '';
     job.byDate.set(iso, (job.byDate.get(iso) ?? 0) + r.hours);
     job.total += r.hours;
@@ -242,6 +255,42 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
     }
     emp.byDate.set(iso, (emp.byDate.get(iso) ?? 0) + r.hours);
     emp.total += r.hours;
+  };
+  enriched.forEach((r, idx) => {
+    if (r.hours === 0) return;
+    if (r.sourceEntity === 'UT') {
+      // One row per AP#; a job with no AP# is keyed by its own names.
+      const apKey = r.apKey ?? timesheetApKey(r.jobcode2);
+      const accKey = apKey ?? `\u0000${r.jobcode1}\u0000${r.jobcode2}`;
+      let acc = utJobAccs.get(accKey);
+      if (!acc) {
+        acc = {
+          jobcode2: r.jobcode2,
+          byDate: new Map(),
+          total: 0,
+          employees: new Map(),
+          rows: [],
+          customer: r.jobcode1,
+          apKey,
+          estimator: r.estimator,
+        };
+        utJobAccs.set(accKey, acc);
+      }
+      addHours(acc, r, idx);
+      return;
+    }
+    const customer = r.jobcode1 || '(blank)';
+    let jobs = custs.get(customer);
+    if (!jobs) {
+      jobs = new Map();
+      custs.set(customer, jobs);
+    }
+    let job = jobs.get(r.jobcode2);
+    if (!job) {
+      job = { jobcode2: r.jobcode2, byDate: new Map(), total: 0, employees: new Map(), rows: [] };
+      jobs.set(r.jobcode2, job);
+    }
+    addHours(job, r, idx);
   });
 
   const toRecord = (m: Map<string, number>): Record<string, number> => {
@@ -252,6 +301,22 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
     }
     return rec;
   };
+
+  /** Employee rows of one job, in first-seen order, with their typed cells. */
+  const employeeRows = (rowId: string, emps: Map<string, EmpAcc>): PbjEmployeeRow[] =>
+    [...emps.values()]
+      .sort((a, b) => a.firstIndex - b.firstIndex)
+      .map((e) => {
+        const rowEdit = edits[pbjEmployeeRowId(rowId, e.username)] ?? {};
+        return {
+          username: e.username,
+          byDate: toRecord(e.byDate),
+          total: round2(e.total),
+          qbHours: qbHours[`${rowId}\u0000${e.username}`] ?? null,
+          onCalendar: rowEdit.onCalendar ?? '',
+          notes: rowEdit.notes ?? '',
+        };
+      });
 
   const grandByDateMap = new Map<string, number>();
   let grandTotal = 0;
@@ -272,7 +337,15 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
           const match = apKey && !isOffice ? eventByApKey.get(apKey) : undefined;
 
           // Round 6 §5.1 — `TimeNavi row {n}` (MATCH semantics).
-          const onCalendar = isOffice ? '-' : match ? formatTimeNaviRow(match.sheetRow) : 'NOT ON CALENDAR';
+          // Round 12 — a typed value wins; the computed one comes back when cleared.
+          const onCalendar =
+            edit.onCalendar !== undefined
+              ? edit.onCalendar
+              : isOffice
+                ? '-'
+                : match
+                  ? formatTimeNaviRow(match.sheetRow)
+                  : 'NOT ON CALENDAR';
           // An edited AP# re-resolves the estimator from the matched event
           // (acceptance §10.3); otherwise the enriched-timesheet value rules.
           const baseEstimator = job.rows[0]?.estimator ?? '#N/A';
@@ -376,14 +449,7 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
             dbOverride,
           };
 
-          const employees: PbjEmployeeRow[] = [...job.employees.values()]
-            .sort((a, b) => a.firstIndex - b.firstIndex)
-            .map((e) => ({
-              username: e.username,
-              byDate: toRecord(e.byDate),
-              total: round2(e.total),
-              qbHours: qbHours[`${id}\u0000${e.username}`] ?? null,
-            }));
+          const employees = employeeRows(id, job.employees);
 
           for (const [iso, v] of job.byDate) {
             custByDate.set(iso, (custByDate.get(iso) ?? 0) + v);
@@ -407,12 +473,15 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
           };
         });
 
+      const custEdit = edits[pbjCustomerRowId(customer)] ?? {};
       return {
         customer,
         byDate: toRecord(custByDate),
         total: round2(custTotal),
         jobs,
         colorHex: jobs[0]?.colorHex ?? null,
+        onCalendar: custEdit.onCalendar ?? '',
+        notes: custEdit.notes ?? '',
       };
     });
 
@@ -481,7 +550,7 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
      * if it is on this week's calendar (timesheet hours already put it in the
      * main pivot, above). Every section, UT included.
      */
-    if (row.percent === 1 && !onCalendar) continue;
+    if (row.percent === 1 && !onCalendar && !utJobAccs.has(row.apKey)) continue;
     if (row.section !== 'ut' && row.percent !== 1) {
       // NV pivot/balances rows below 100%: pivot rows carry only when partially
       // paid; a balances row carries unless it is finished.
@@ -570,43 +639,86 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
     });
   }
 
-  // UT timesheet (`sourceEntity: 'UT'`) jobs also seed UT PAYROLL when not already present.
-  for (const r of enriched) {
-    if (r.sourceEntity !== 'UT' || r.hours === 0) continue;
-    const apKey = r.apKey;
-    if (!apKey || apKey === 'OFFICE' || seenUtAp.has(apKey) || seenBalancesAp.has(apKey)) continue;
-    seenUtAp.add(apKey);
-    const match = eventByApKey.get(apKey);
-    const lead = leadFromTitle(match?.row.event ?? null);
-    const names = jobDisplayPair(apKey, {
-      ...nameSources,
-      eventTitle: match?.row.event ?? null,
-    });
-    const live = liveLink(apKey);
-    utSeeds.push({
-      id: `ut:${apKey}`,
-      customer:
-        resolveCarriedCustomer(apKey, 'ut', names.customerName, { flag: false }) ||
-        r.jobcode1 ||
-        '(blank)',
-      job: names.poLabel || r.jobcode2,
-      apKey,
-      estimator: r.estimator,
-      crewLead: lead.display,
-      woOverride: null,
-      woPct: null,
-      percent: live.percent,
-      livePercent: live.percent,
-      percentOverride: false,
-      excludedFromPayroll: false,
-      notes: paidNote(apKey),
-      colorHex: colorByEstimator.get(r.estimator) ?? null,
-      onCalendar: onCalendarFor(apKey),
-    });
+  /**
+   * Round 12 — Utah timesheet jobs. A job already seeded above (carried from
+   * input #8, or on the Utah calendar) gets its hours attached to that row;
+   * any other Utah job with hours gets a row of its own, AP# or not.
+   */
+  for (const acc of utJobAccs.values()) {
+    const apKey = acc.apKey;
+    let seed =
+      apKey !== null ? [...utSeeds, ...balancesSeeds].find((x) => x.apKey === apKey) : undefined;
+    if (!seed) {
+      const isOffice = apKey === 'OFFICE';
+      const match = apKey && !isOffice ? eventByApKey.get(apKey) : undefined;
+      const lead = leadFromTitle(match?.row.event ?? null);
+      const names = jobDisplayPair(apKey, {
+        ...nameSources,
+        eventTitle: match?.row.event ?? null,
+      });
+      const live = liveLink(isOffice ? null : apKey);
+      seed = {
+        id: apKey !== null ? `ut:${apKey}` : `ut:ts:${acc.customer}\u0000${acc.jobcode2}`,
+        customer:
+          (apKey && !isOffice
+            ? resolveCarriedCustomer(apKey, 'ut', names.customerName, { flag: false })
+            : '') ||
+          acc.customer ||
+          '(blank)',
+        job: (apKey && !isOffice ? names.poLabel : '') || acc.jobcode2,
+        apKey,
+        estimator: acc.estimator,
+        crewLead: isOffice ? 'HOURLY' : lead.display,
+        woOverride: null,
+        woPct: null,
+        percent: live.percent,
+        livePercent: live.percent,
+        percentOverride: false,
+        excludedFromPayroll: false,
+        notes: isOffice ? '' : paidNote(apKey),
+        colorHex: null,
+        onCalendar: isOffice ? '-' : onCalendarFor(apKey),
+      };
+      seenUtAp.add(apKey ?? seed.id);
+      utSeeds.push(seed);
+    }
+    seed.byDate = toRecord(acc.byDate);
+    seed.total = round2(acc.total);
+    seed.employees = employeeRows(seed.id, acc.employees);
   }
 
-  const balances = orderManualSection(applyManualState(balancesSeeds, input.balancesState));
-  const utPayroll = orderManualSection(applyManualState(utSeeds, input.utState));
+  /**
+   * Round 12 — what the stored edits cannot know on their own:
+   *  - the row's fill follows its CURRENT estimator, so a row added by hand
+   *    picks up its color the moment an estimator is typed (and a re-assigned
+   *    job changes color with it);
+   *  - `On Calendar?` follows the row's CURRENT AP# unless something was typed
+   *    into the cell.
+   */
+  const finishManualRows = (rows: ManualSectionRow[], state: ManualSectionState): ManualSectionRow[] =>
+    rows.map((r) => {
+      const typedOnCalendar = state.edits[r.id]?.onCalendar !== undefined;
+      const lookupKey = r.apKey ? (normalizeApInput(r.apKey) ?? r.apKey) : null;
+      return {
+        ...r,
+        colorHex: colorByEstimator.get(r.estimator.trim().toUpperCase()) ?? null,
+        onCalendar: typedOnCalendar
+          ? r.onCalendar
+          : lookupKey === 'OFFICE'
+            ? '-'
+            : lookupKey
+              ? onCalendarFor(lookupKey)
+              : (r.onCalendar ?? ''),
+      };
+    });
+
+  const balances = orderManualSection(
+    finishManualRows(applyManualState(balancesSeeds, input.balancesState), input.balancesState),
+  );
+  const utPayroll = orderManualSection(
+    finishManualRows(applyManualState(utSeeds, input.utState), input.utState),
+  );
+  const grandEdit = edits[PBJ_GRAND_ROW_ID] ?? {};
 
   const grandByDate: Record<string, number> = {};
   for (const iso of dateIsos) {
@@ -623,6 +735,8 @@ export function buildPivotByJob(input: PivotByJobInput): PivotByJobModel {
     grandTotal: round2(grandTotal),
     balances,
     utPayroll,
+    grandOnCalendar: grandEdit.onCalendar ?? '',
+    grandNotes: grandEdit.notes ?? '',
     unresolvedCarriedCustomers,
   };
 }

@@ -207,6 +207,10 @@ const PIVOT_FIELD_LABELS: Record<string, string> = {
   job: 'Job',
   estimator: 'Estimator',
   qbHours: 'QB Hrs',
+  onCalendar: 'On Calendar?',
+  hoursNote: 'Hours note',
+  customerNotes: 'Notes (customer row)',
+  customerOnCalendar: 'On Calendar? (customer row)',
 };
 
 export function collectPivotDefaults(model: PivotByJobModel): DefaultsMap {
@@ -246,6 +250,10 @@ export function collectPivotDefaults(model: PivotByJobModel): DefaultsMap {
     m.set(keyOf(r.id, 'job'), r.job);
     m.set(keyOf(r.id, 'estimator'), r.estimator);
     m.set(keyOf(r.id, 'excludedFromPayroll'), r.excludedFromPayroll ? 'off payroll' : 'on payroll');
+    // Round 12 — Utah jobs with timesheet hours carry employee rows too.
+    for (const e of r.employees ?? []) {
+      m.set(keyOf(`${r.id}${SEP}${e.username}`, 'qbHours'), fmtNum(e.qbHours ?? e.total));
+    }
   }
   return m;
 }
@@ -260,7 +268,9 @@ export function collectPivotLabels(model: PivotByJobModel): Map<string, string> 
     }
   }
   for (const r of [...model.balances, ...model.utPayroll]) {
-    m.set(r.id, [r.apKey, `${r.customer} ${r.job}`.trim()].filter(Boolean).join(' · ') || r.id);
+    const label = [r.apKey, `${r.customer} ${r.job}`.trim()].filter(Boolean).join(' · ') || r.id;
+    m.set(r.id, label);
+    for (const e of r.employees ?? []) m.set(`${r.id}${SEP}${e.username}`, `${label} · ${e.username}`);
   }
   return m;
 }

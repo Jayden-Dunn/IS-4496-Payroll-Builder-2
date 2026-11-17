@@ -51,13 +51,21 @@ rows and layout drift are tolerated; parse problems show up as a friendly error 
 Everything else (Last % Paid, QBO Job Name, In QBO Time?, Job Total $, $ Difference, Invoice Date,
 Date Difference, the pivot, and the Exceptions list) recomputes live.
 
-Last % Paid comes from last week's workbook (slot 8, its `Pivot by Job` % of Completion for the
-AP#) and, failing that, from the next-older % in the calendar Description — skipping "no pay" lines
-and this week's own line. A Description with only this week's entry leaves it blank.
+Last % Paid is the last percentage the job was actually paid at. It comes from last week's workbook
+(slot 8, its `Pivot by Job` % of Completion for the AP#) and, failing that, from the calendar
+Description: the most recent % below this week's line, skipping "no pay" weeks, 0% and HOURLY weeks.
+When the only earlier entries are HOURLY it reads `HOURLY`; a Description with only this week's
+entry leaves it blank. A 0% in slot 8 is treated as a no-pay week, so the calendar answers instead.
 
 On **Pivot by Job**, Notes (default `*PAID XX% LAST WK*`), WO Override, WO% (HOURLY jobs included),
 % of Completion and Estimator are editable on every row, including the no-hours rows below the Grand
-Total. A blank WO Override shows `suggest $X` (job total × the WO%) as a hint; the hint is not written
+Total. The **Notes** and **On Calendar?** columns take typed text in every cell — job rows, customer
+rows, employee rows and the Grand Total row. On a job row, clearing a typed On Calendar? brings the
+calendar lookup back. A row added by hand takes its estimator's color as soon as one is typed.
+
+Utah timesheet hours (slot 2) show under **UT PAYROLL**: each Utah job with hours gets its hours by
+day and one row per employee, the same way a Nevada job does in the pivot above. They stay out of
+the NV tree and its Grand Total, because the payroll side pays Utah from that section. A blank WO Override shows `suggest $X` (job total × the WO%) as a hint; the hint is not written
 to the .xlsx. Every typed value is written to the download — the integration suite exports a set of
 edits, reads the file back, and re-reads it as next week's slot 8 to prove it.
 
@@ -175,7 +183,7 @@ Both harnesses compile to gitignored folders, so build them fresh before you
 run them — an old build silently passing is the one trap here.
 
 ```sh
-# 359 unit assertions
+# 378 unit assertions
 rm -rf .selftest && npx tsc src/lib/__selftest__.ts --outDir .selftest \
   --module commonjs --target es2022 --moduleResolution node \
   --skipLibCheck --esModuleInterop --strict false
